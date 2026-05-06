@@ -138,12 +138,19 @@ fn decode_fixtures_runs_corpus() {
     );
 }
 
+/// Workspace root resolved from the app crate's `CARGO_MANIFEST_DIR`.
+/// `m0-acceptance` resolves `core/fixtures/asm/m0_smoke.asm` relative
+/// to the process cwd, so tests that exercise it set
+/// `Command::current_dir(workspace_root())`.
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
 /// Path to `core/fixtures/asm/m0_smoke.asm` resolved relative to the
 /// app crate's manifest dir at compile time so the test works
 /// regardless of cwd.
 fn smoke_asm_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
+    workspace_root()
         .join("core")
         .join("fixtures")
         .join("asm")
@@ -276,16 +283,120 @@ fn assemble_smoke_when_asar_missing() {
 }
 
 #[test]
-fn export_spc_smoke_writes_stub() {
+fn export_spc_smoke_with_assembled_aram() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip export_spc_smoke_with_assembled_aram: asar not resolved");
+        return;
+    }
+
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("spc.json");
-    let out = run_with_arg_path(&["export-spc-smoke"], "--out", &path);
-    assert!(out.status.success(), "{:?}", out);
-    let v = read_json(&path);
+    let assemble_report = dir.path().join("a.json");
+    let driver_bin = dir.path().join("driver.bin");
+    let spc_report = dir.path().join("spc.json");
+    let smoke_spc = dir.path().join("smoke.spc");
+
+    // Step 1: assemble the smoke .asm into driver.bin.
+    let out = Command::new(bin())
+        .args(["assemble-smoke", "--source"])
+        .arg(smoke_asm_path())
+        .args(["--out"])
+        .arg(&assemble_report)
+        .args(["--out-image"])
+        .arg(&driver_bin)
+        .output()
+        .expect("run sfcwc");
+    assert!(
+        out.status.success(),
+        "assemble failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Step 2: export-spc-smoke against driver.bin.
+    let out = Command::new(bin())
+        .args(["export-spc-smoke", "--aram"])
+        .arg(&driver_bin)
+        .args(["--out"])
+        .arg(&spc_report)
+        .args(["--out-spc"])
+        .arg(&smoke_spc)
+        .arg("--verify-structure")
+        .output()
+        .expect("run sfcwc");
+    assert!(
+        out.status.success(),
+        "export-spc-smoke failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Report invariants.
+    let v = read_json(&spc_report);
     assert_envelope(&v, "spc_export");
-    assert_eq!(v["status"], "not_run");
-    assert_eq!(v["verified_structure"], false);
-    assert_eq!(v["initial_state"]["pc"], 0);
+    assert_eq!(v["status"], "ok");
+    assert_eq!(v["verified_structure"], true);
+    assert_eq!(v["file_size_bytes"], 66048);
+    assert_eq!(v["initial_state"]["pc"], 0x0200);
+    assert_eq!(v["initial_state"]["sp"], 0xEF);
+    assert_eq!(v["initial_state"]["a"], 0);
+    assert_eq!(v["initial_state"]["psw"], 0);
+    let spc_sha = v["spc_file_sha256"].as_str().expect("spc_file_sha256 set");
+    assert_eq!(spc_sha.len(), 64);
+
+    // SPC byte invariants.
+    let spc_bytes = std::fs::read(&smoke_spc).expect("read smoke.spc");
+    assert_eq!(spc_bytes.len(), 66048);
+    assert_eq!(
+        &spc_bytes[0..0x21],
+        b"SNES-SPC700 Sound File Data v0.30",
+        "SPC magic must match"
+    );
+    assert_eq!(spc_bytes[0x23], 0x1B, "ID666 indicator: absent");
+    assert_eq!(spc_bytes[0x24], 0x1E, "minor version 30");
+    assert_eq!(&spc_bytes[0x25..0x27], &[0x00, 0x02], "PC = $0200 LE");
+    assert_eq!(spc_bytes[0x2B], 0xEF, "SP");
+    assert_eq!(spc_bytes[0x1016C], 0x60, "DSP $6C (FLG)");
+    // Sentinel bytes from the assembled ARAM at file offset 0x100 + 0x200.
+    assert_eq!(
+        &spc_bytes[0x300..0x303],
+        &[0x00, 0x2F, 0xFD],
+        "smoke ARAM sentinel"
+    );
+}
+
+#[test]
+fn export_spc_smoke_when_aram_missing() {
+    let dir = TempDir::new().unwrap();
+    let report_path = dir.path().join("spc.json");
+    let spc_path = dir.path().join("smoke.spc");
+    let bogus_aram = dir.path().join("does-not-exist.bin");
+
+    let out = Command::new(bin())
+        .args(["export-spc-smoke", "--aram"])
+        .arg(&bogus_aram)
+        .args(["--out"])
+        .arg(&report_path)
+        .args(["--out-spc"])
+        .arg(&spc_path)
+        .output()
+        .expect("run sfcwc");
+    assert!(
+        out.status.success(),
+        "expected failure-as-data exit 0: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let v = read_json(&report_path);
+    assert_envelope(&v, "spc_export");
+    assert_eq!(v["status"], "error");
+    let err = v["error"].as_str().expect("error string set");
+    assert!(
+        err.contains("aram input missing"),
+        "error should mention missing aram: {err}"
+    );
+    assert!(
+        !spc_path.exists(),
+        "smoke.spc must not be created when aram is missing"
+    );
 }
 
 #[test]
@@ -302,10 +413,21 @@ fn calibrate_oracle_writes_stub() {
 }
 
 #[test]
-fn m0_acceptance_writes_all_reports_and_manifest() {
+fn m0_acceptance_full_chain() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip m0_acceptance_full_chain: asar not resolved");
+        return;
+    }
+
     let dir = TempDir::new().unwrap();
     let out_dir = dir.path().join("m0");
-    let out = run_with_arg_path(&["m0-acceptance"], "--out", &out_dir);
+    let out = Command::new(bin())
+        .args(["m0-acceptance", "--out"])
+        .arg(&out_dir)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run sfcwc");
     assert!(
         out.status.success(),
         "m0-acceptance failed: stderr={}",
@@ -325,7 +447,10 @@ fn m0_acceptance_writes_all_reports_and_manifest() {
         assert!(p.is_file(), "missing {name}");
         assert_envelope(&read_json(&p), ty);
     }
+    assert!(out_dir.join("driver.bin").is_file(), "missing driver.bin");
+    assert!(out_dir.join("smoke.spc").is_file(), "missing smoke.spc");
 
+    // Manifest envelope and field shape.
     let manifest_path = out_dir.join("manifest.json");
     let manifest = read_json(&manifest_path);
     assert_envelope(&manifest, "m0_manifest");
@@ -342,13 +467,39 @@ fn m0_acceptance_writes_all_reports_and_manifest() {
             "manifest.{field} should be a string path"
         );
     }
+
+    // assemble-report should report status: ok with the locked sha.
+    let assemble = read_json(&out_dir.join("assemble-report.json"));
+    assert_eq!(assemble["status"], "ok");
+    assert_eq!(assemble["output_bytes"], 65536);
+    let driver_sha = assemble["output_image_sha256"]
+        .as_str()
+        .expect("output_image_sha256 set");
+    assert_eq!(driver_sha.len(), 64);
+
+    // spc-export should report status: ok and structure verified.
+    let spc = read_json(&out_dir.join("spc-export-report.json"));
+    assert_eq!(spc["status"], "ok");
+    assert_eq!(spc["verified_structure"], true);
+    assert_eq!(spc["file_size_bytes"], 66048);
 }
 
 #[test]
-fn aram_map_in_acceptance_sums_to_total() {
+fn aram_map_in_acceptance_partitions_total() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip aram_map_in_acceptance_partitions_total: asar not resolved");
+        return;
+    }
+
     let dir = TempDir::new().unwrap();
     let out_dir = dir.path().join("m0");
-    let out = run_with_arg_path(&["m0-acceptance"], "--out", &out_dir);
+    let out = Command::new(bin())
+        .args(["m0-acceptance", "--out"])
+        .arg(&out_dir)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run sfcwc");
     assert!(out.status.success(), "{:?}", out);
     let v = read_json(&out_dir.join("aram-map.json"));
     let total = v["total_aram"].as_u64().unwrap();
@@ -359,8 +510,31 @@ fn aram_map_in_acceptance_sums_to_total() {
         .iter()
         .map(|r| r["bytes"].as_u64().unwrap())
         .sum();
-    assert_eq!(used + free, total);
+    // M0.4 semantics: regions partition ARAM (sum to total).
+    assert_eq!(used, total, "regions must partition total ARAM");
     assert_eq!(total, 65536);
+
+    // Smoke driver_code region: $0201..$0202 (NOP byte coincides with
+    // pre-fill so the first nonzero byte is the BRA opcode at $0201).
+    let driver = v["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "driver_code")
+        .expect("driver_code region present");
+    assert_eq!(driver["start"], "0x0201");
+    assert_eq!(driver["end"], "0x0202");
+    assert_eq!(driver["bytes"], 2);
+
+    // free_bytes equals sum of free regions.
+    let claimed_free: u64 = v["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "free")
+        .map(|r| r["bytes"].as_u64().unwrap())
+        .sum();
+    assert_eq!(free, claimed_free);
 }
 
 #[test]

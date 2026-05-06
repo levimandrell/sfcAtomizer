@@ -7,14 +7,19 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use sfc_atomizer_core::aram::{map_from_image, ARAM_LEN};
 use sfc_atomizer_core::asm::{
-    sha256_hex_file, AsarBackend, AssembleError, AssembleInput, AssemblerBackend,
+    sha256_hex, sha256_hex_file, AsarBackend, AssembleError, AssembleInput, AssemblerBackend,
 };
 use sfc_atomizer_core::brr_fixtures::{run_fixture, M0_RAW_DECODE_FIXTURES};
 use sfc_atomizer_core::report::{
     AramMapReport, AssembleReport, AssembleStatus, BrrFixtureReport, CalibrationReport,
-    DoctorReport, DoctorStatus, DoctorTools, M0Manifest, RustInfo, SpcExportReport, ToolStatus,
-    SCHEMA_VERSION,
+    DoctorReport, DoctorStatus, DoctorTools, M0Manifest, RustInfo, SpcExportReport,
+    SpcInitialState, SpcStatus, ToolStatus, SCHEMA_VERSION,
+};
+use sfc_atomizer_core::spc::{
+    build_smoke_image, verify_structure, SpcCpuState, SpcImage, SMOKE_CPU_STATE, SPC_ARAM_SIZE,
+    SPC_FILE_SIZE,
 };
 use sfc_atomizer_core::tools::{self, ResolvedTool, ToolSource};
 use thiserror::Error;
@@ -52,10 +57,18 @@ enum Command {
         #[arg(long, default_value = "build/m0/driver.bin")]
         out_image: PathBuf,
     },
-    /// Smoke-test SPC export (M0.1: stub report).
+    /// Wrap an assembled 64 KB ARAM image in an SPC v0.30 file with
+    /// the M0 smoke initial-state contract (SPEC §19.3).
     ExportSpcSmoke {
+        #[arg(long, default_value = "build/m0/driver.bin")]
+        aram: PathBuf,
         #[arg(long, default_value = "build/m0/spc-export-report.json")]
         out: PathBuf,
+        #[arg(long, default_value = "build/m0/smoke.spc")]
+        out_spc: PathBuf,
+        /// Re-read the produced SPC and assert structural invariants.
+        #[arg(long)]
+        verify_structure: bool,
     },
     /// Run the oracle calibration harness (M0.1: stub report).
     CalibrateOracle {
@@ -105,7 +118,12 @@ fn run(cli: Cli) -> Result<(), CliError> {
             out,
             out_image,
         } => cmd_assemble_smoke(&source, &out, &out_image),
-        Command::ExportSpcSmoke { out } => cmd_export_spc_smoke(&out),
+        Command::ExportSpcSmoke {
+            aram,
+            out,
+            out_spc,
+            verify_structure,
+        } => cmd_export_spc_smoke(&aram, &out, &out_spc, verify_structure),
         Command::CalibrateOracle { oracle, out } => cmd_calibrate_oracle(oracle.as_deref(), &out),
         Command::M0Acceptance { out } => cmd_m0_acceptance(&out),
     }
@@ -424,11 +442,144 @@ fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("").trim()
 }
 
-fn cmd_export_spc_smoke(out: &Path) -> Result<(), CliError> {
-    let report = SpcExportReport::stub();
-    write_json(out, &report)?;
-    eprintln!("export-spc-smoke: wrote {}", out.display());
+fn cmd_export_spc_smoke(
+    aram_path: &Path,
+    report_out: &Path,
+    spc_out: &Path,
+    verify: bool,
+) -> Result<(), CliError> {
+    let mut report = SpcExportReport::stub();
+    report.output_path = Some(spc_out.display().to_string());
+
+    // Read the ARAM input.
+    let aram_bytes = match std::fs::read(aram_path) {
+        Ok(b) => b,
+        Err(e) => {
+            report.status = SpcStatus::Error;
+            report.error = Some(format!(
+                "aram input missing at {}: {e} (run assemble-smoke first)",
+                aram_path.display()
+            ));
+            write_json(report_out, &report)?;
+            eprintln!(
+                "export-spc-smoke: aram input missing at {} (run assemble-smoke first); report -> {}",
+                aram_path.display(),
+                report_out.display()
+            );
+            return Ok(());
+        }
+    };
+
+    if aram_bytes.len() != SPC_ARAM_SIZE {
+        report.status = SpcStatus::Error;
+        report.error = Some(format!(
+            "aram input wrong size at {}: expected {} bytes, got {}",
+            aram_path.display(),
+            SPC_ARAM_SIZE,
+            aram_bytes.len()
+        ));
+        write_json(report_out, &report)?;
+        eprintln!(
+            "export-spc-smoke: aram input wrong size ({} B, expected {}); report -> {}",
+            aram_bytes.len(),
+            SPC_ARAM_SIZE,
+            report_out.display()
+        );
+        return Ok(());
+    }
+
+    let aram_sha = sha256_hex(&aram_bytes);
+    report.input_aram_sha256 = Some(aram_sha.clone());
+    report.aram_image_sha256 = Some(aram_sha.clone());
+
+    // Build the smoke SPC image (same ARAM, smoke CPU state, smoke DSP).
+    let img: SpcImage =
+        build_smoke_image(aram_bytes).expect("build_smoke_image rejected size we just checked");
+    let spc_bytes = img.to_bytes().expect("to_bytes on validated image");
+
+    // Write the .spc file.
+    if let Some(parent) = spc_out.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| CliError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+    }
+    std::fs::write(spc_out, &spc_bytes).map_err(|e| CliError::Io {
+        path: spc_out.to_path_buf(),
+        source: e,
+    })?;
+
+    let dsp_sha = sha256_hex(&img.dsp_regs);
+    let spc_file_sha = sha256_hex(&spc_bytes);
+
+    report.file_size_bytes = spc_bytes.len() as u64;
+    report.dsp_state_sha256 = Some(dsp_sha.clone());
+    report.spc_file_sha256 = Some(spc_file_sha.clone());
+    report.initial_state = cpu_to_initial_state(&img.cpu);
+
+    if verify {
+        match verify_structure(&spc_bytes) {
+            Ok(s) => {
+                let aram_match = s.aram_sha256 == aram_sha;
+                let cpu_match = s.cpu == SMOKE_CPU_STATE;
+                let dsp_match = s.dsp_sha256 == dsp_sha;
+                let size_match = s.file_size == SPC_FILE_SIZE;
+                if aram_match && cpu_match && dsp_match && size_match && s.magic_ok {
+                    report.verified_structure = true;
+                } else {
+                    report.verified_structure = false;
+                    report.error = Some(format!(
+                        "verify_structure mismatch (aram_match={aram_match}, cpu_match={cpu_match}, dsp_match={dsp_match}, size_match={size_match}, magic_ok={})",
+                        s.magic_ok
+                    ));
+                }
+            }
+            Err(e) => {
+                report.verified_structure = false;
+                report.error = Some(format!("verify_structure failed: {e}"));
+            }
+        }
+    }
+
+    let status = if report.error.is_none() {
+        SpcStatus::Ok
+    } else {
+        SpcStatus::Error
+    };
+    report.status = status;
+
+    write_json(report_out, &report)?;
+    let summary_tail = if verify {
+        if report.verified_structure {
+            "; structure verified".to_string()
+        } else {
+            "; structure verify FAILED".to_string()
+        }
+    } else {
+        String::new()
+    };
+    eprintln!(
+        "export-spc-smoke: wrote {} ({} B){}; report -> {}",
+        spc_out.display(),
+        spc_bytes.len(),
+        summary_tail,
+        report_out.display()
+    );
+
     Ok(())
+}
+
+fn cpu_to_initial_state(cpu: &SpcCpuState) -> SpcInitialState {
+    SpcInitialState {
+        pc: cpu.pc,
+        a: cpu.a,
+        x: cpu.x,
+        y: cpu.y,
+        psw: cpu.psw,
+        sp: cpu.sp,
+    }
 }
 
 fn cmd_calibrate_oracle(_oracle: Option<&Path>, out: &Path) -> Result<(), CliError> {
@@ -448,45 +599,81 @@ fn cmd_m0_acceptance(out_dir: &Path) -> Result<(), CliError> {
 
     let doctor_path = out_dir.join("doctor.json");
     let brr_path = out_dir.join("brr-fixture-report.json");
-    let aram_path = out_dir.join("aram-map.json");
     let assemble_path = out_dir.join("assemble-report.json");
+    let driver_bin = out_dir.join("driver.bin");
     let spc_path = out_dir.join("spc-export-report.json");
+    let smoke_spc = out_dir.join("smoke.spc");
+    let aram_map_path = out_dir.join("aram-map.json");
     let calibration_path = out_dir.join("calibration-report.json");
+    let manifest_path = out_dir.join("manifest.json");
 
+    // 1. Doctor.
     write_json(&doctor_path, &build_doctor_report(&workspace_root))?;
-    eprintln!("m0-acceptance: wrote {}", doctor_path.display());
+    eprintln!("m0-acceptance: doctor -> {}", doctor_path.display());
 
-    write_json(&brr_path, &BrrFixtureReport::stub())?;
-    eprintln!("m0-acceptance: wrote {}", brr_path.display());
+    // 2. Decode BRR fixtures.
+    cmd_decode_fixtures(&brr_path)?;
 
-    write_json(&aram_path, &AramMapReport::stub())?;
-    eprintln!("m0-acceptance: wrote {}", aram_path.display());
+    // 3. Assemble. Source is the canonical M0 smoke .asm relative to
+    // the workspace root (assumed to be cwd).
+    let smoke_asm = workspace_root
+        .join("core")
+        .join("fixtures")
+        .join("asm")
+        .join("m0_smoke.asm");
+    cmd_assemble_smoke(&smoke_asm, &assemble_path, &driver_bin)?;
 
-    write_json(&assemble_path, &AssembleReport::stub())?;
-    eprintln!("m0-acceptance: wrote {}", assemble_path.display());
+    // 4. Export SPC. Reads driver.bin from step 3; failure-as-data if
+    // assemble didn't produce one.
+    cmd_export_spc_smoke(&driver_bin, &spc_path, &smoke_spc, true)?;
 
-    write_json(&spc_path, &SpcExportReport::stub())?;
-    eprintln!("m0-acceptance: wrote {}", spc_path.display());
+    // 5. ARAM map. Real if assemble succeeded, stub otherwise.
+    let aram_report = match read_aram_image(&driver_bin) {
+        Some(img) => map_from_image(&img),
+        None => AramMapReport::stub(),
+    };
+    write_json(&aram_map_path, &aram_report)?;
+    eprintln!("m0-acceptance: aram-map -> {}", aram_map_path.display());
 
+    // 6. Calibrate-oracle (still stub at M0.4; lands in M0.5).
     write_json(&calibration_path, &CalibrationReport::stub())?;
-    eprintln!("m0-acceptance: wrote {}", calibration_path.display());
+    eprintln!(
+        "m0-acceptance: calibrate (stub) -> {}",
+        calibration_path.display()
+    );
 
+    // 7. Manifest.
     let manifest = M0Manifest {
         schema_version: SCHEMA_VERSION,
         report_type: M0Manifest::REPORT_TYPE.to_string(),
         generated_at: None,
         doctor_report: doctor_path.display().to_string(),
         brr_fixture_report: brr_path.display().to_string(),
-        aram_map_report: aram_path.display().to_string(),
+        aram_map_report: aram_map_path.display().to_string(),
         assemble_report: assemble_path.display().to_string(),
         spc_export_report: spc_path.display().to_string(),
         calibration_report: calibration_path.display().to_string(),
     };
-    let manifest_path = out_dir.join("manifest.json");
     write_json(&manifest_path, &manifest)?;
-    eprintln!("m0-acceptance: wrote {}", manifest_path.display());
+    eprintln!(
+        "m0-acceptance: wrote 7 reports + manifest -> {}",
+        manifest_path.display()
+    );
 
     Ok(())
+}
+
+/// Read a 64 KB ARAM image into a fixed array. Returns `None` if the
+/// file is missing or not exactly the right size — m0-acceptance
+/// uses that to decide between a real ARAM map and the stub.
+fn read_aram_image(path: &Path) -> Option<[u8; ARAM_LEN]> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() != ARAM_LEN {
+        return None;
+    }
+    let mut img = [0u8; ARAM_LEN];
+    img.copy_from_slice(&bytes);
+    Some(img)
 }
 
 // =============================================================================
