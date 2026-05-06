@@ -2,15 +2,12 @@
 
 ## Current milestone
 
-**M0 — Research harness — complete.** The producer side is locked:
-the BRR decoder is bit-exact on a 9-fixture corpus, asar produces a
-Mesen2-loadable 64 KB ARAM image at the addresses the compiler
-specifies, the SPC v0.30 exporter wraps that image with the M0 smoke
-state contract, the snes_spc oracle wrapper renders the smoke `.spc`
-to deterministic all-zero PCM, and `sfcwc m0-acceptance` writes a
-manifest whose `bundle.status` is `ok` (with all three optional tools
-resolved) or `degraded` (with one or more optional tools missing) on
-this development environment.
+**M0 complete; M1 contracts frozen.** All M1 technical contracts
+are now spec-locked (SPEC §16 v1 schema, §16.7 pitch + MIDI, §17.2
+audition, §19.2 loader protocol, §19.4 `module.bin` format, §20.1
+driver command protocol, §21 M1 acceptance with bundle.status
+semantics). Rust skeleton modules mirror the contracts shape-by-
+shape; M1.1 fills in `ProjectV1::validate` and the app shell.
 
 **M0 artifacts are producer-side only.** M1 owns the first audible
 driver. The NOP+BRA M0 smoke driver (`core/fixtures/asm/m0_smoke.asm`)
@@ -18,6 +15,57 @@ is intentionally non-functional and will be replaced wholesale at
 M1.5 — do not reuse it as a base for M1.5 driver work.
 
 ## Last pass
+
+**Pass M1.0 — M1 contracts + cleanup.**
+
+- Phase A (M0 cleanup): SPEC §23 question 2 struck (resolved at
+  M0.5/M0.6 — process-boundary oracle, host never links snes_spc).
+  STATUS.md: M0 frozen acceptance SHAs promoted from prose into a
+  named-constants block; producer-side caveat added to current
+  milestone.
+- Phase B1 (§16): Project file format restructured into v1 with
+  subsections §16.1 format basics, §16.2 root, §16.3 master_echo,
+  §16.4 sample_pool entries (source / loop / playback, ADSR-vs-
+  GAIN tagged union, constant-power pan mapping formula), §16.5
+  m1 block, §16.6 cross-field validation rules, §16.7 pitch +
+  MIDI convention, §16.8 migration + acceptance.
+- Phase B2 (§17.2 new): Audition path locks decoded-BRR PCM16
+  mono WAV at `build/m1/previews/<sample_id>_decoded_brr.wav`.
+  Trap: must play decoded BRR, not the original source.
+- Phase B3 (§19.2): IPL upload protocol byte-locked. Port direction
+  convention, `$BB` ready signature, `$CC` kickoff, `$2141 = 0`
+  jump-to-entrypoint, 8-bit-only writes, IRQ/NMI disabled around
+  upload, six bounded host-side spin-count constants.
+- Phase B4 (§19.4 new): `module.bin` sparse-block format. 64-byte
+  header (magic `"SFCWCM1\0"`, schema_version 1, content SHA-256
+  with the 32 SHA bytes themselves zeroed as the self-reference
+  workaround), 8-byte block entries, block rules forbidding
+  `$00F0..$00FF` and preferring `≥ $0200`.
+- Phase B5 (§20.1 new): Driver command protocol for the
+  `sample_basic` profile. Ready signature `$A5 $5A $01
+  status_flags`; status-flags bit map (bits 0–4 used; 5–7 reserved);
+  command_token discipline; commands `$01`/`$02`/`$7F`; acks
+  `$81`/`$82`/`$FF`/`$EE`.
+- Phase B6 (§21 M1): Acceptance bullets refined to cross-reference
+  §16.7, §17.2, §19.4, §20.1, the bundle.status semantics from
+  M0, and the .spc/.sfc parity rule (allocated regions
+  bit-for-bit; free regions not parity-significant in `.sfc`).
+- Phase C (Rust skeletons): Five new `core::` modules — `project`
+  (full v1 type tree, `validate` is `todo!()`), `module_image`
+  (`ModuleHeader` 64 B + `ModuleBlockEntry` 8 B with
+  `std::mem::offset_of!` layout tests), `driver_proto`
+  (`DriverCommand` / `DriverAck` enums, `StatusFlags` newtype,
+  ready-signature constants, host_timeouts), `pitch`
+  (real implementation of the §16.7 formula, 10 tests), and
+  `echo_validation` (three SPEC §16.6 rules with multi-error
+  collection, 8 tests).
+
+133 tests across the workspace — 104 core unit + 10 BRR fixture
+integration + 19 app CLI integration. `cargo check`,
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+and `cargo test` all green.
+
+## Previous passes
 
 **Pass M0.6 — Calibration report + M0 acceptance bundle.**
 
@@ -422,6 +470,47 @@ test` all green.
   bytes alongside max_abs/rms; the bundle pulls it from one place
   rather than parsing the wrapper's report.
 
+### M1 contract decisions (M1.0)
+
+These are the M1 contract surfaces frozen at M1.0. Implementation
+details that change the byte values, formulas, or named fields are
+spec changes, not implementation choices.
+
+- **module.bin format** (SPEC §19.4): magic `"SFCWCM1\0"`,
+  `schema_version = 1`, 64-byte header, 8-byte block entries,
+  little-endian throughout. Self-reference workaround:
+  `content_sha256_zeroed` lives in the header; the literal full-file
+  SHA-256 lives in the M1 manifest as `module_file_sha256`.
+- **Driver command bytes** (SPEC §20.1): commands `$01` STOP,
+  `$02` RESET_TO_IPL, `$7F` PING. Acks `$81` STOP_ACK, `$82`
+  RESET_ACK, `$FF` PING_ACK, `$EE` invalid. Ready signature
+  `$A5 $5A $01 <status_flags>`.
+- **Status flag bit map** (SPEC §20.1): bits 0–4 in use; bits 5–7
+  reserved must be zero. Surface lives in `core::driver_proto::StatusFlags`.
+- **Pitch formula and round-half-up** (SPEC §16.7): the SNES voice
+  pitch is a 14-bit clamped register; rounding is `floor(x + 0.5)`,
+  not banker's. M1 reference values: 32 kHz at root → `$1000`,
+  22050 Hz at root → `$0B06`. Implemented in `core::pitch`.
+- **MIDI convention** (SPEC §16.7): C4 = MIDI 60, A4 = MIDI 69 with
+  A4 tuning = 440 Hz. Project files store integer MIDI numbers, not
+  note strings.
+- **Project v1 schema scope** (SPEC §16): single sample, ADSR or
+  GAIN envelope, optional master echo + per-sample echo gate.
+  No tracks, no clips, no sequencer — those land at M1.5+ in a
+  forward-compatible schema bump.
+- **`.spc` / `.sfc` parity rule** (SPEC §21 M1): both exports use
+  the same canonical `aram_image` and the same driver entrypoint
+  `$0200`. Allocated regions match bit-for-bit. Free regions are
+  not parity-significant in `.sfc` because `$00F0–$00FF` is I/O,
+  `$0100–$01FF` is stack, and free ARAM is not part of the module.
+- **M1.3 audition path** (SPEC §17.2): decoded-BRR mono PCM16 WAV at
+  `build/m1/previews/<sample_id>_decoded_brr.wav`. Cross-platform;
+  no host audio engine in M1.
+- **Bounded host-side spin counts** (SPEC §19.2): six named
+  `WAIT_*_POLLS` constants so a missed handshake fails fast rather
+  than deadlocks the host. Surface lives in
+  `core::driver_proto::host_timeouts`.
+
 ### M0 frozen acceptance SHAs
 
 These three SHA-256s identify the M0 acceptance artifact set.
@@ -459,12 +548,7 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M1 — Single-sample basic playback** per SPEC §21. M1 deliverables
-include sample slot UI, WAV/AIFF/BRR import, root key, ADSR/GAIN,
-pan, echo enable, loop candidate finder, BRR preview, ARAM meter
-with prominent echo cost, project file v1 with migration
-scaffolding, and the Sample Pool view. M1 implementation passes
-will be re-briefed by PM under a fresh consultant-led plan; the M0
-producer-side foundations (BRR decoder, asar backend, SPC exporter,
-ARAM map, oracle wrapper boundary, bundle aggregation) are the
-locked input to that work.
+**M1.1 — Project v1 + Sample Pool data model + minimal app shell.**
+PM to brief. Fills in `ProjectV1::validate`, adds the project
+loader / saver, and stands up the M1 app shell skeleton against
+the contracts frozen here at M1.0.
