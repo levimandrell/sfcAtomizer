@@ -92,7 +92,7 @@ SPC700 assembly driver
   ├─ optional feature handlers (synth atom / SFX / game)
 ```
 
-Host: Rust. Driver: SPC700 assembly via WLA-DX (default); asar is a credible later option.
+Host: Rust. Driver: SPC700 assembly via asar for M0–M2. The assembler is invoked through an AssemblerBackend interface so WLA-DX can be added later if the project needs object-file linking, richer map files, or section-placement behavior that asar cannot provide cleanly. The compiler, not the assembler/linker, owns ARAM layout. The assembler emits code/data for addresses assigned by the ARAM packer. Build cache keys include assembler_backend, assembler version, SPC700 source hash, compiler version, and BRR encoder version.
 
 ---
 
@@ -108,6 +108,8 @@ Profiles are presets over granular flags: `sample_basic`, `sample_fx`, `synth_st
 
 **Sample:** `sample_playback`, `sample_multisample`, `sample_keysplit`, `sample_velocity_layers`, `sample_runtime_src_change`.
 
+> `sample_runtime_src_change` — selects a new source-directory entry for a voice before key-on; does not perform live SRCN swap on a sustained voice (which is unsafe at unaligned BRR block boundaries).
+
 **Envelope/expression:** `adsr`, `gain`, `volume_set`, `volume_slide`, `pan_set`, `pan_slide`, `pitch_set`, `pitch_slide`, `portamento`, `vibrato`, `tremolo`, `detune`, `noise_mode`, `pitch_modulation`, `surround_invert`.
 
 **Echo:** `echo_enable`, `echo_per_voice_mask`, `echo_static_params`, `echo_mid_song_param_changes`, `fir_filter_editing`.
@@ -119,6 +121,8 @@ Profiles are presets over granular flags: `sample_basic`, `sample_fx`, `synth_st
 **Voice allocation:** `voice_pair_allocator`, `voice_reservation`, `protected_music_pair`.
 
 **Game/runtime:** `sfx_queue`, `sfx_priority`, `sfx_one_channel_limit`, `sfx_uninterruptible_flag`, `music_ducking`, `async_loader_api`, `module_reload_api`.
+
+`async_loader_api` and `module_reload_api` are limited to whole-module replacement between songs or explicit game-state transitions. They do not support mid-song sample streaming, mid-song driver replacement, or runtime code overlay loading. Those remain on the Forbidden list.
 
 **Forbidden:** `runtime_sample_streaming`, `runtime_code_overlay_loader`, `runtime_dynamic_linker`, `arbitrary_wav_resynthesis`, `runtime_oscillator_engine`.
 
@@ -158,9 +162,19 @@ The driver build emits a manifest read by every other component (instrument edit
     "max_sources_note": "profile/tool policy; the ARAM packer enforces actual source-directory footprint",
     "max_dsp_writes_per_tick": 24,
     "min_keyoff_to_keyon_ticks": 1
+  },
+  "measured": {
+    "driver_code_bytes": 0,
+    "runtime_state_bytes": 0,
+    "source_directory_bytes": 0,
+    "assembler_backend": "asar"
   }
 }
 ```
+
+The `measured` block is populated by the build process and consumed by UI displays and the build cache.
+
+`max_dsp_writes_per_tick` is a compiler scheduling policy, not a hardware maximum. One logical S-DSP write means one target register update via $F2/$F3. The default soft budget is 24 logical writes/tick for M0–M2 to preserve interpreter headroom and avoid bursty event schedules. Later calibration may raise this per profile after cycle measurement. Compile reports show both the soft budget and measured peak writes/tick.
 
 ---
 
@@ -182,7 +196,7 @@ User edit → classify
 
 Debounce: drag = estimate only; note entry = fast sequence recompile; feature toggle = delayed full rebuild; manual Compile = exact full rebuild.
 
-Build cache keys: driver feature-set hash, assembler version, SPC700 source hash, compiler version, BRR encoder version.
+Build cache keys: driver feature-set hash, assembler_backend, assembler version, SPC700 source hash, compiler version, BRR encoder version.
 
 ---
 
@@ -307,9 +321,11 @@ Required: `synth_wavetable_morph`, `synth_paired_voice_crossfade`, `voice_pair_a
 
 Frame caps are guardrails, not hardware constants. The compiler may prune or cluster frames below the requested count to fit ARAM. **Frame count is a budget, not a promise to retain every authored frame.** Pruning decisions appear in the compile report.
 
+When frames are pruned or clustered, the compiler remaps morph automation onto the retained frame set and emits a report showing authored-frame → retained-frame mapping. No frame is dropped silently. Preview uses the retained compiled set, not the pre-pruned ideal set.
+
 ### 9.6 Per-level reports
 
-Every level's compile output includes voice cost, ARAM cost, post-decode quality, and emitted events. No level degrades silently when its budget is exceeded.
+Every level's compile output includes voice cost, ARAM cost, post-decode quality, and emitted events. No level degrades silently when its budget is exceeded. Per-level reports use the stable schema defined in §10.4.
 
 ---
 
@@ -320,6 +336,8 @@ The encoder is a core compiler component, not an implementation detail.
 ### 10.1 Implementation
 
 Rust-native encoder and decoder in the `core` crate. No external binary dependencies for the internal scoring path. Decoder is bit-exact relative to S-DSP BRR decode behavior including filter rounding and clamping. Encoder and decoder share a single fixture set; round-trip determinism is a unit-test gate. External validation against snes_spc lives in §16.
+
+Raw BRR decode equivalence is a bit-identical gate at M0 — no tolerance negotiation. Tolerances against the oracle for S-DSP voice render and full-module render are calibrated by the harness (§18) at M0 and recorded as provisional; they are not quality gates until M1 freezes the first accepted tolerance table (§21).
 
 #### Scoring modes
 
@@ -354,13 +372,25 @@ Try N phase rotations of the source cycle (e.g. N=16 or 32). BRR-encode each. Sc
 
 All loop quality, click, spectral, and waveform scoring is measured on the decoded BRR result. Reports include per-block BRR error, selected filter distribution, post-decode loop-click score, FFT-based spectral error weighted by perceptual band, HF-loss estimate, pre-emphasis parameters.
 
+Quality reports use stable field names so tests and UI consume a fixed schema:
+
+- `loop_click_score` — post-decode discontinuity at the loop boundary
+- `spectral_distance_db` — FFT spectral error, perceptually weighted
+- `hf_loss_db` — HF roll-off estimate vs ideal
+- `render_rms_error_db` — post-render PCM error vs ideal
+- `predictor_history_score` — loop-iteration predictor stability
+- `brr_filter_distribution` — per-filter block counts, 0–3
+
+Thresholds attached to these fields may tune over the calibration period (§18); field names are stable from M3 onward.
+
 ### 10.5 Pre-emphasis
 
 Pre-emphasis compensates for S-DSP gaussian-interpolation HF dulling. It is part of the compiler, not the runtime. Three presets:
 
 - **Off** — no pre-emphasis. Default for imported samples.
-- **Gentle** — modest high-shelf compensation (≈ +1.5 dB at 5 kHz). Allowed default for generated synth atoms only when the A/B preview makes the choice explicit.
-- **Strong** — more aggressive compensation for very dull material.
+- **Gentle** / **Strong** — see playback-frequency definitions below.
+
+Preset names describe the target playback result, not a fixed source-rate EQ curve. Gentle means roughly +1.5 dB compensation around 5 kHz in S-DSP voice-render output at the asset's root pitch. Strong means more aggressive compensation for very dull material. The compiler derives the source-rate pre-emphasis filter from the root key, intended pitch range, and render target, then validates the result across the instrument's compiled pitch range.
 
 Per-sample and per-atom selection. Applied before BRR encode. **Pre-emphasis is validated using S-DSP voice render mode** (§10.1), not raw BRR decode — the dulling it compensates for is interpolation behavior, not decode behavior. Preview plays the post-render result, not the ideal pre-emphasized waveform. Every pre-emphasis choice appears in the compile report.
 
@@ -491,19 +521,23 @@ When `bytecode_version` is bumped, older modules either continue to work (if the
 
 ### 15.1 Standard layout
 
+The first 512 bytes of ARAM are fixed CPU/runtime territory, not ordinary packer space:
+
 ```
-0000–????  SPC700 driver code
-????–????  zero page / stack / runtime state
-????–????  source directory
+0000–00EF  direct-page runtime variables
+00F0–00FF  SPC700 hardware registers / I/O / timers / DSP address/data ports; never allocated
+0100–01FF  hardware stack page; never allocated for driver code or data
+0200–????  SPC700 driver code and driver constant tables
+????–????  source directory (page-aligned for S-DSP DIR)
 ????–????  pitch tables
 ????–????  sequence bytecode
 ????–????  instrument metadata
 ????–????  BRR sample pool
 ????–????  generated synth atom pool
-????–FFFF  echo buffer (top of ARAM)
+????–FFFF  echo buffer (top of ARAM, if enabled)
 ```
 
-The packer prevents overlap and emits a hard error on collision.
+The packer prevents overlap and emits a hard error on collision. The top 64 bytes $FFC0–$FFFF are usable RAM only after the IPL ROM is unmapped; the driver/exporter must make that state explicit before placing data there.
 
 ### 15.2 ARAM report
 
@@ -512,13 +546,13 @@ The packer prevents overlap and emits a hard error on collision.
   "total_aram": 65536,
   "driver_code": 6144,
   "runtime_state": 512,
-  "source_directory": 384,
+  "source_directory": 512,
   "pitch_tables": 768,
   "sequence_data": 2401,
   "sample_brr_pool": 16820,
   "synth_atom_pool": 1242,
   "echo_buffer": 8192,
-  "free": 29073
+  "free": 28945
 }
 ```
 
@@ -533,6 +567,8 @@ Echo memory cost is `2 KB × EDL`, EDL 0–15.
 | 8 | 16 KB |
 | 12 | 24 KB |
 | 15 | 30 KB (~46% of ARAM) |
+
+When echo is disabled, the driver must set FLG echo-write-disable and must not rely on EDL=0 alone. Hardware EDL=0 still causes a 4-byte echo write region at ESA*0x100 if echo writeback is enabled; ESA=0, EDL=0 can corrupt $0000–$0003.
 
 Echo parameters (delay, feedback, FIR, volumes) are project-global and static. Per-voice echo enable/mask is allowed at any time. Mid-song parameter changes require `echo_mid_song_param_changes` and are out of default scope.
 
@@ -663,6 +699,12 @@ build/debug/atom_quality_report.html   per-atom scoring across all three modes (
 
 Debug output generation is fast and on by default; it can be disabled in `compiler` settings for batch builds.
 
+### 19.2 .sfc test ROM loader contract
+
+The `.sfc` test ROM includes a 65816-side loader stub responsible for the SPC700 upload protocol via the IPL ROM ($FFC0–$FFFF). The loader uploads the driver, source directory, sequence bytecode, BRR pools, and any other non-zero ARAM regions to the APU using the standard APU port handshake, then transfers control to the SPC700 entry address.
+
+The loader contract is exposed via `audio_symbols.inc` and `loader_stub_65816.asm` and is fully specified before M1 ships. Mid-load timing budget, port-handshake validation, and recovery on NAK are part of the contract; silent upload failure is forbidden.
+
 ---
 
 ## 20. Driver build strategy
@@ -677,18 +719,30 @@ Later optimization candidates (not in scope now): shared kernel + optional handl
 
 ### M0 — Research harness
 
-**Deliverables:** Rust BRR encoder/decoder; SPC700 hello-sample driver; minimal `.spc` and `.sfc` exporters; exact ARAM map report; oracle bridge to snes_spc; calibration harness scaffolding.
+**Deliverables:**
+
+- Rust toolchain bootstrap and project skeleton.
+- Rust BRR encoder + raw decoder in the core crate.
+- asar-backed minimal SPC700 hello-sample driver.
+- Minimal `.spc` and `.sfc` exporters; ARAM map report.
+- Oracle bridge spike against snes_spc (not gating).
+- Calibration harness scaffolding and report-format definition (provisional tolerances allowed).
 
 **Acceptance:**
 
 - Known WAV fixture encodes and decodes deterministically; byte-identical across runs.
 - Looped BRR atom round-trips through the decoder with legal loop alignment.
 - Encoder exposes per-block error, filter selection, shift, post-decode loop-click score.
-- Internal Rust decoder matches oracle fixtures within agreed tolerance.
+- Raw BRR decoder passes deterministic fixture tests with exact PCM equality for filter, shift/range, rounding, and clamp behavior. No tolerance negotiation; bit-identical or fail.
+- Oracle bridge can render a fixed fixture corpus through snes_spc and produce a calibration report.
+- The first calibration report records provisional tolerances for S-DSP voice render and full-module render. Provisional tolerances are not yet quality gates.
+- M1 freezes the first accepted tolerance table; regressions against it become CI failures from M1 onward.
 - A generated `.spc` renders successfully through snes_spc.
 - One looped BRR sample plays in an SPC player and the test ROM.
 
 M0 is complete only when internal decode, oracle render, ARAM layout, loop alignment, and SPC export all agree on deterministic fixtures. A BRR file playing is necessary but not sufficient.
+
+M0 is complete when the raw BRR decoder is byte-exact on fixtures, asar produces a Mesen2-loadable `.spc`, the ARAM packer rejects overlap, and the calibration harness produces a structured report — even if the report's tolerance numbers are provisional. WLA-DX, embedded snes_spc preview, and final S-DSP render equivalence are out of scope until later milestones.
 
 ### M1 — Sample mode
 
@@ -766,7 +820,7 @@ M0 is complete only when internal decode, oracle render, ARAM layout, loop align
 
 These are empirical and resolved through use, not design:
 
-1. Final atom quality thresholds — to be tuned via the calibration harness through listening tests.
+1. Final atom quality thresholds — to be tuned via the calibration harness through listening tests. Raw BRR decode is bit-identical at M0 (no tolerance); voice-render and full-module-render tolerances are provisional at M0 and frozen at M1 (§21).
 2. Whether to embed snes_spc directly for live preview or keep it as a validation-only oracle — decided after M0.
 3. Practical wavetable frame caps — the 32 / 64 / 96 / 128 numbers are provisional; empirical testing may move them.
 4. Whether a later version adds a free pre-emphasis EQ editor.
