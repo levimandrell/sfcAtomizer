@@ -95,10 +95,13 @@ pub fn import_audio(
     }
 
     let mut project = ProjectV1::load_from_path(project_path)?;
-    let project_dir = project_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    // `Path::parent` returns `Some("")` for a bare filename like
+    // `p.sfcproj.json`, which then fails to canonicalize. Treat
+    // empty parents the same as missing.
+    let project_dir = match project_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
 
     let mut metadata = audio::probe(audio_path)?;
     if let (AudioFormat::Brr, Some(rate)) = (metadata.format, options.brr_sample_rate_hz) {
