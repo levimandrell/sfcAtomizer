@@ -46,10 +46,42 @@ pub const ARAM_SIZE: u64 = 65536;
 pub struct AssembleInput {
     /// Source `.asm` file the assembler reads.
     pub source_path: PathBuf,
-    /// Path where the assembled 64 KB ARAM image should land.
+    /// Path where the assembled image should land.
     pub output_image_path: PathBuf,
     /// Working directory for the assembler invocation.
     pub working_dir: PathBuf,
+    /// Expected output size in bytes. Asar patches an existing file
+    /// in place, so the host pre-creates a zero-filled scratch of
+    /// this size. Defaults to [`ARAM_SIZE`] (64 KB) for the SPC700
+    /// ARAM-image workflow; M1.6 SFC export overrides to 256 KB+.
+    pub expected_output_size: u64,
+    /// Extra flags to pass to asar before the source/output args.
+    /// Defaults to `["--no-title-check", "--fix-checksum=off"]` —
+    /// the SPC700 invocation. SFC export overrides to
+    /// `["--no-title-check", "--fix-checksum=on"]` so the LoROM
+    /// header checksum + complement get filled.
+    pub extra_args: Vec<String>,
+}
+
+impl AssembleInput {
+    /// Default constructor matching the M0.3 SPC700 invocation:
+    /// 64 KB output, `--no-title-check --fix-checksum=off`.
+    pub fn for_spc700_aram(
+        source_path: PathBuf,
+        output_image_path: PathBuf,
+        working_dir: PathBuf,
+    ) -> Self {
+        Self {
+            source_path,
+            output_image_path,
+            working_dir,
+            expected_output_size: ARAM_SIZE,
+            extra_args: vec![
+                "--no-title-check".to_string(),
+                "--fix-checksum=off".to_string(),
+            ],
+        }
+    }
 }
 
 /// Successful assemble result. All fields populated on success.
@@ -130,21 +162,22 @@ impl AssemblerBackend for AsarBackend {
     }
 
     fn assemble(&self, input: &AssembleInput) -> Result<AssembleOutput, AssembleError> {
-        // 1. Pre-create a 64 KB zero-filled scratch file. asar will
-        //    patch this in place; the LoROM-mapped writes from the
-        //    .asm land at file-offset == ARAM-address.
+        // 1. Pre-create a zero-filled scratch file at the expected
+        //    output size; asar patches in place.
         if let Some(parent) = input.output_image_path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(AssembleError::Io)?;
             }
         }
-        let zeros = vec![0u8; ARAM_SIZE as usize];
+        let zeros = vec![0u8; input.expected_output_size as usize];
         std::fs::write(&input.output_image_path, &zeros).map_err(AssembleError::Io)?;
 
-        // 2. Invoke asar. Both flags are necessary; see module docs.
-        let output = Command::new(&self.asar_path)
-            .arg("--no-title-check")
-            .arg("--fix-checksum=off")
+        // 2. Invoke asar with caller-supplied extra args.
+        let mut cmd = Command::new(&self.asar_path);
+        for arg in &input.extra_args {
+            cmd.arg(arg);
+        }
+        let output = cmd
             .arg(&input.source_path)
             .arg(&input.output_image_path)
             .current_dir(&input.working_dir)
@@ -160,18 +193,19 @@ impl AssemblerBackend for AsarBackend {
             });
         }
 
-        // 3. Read assembled image and verify size. asar can silently
-        //    expand the file if `org` lands outside bank 0; that is
-        //    a hard error here.
+        // 3. Read assembled image and verify size against the
+        //    caller-declared expected output. asar can silently
+        //    expand the file if `org` lands outside the scratch
+        //    range; treat any size mismatch as hard error.
         let bytes =
             std::fs::read(&input.output_image_path).map_err(|e| AssembleError::OutputMissing {
                 path: input.output_image_path.clone(),
                 source: e,
             })?;
         let actual_size = bytes.len() as u64;
-        if actual_size != ARAM_SIZE {
+        if actual_size != input.expected_output_size {
             return Err(AssembleError::WrongOutputSize {
-                expected: ARAM_SIZE,
+                expected: input.expected_output_size,
                 actual: actual_size,
             });
         }

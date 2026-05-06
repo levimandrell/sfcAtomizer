@@ -16,6 +16,6 @@ sha2 = { workspace = true }
 # unused_crate_dependencies lint is allow-by-default so this is
 # harmless at the lint level.
 symphonia = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }

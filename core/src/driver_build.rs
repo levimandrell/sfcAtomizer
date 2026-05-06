@@ -150,11 +150,8 @@ pub fn build(input: DriverBuildInput<'_>) -> Result<DriverBuildOutput, DriverBui
     let backend = AsarBackend::from_resolution()?;
     let backend_version = backend.version().unwrap_or_else(|_| "unknown".to_string());
     let image_path = input.working_dir.join("m1_driver.aram.bin");
-    let asm_input = AssembleInput {
-        source_path: asm_dest,
-        output_image_path: image_path.clone(),
-        working_dir: input.working_dir.clone(),
-    };
+    let asm_input =
+        AssembleInput::for_spc700_aram(asm_dest, image_path.clone(), input.working_dir.clone());
     backend.assemble(&asm_input)?;
 
     let image = std::fs::read(&image_path).map_err(|source| DriverBuildError::Io {
