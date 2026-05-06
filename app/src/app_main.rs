@@ -20,9 +20,13 @@ use sfc_atomizer_core::brr_encoder::{encode as brr_encode, encode_looped, Encode
 use sfc_atomizer_core::driver_build::{build as driver_build, DriverBuildInput};
 use sfc_atomizer_core::import::{import_audio, ImportOptions};
 use sfc_atomizer_core::loop_finder::{find_loop_candidates, LoopCandidate, LoopFinderOptions};
+use sfc_atomizer_core::module_writer::{
+    parse_module_blocks, parse_module_header, project_blocks_to_aram,
+};
 use sfc_atomizer_core::packer::{pack as packer_pack, EncodedSample, PackInput};
 use sfc_atomizer_core::project::{ProjectV1, SampleSlot, ValidationError};
 use sfc_atomizer_core::report::{AramKind, AramMapReport};
+use sfc_atomizer_core::sfc_export::{export_sfc, SfcExportInput, MODULE_A_FILE_OFFSET};
 use sfc_atomizer_core::spc::build_m1_image;
 use sfc_atomizer_core::tools::resolve_snes_spc_oracle;
 
@@ -83,6 +87,12 @@ struct SfcwcApp {
     last_audible_summary: Option<String>,
     /// Severity of the last audible-verify run for color rendering.
     last_audible_ok: Option<bool>,
+
+    /// Path to the most recently compiled `.sfc` (M1.6).
+    last_compiled_sfc: Option<PathBuf>,
+    last_sfc_compile_summary: Option<String>,
+    last_sfc_verify_summary: Option<String>,
+    last_sfc_verify_ok: Option<bool>,
 
     // One-shot status message (e.g. "loaded /tmp/x.json").
     status_message: Option<String>,
@@ -448,6 +458,10 @@ impl SfcwcApp {
         let last_audible_summary = self.last_audible_summary.clone();
         let last_audible_ok = self.last_audible_ok;
         let has_compiled_spc = self.last_compiled_spc.is_some();
+        let last_sfc_compile_summary = self.last_sfc_compile_summary.clone();
+        let last_sfc_verify_summary = self.last_sfc_verify_summary.clone();
+        let last_sfc_verify_ok = self.last_sfc_verify_ok;
+        let has_compiled_sfc = self.last_compiled_sfc.is_some();
         egui::CentralPanel::default().show(ctx, |ui| {
             let Some(project) = self.project.as_mut() else {
                 ui.vertical_centered(|ui| {
@@ -478,6 +492,10 @@ impl SfcwcApp {
                             last_audible_summary: last_audible_summary.as_deref(),
                             last_audible_ok,
                             has_compiled_spc,
+                            last_sfc_compile_summary: last_sfc_compile_summary.as_deref(),
+                            last_sfc_verify_summary: last_sfc_verify_summary.as_deref(),
+                            last_sfc_verify_ok,
+                            has_compiled_sfc,
                         },
                     );
                 }
@@ -503,6 +521,12 @@ impl SfcwcApp {
         }
         if project_resp.verify_audible {
             self.do_verify_audible();
+        }
+        if project_resp.compile_sfc {
+            self.do_compile_sfc();
+        }
+        if project_resp.verify_sfc {
+            self.do_verify_sfc();
         }
     }
 
@@ -1002,6 +1026,215 @@ impl SfcwcApp {
         self.last_audible_ok = Some(ok);
     }
 
+    /// Synchronous in-process compile-sfc (M1.6) — uses the same
+    /// project as compile-spc, runs sfc_export against just project
+    /// A, drops the .sfc next to the .spc under .sfcwc-build/.
+    fn do_compile_sfc(&mut self) {
+        let Some(project_path) = self.project_path.clone() else {
+            self.last_sfc_compile_summary = Some("compile-sfc: no project path".to_string());
+            return;
+        };
+        if !self.validation_errors.is_empty() {
+            self.last_sfc_compile_summary =
+                Some("compile-sfc: project has validation errors".to_string());
+            return;
+        }
+        let project_dir = project_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let stem = self
+            .project
+            .as_ref()
+            .map(|p| p.project.name.as_str())
+            .unwrap_or("project")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect::<String>();
+        let stem = if stem.is_empty() {
+            "project".to_string()
+        } else {
+            stem
+        };
+        let out_dir = project_dir.join(".sfcwc-build");
+        if let Err(e) = std::fs::create_dir_all(&out_dir) {
+            self.last_sfc_compile_summary =
+                Some(format!("compile-sfc: mkdir {}: {e}", out_dir.display()));
+            return;
+        }
+        let out_sfc = out_dir.join(format!("{stem}.sfc"));
+        let work = match tempfile::tempdir() {
+            Ok(d) => d,
+            Err(e) => {
+                self.last_sfc_compile_summary = Some(format!("compile-sfc: tempdir: {e}"));
+                return;
+            }
+        };
+        match export_sfc(SfcExportInput {
+            project_a_path: project_path.clone(),
+            project_b_path: None,
+            loader_source_override: None,
+            working_dir: work.path().to_path_buf(),
+            out_sfc_path: out_sfc.clone(),
+        }) {
+            Ok(r) => {
+                self.last_compiled_sfc = Some(r.sfc_path.clone());
+                self.last_sfc_compile_summary = Some(format!(
+                    "compile-sfc OK: .sfc={} B, module={} B, loader={} B → {}",
+                    r.sfc_size_bytes,
+                    r.module_a.module_bytes.len(),
+                    r.loader_size_bytes,
+                    r.sfc_path.display(),
+                ));
+                self.last_sfc_verify_summary = None;
+                self.last_sfc_verify_ok = None;
+            }
+            Err(e) => {
+                self.last_sfc_compile_summary = Some(format!("compile-sfc: {e}"));
+            }
+        }
+    }
+
+    /// In-process verify: parse module A from the just-compiled .sfc,
+    /// project blocks → ARAM → SPC → oracle render → max_abs/rms.
+    fn do_verify_sfc(&mut self) {
+        let Some(sfc) = self.last_compiled_sfc.clone() else {
+            self.last_sfc_verify_summary = Some("verify-sfc: no compiled .sfc".to_string());
+            self.last_sfc_verify_ok = Some(false);
+            return;
+        };
+        let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let oracle = sfc_atomizer_core::tools::resolve_snes_spc_oracle(&workspace_root);
+        if !oracle.resolved {
+            self.last_sfc_verify_summary =
+                Some("verify-sfc: oracle wrapper not resolved".to_string());
+            self.last_sfc_verify_ok = Some(false);
+            return;
+        }
+        let oracle_path = oracle.path.expect("resolved => path");
+
+        let bytes = match std::fs::read(&sfc) {
+            Ok(b) => b,
+            Err(e) => {
+                self.last_sfc_verify_summary = Some(format!("verify-sfc: read sfc: {e}"));
+                self.last_sfc_verify_ok = Some(false);
+                return;
+            }
+        };
+        if MODULE_A_FILE_OFFSET + 64 > bytes.len() {
+            self.last_sfc_verify_summary =
+                Some("verify-sfc: .sfc too small to embed module A".to_string());
+            self.last_sfc_verify_ok = Some(false);
+            return;
+        }
+        let mod_total_len = u32::from_le_bytes(
+            bytes[MODULE_A_FILE_OFFSET + 0x18..MODULE_A_FILE_OFFSET + 0x1C]
+                .try_into()
+                .unwrap_or([0; 4]),
+        );
+        let mod_end = MODULE_A_FILE_OFFSET + mod_total_len as usize;
+        if mod_end > bytes.len() {
+            self.last_sfc_verify_summary = Some("verify-sfc: module A runs past file".to_string());
+            self.last_sfc_verify_ok = Some(false);
+            return;
+        }
+        let module_slice = &bytes[MODULE_A_FILE_OFFSET..mod_end];
+        let header = match parse_module_header(module_slice) {
+            Ok(h) => h,
+            Err(e) => {
+                self.last_sfc_verify_summary = Some(format!("verify-sfc: parse header: {e}"));
+                self.last_sfc_verify_ok = Some(false);
+                return;
+            }
+        };
+        let blocks = match parse_module_blocks(module_slice, &header) {
+            Ok(b) => b,
+            Err(e) => {
+                self.last_sfc_verify_summary = Some(format!("verify-sfc: parse blocks: {e}"));
+                self.last_sfc_verify_ok = Some(false);
+                return;
+            }
+        };
+        let aram = project_blocks_to_aram(module_slice, &header, &blocks);
+        let spc = match sfc_atomizer_core::spc::build_m1_image(aram.to_vec()) {
+            Ok(s) => s,
+            Err(e) => {
+                self.last_sfc_verify_summary = Some(format!("verify-sfc: build_m1_image: {e:?}"));
+                self.last_sfc_verify_ok = Some(false);
+                return;
+            }
+        };
+        let spc_bytes = match spc.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                self.last_sfc_verify_summary = Some(format!("verify-sfc: spc to_bytes: {e:?}"));
+                self.last_sfc_verify_ok = Some(false);
+                return;
+            }
+        };
+        let work = match tempfile::tempdir() {
+            Ok(d) => d,
+            Err(e) => {
+                self.last_sfc_verify_summary = Some(format!("verify-sfc: tempdir: {e}"));
+                self.last_sfc_verify_ok = Some(false);
+                return;
+            }
+        };
+        let spc_path = work.path().join("module_a.spc");
+        if let Err(e) = std::fs::write(&spc_path, &spc_bytes) {
+            self.last_sfc_verify_summary = Some(format!("verify-sfc: write spc: {e}"));
+            self.last_sfc_verify_ok = Some(false);
+            return;
+        }
+        let pcm_path = work.path().join("module_a.pcm");
+        let report_path = work.path().join("oracle.json");
+        let frames = 16384u32;
+        let output = std::process::Command::new(&oracle_path)
+            .arg("render")
+            .arg("--input-spc")
+            .arg(&spc_path)
+            .arg("--frames")
+            .arg(frames.to_string())
+            .arg("--output-pcm")
+            .arg(&pcm_path)
+            .arg("--report")
+            .arg(&report_path)
+            .output();
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => {
+                self.last_sfc_verify_summary = Some(format!("verify-sfc: spawn oracle: {e}"));
+                self.last_sfc_verify_ok = Some(false);
+                return;
+            }
+        };
+        if !output.status.success() {
+            self.last_sfc_verify_summary = Some(format!(
+                "verify-sfc: oracle exited {}",
+                output.status.code().unwrap_or(-1)
+            ));
+            self.last_sfc_verify_ok = Some(false);
+            return;
+        }
+        let pcm = match std::fs::read(&pcm_path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.last_sfc_verify_summary = Some(format!("verify-sfc: read pcm: {e}"));
+                self.last_sfc_verify_ok = Some(false);
+                return;
+            }
+        };
+        let (max_abs, rms) = pcm_stats(&pcm);
+        let ok = max_abs >= 1000 && rms >= 200.0;
+        self.last_sfc_verify_summary = Some(format!(
+            "verify-sfc: module A max_abs={}, rms={:.1}, status={}",
+            max_abs,
+            rms,
+            if ok { "ok" } else { "silent_fail" }
+        ));
+        self.last_sfc_verify_ok = Some(ok);
+    }
+
     fn apply_loop_candidate(&mut self, sample_id: &str, c: LoopCandidate) {
         let Some(project) = self.project.as_mut() else {
             return;
@@ -1054,6 +1287,8 @@ struct ProjectDetailResponse {
     refresh_meter: bool,
     compile_spc: bool,
     verify_audible: bool,
+    compile_sfc: bool,
+    verify_sfc: bool,
 }
 
 /// State the project-detail panel reads from `SfcwcApp`. Cloned
@@ -1067,6 +1302,10 @@ struct ProjectDetailState<'a> {
     last_audible_summary: Option<&'a str>,
     last_audible_ok: Option<bool>,
     has_compiled_spc: bool,
+    last_sfc_compile_summary: Option<&'a str>,
+    last_sfc_verify_summary: Option<&'a str>,
+    last_sfc_verify_ok: Option<bool>,
+    has_compiled_sfc: bool,
 }
 
 fn draw_project_detail(ui: &mut egui::Ui, s: ProjectDetailState<'_>) -> ProjectDetailResponse {
@@ -1078,6 +1317,10 @@ fn draw_project_detail(ui: &mut egui::Ui, s: ProjectDetailState<'_>) -> ProjectD
         last_audible_summary,
         last_audible_ok,
         has_compiled_spc,
+        last_sfc_compile_summary,
+        last_sfc_verify_summary,
+        last_sfc_verify_ok,
+        has_compiled_sfc,
     } = s;
     let mut resp = ProjectDetailResponse::default();
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1152,6 +1395,32 @@ fn draw_project_detail(ui: &mut egui::Ui, s: ProjectDetailState<'_>) -> ProjectD
         }
         if let Some(s) = last_audible_summary {
             let color = match last_audible_ok {
+                Some(true) => egui::Color32::from_rgb(80, 180, 100),
+                Some(false) => egui::Color32::from_rgb(220, 80, 80),
+                None => egui::Color32::GRAY,
+            };
+            ui.colored_label(color, s);
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.heading("Compile + verify (M1.6 — .sfc)");
+        ui.horizontal(|ui| {
+            if ui.button("Compile SFC").clicked() {
+                resp.compile_sfc = true;
+            }
+            if ui
+                .add_enabled(has_compiled_sfc, egui::Button::new("Verify SFC"))
+                .clicked()
+            {
+                resp.verify_sfc = true;
+            }
+        });
+        if let Some(s) = last_sfc_compile_summary {
+            ui.weak(s);
+        }
+        if let Some(s) = last_sfc_verify_summary {
+            let color = match last_sfc_verify_ok {
                 Some(true) => egui::Color32::from_rgb(80, 180, 100),
                 Some(false) => egui::Color32::from_rgb(220, 80, 80),
                 None => egui::Color32::GRAY,
