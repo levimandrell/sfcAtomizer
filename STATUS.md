@@ -1076,6 +1076,16 @@ these SHAs is a producer-side regression and must be flagged.
   bytes alongside max_abs/rms; the bundle pulls it from one place
   rather than parsing the wrapper's report.
 
+### Host-specific tool resolution
+
+- **Mesen2 on this host** (set during M2.0 follow-up): User-scope
+  `SFCWC_MESEN2 = C:\Users\Spencer\Documents\Mesen_2.1.1_Windows\Mesen.exe`.
+  Doctor resolves via `source: "env"` from any fresh terminal. The
+  M1.6 PATH fallback finds nothing because the install dir isn't on
+  PATH. Doctor going from "missing" to "resolved" doesn't change
+  `m1-acceptance` bundle status — Mesen2 has always been
+  informational, not required (SPEC §17.1 / §21 doctor mapping).
+
 ### M2.0 — Contracts freeze + M1 hotfix decisions
 
 - **M1 driver token-bootstrap fix** (consultant #1, M2.0).
