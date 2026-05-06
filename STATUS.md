@@ -2,13 +2,68 @@
 
 ## Current milestone
 
-**M0 — Research harness** — in progress. Minimal `.spc` exporter
-is in (M0.4) with a Mesen2-loadable file produced by an end-to-end
-m0-acceptance chain; oracle wrapper boundary is next (M0.5).
-**Manual Mesen2 verification by the user is the M0.4 acceptance
-gate** — the producer side is locked here.
+**M0 — Research harness** — in progress. The snes_spc oracle
+wrapper boundary is in (M0.5): a thin C++ wrapper renders the
+M0 smoke `.spc` to all-zero PCM (as the muted state contract
+predicts), and `sfcwc calibrate-oracle` populates a real
+calibration report. Next is M0.6 (the calibration report + M0
+acceptance bundle).
 
 ## Last pass
+
+**Pass M0.5 — snes_spc oracle wrapper boundary.**
+
+- Phase A: Vendored `snes_spc 0.9.0` from the
+  `blarggs-audio-libraries` mirror as an unmodified snapshot under
+  `tools/snes_spc_oracle/vendor/snes_spc/`. Pinned commit
+  `ec8ee2bbe30451614c1d02a83f7af1c97d497d45` (2020-10-24).
+  License files preserved verbatim; provenance documented in
+  `vendor/snes_spc/README-vendoring.md`. No upstream files
+  modified.
+- Phase B: New C++17 wrapper at `tools/snes_spc_oracle/main.cpp`,
+  ~290 lines, no third-party dependencies. One subcommand:
+  `render --input-spc --frames --output-pcm --report`. Locked CLI
+  contract v1. Hand-rolled JSON output, inline FIPS 180-4 SHA-256.
+  `spc_clear_echo()` after `spc_load_spc()` for determinism, per
+  upstream's recommendation.
+- Phase C: Build via CMake (3.16+, C++17). Output binary at
+  `tools/snes_spc_oracle/build/Release/snes_spc_oracle.exe` on
+  Windows/MSVC. `tools/snes_spc_oracle/build/` ignored by git.
+- Phase D: `tools/snes_spc_oracle/README.md` documents the build,
+  the locked CLI contract, the LGPL-2.1+ distribution obligations
+  the wrapper inherits, and the process-boundary integration model.
+- Phase E: `core::report::CalibrationReport` upgraded — replaced
+  M0.1 placeholder inner shapes with M0.5 typed shapes
+  (`ObservedInfo { voice_render_max_abs_lsb, voice_render_rms_lsb }`,
+  same for `ProvisionalTolerances`), added
+  `fixture_set: Option<FixtureSetInfo>`, `diagnostics: Vec<String>`,
+  `error: Option<String>`. SCHEMA_VERSION stays at 1.
+  `core::tools::resolve_snes_spc_oracle` extended to find the
+  wrapper at its build output paths.
+- Phase F: `sfcwc calibrate-oracle` rewired with `--oracle`,
+  `--input-spc`, `--frames`, `--out`, `--out-pcm` flags. Spawns
+  the wrapper, reads back PCM, recomputes max_abs/rms in Rust
+  defensively, populates a real `CalibrationReport` with
+  `status: provisional_not_ci_gate`. Failure-as-data on
+  oracle-missing, input-missing, and wrapper-error branches.
+- Phase G: `m0-acceptance` chain updated to invoke the real
+  calibrate-oracle in step 6 (replacing the M0.4 stub). Oracle
+  PCM lands at `<out>/oracle.pcm_s16le`. Three new CLI
+  integration tests for oracle-resolved, oracle-missing, and
+  input-spc-missing branches.
+
+79 tests across the workspace: 55 core unit + 10 BRR fixture
+integration + 14 app CLI integration. `cargo check`, `cargo fmt
+--check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test` all green. Wrapper builds clean with one harmless
+struct/class warning from upstream's vendored code.
+
+Locked observation: rendering the M0.4 muted smoke `.spc` through
+the wrapper produces 8,192 zero PCM bytes (max_abs=0, rms=0),
+matching the SPEC §19.3 contract. PCM SHA-256 is reproducible
+across runs.
+
+## Previous passes
 
 **Pass M0.4 — Minimal `.spc` exporter smoke.**
 
@@ -269,6 +324,31 @@ test` all green.
   The M3+ ARAM packer replaces this whole module; M0.4's stopgap
   reports the new invariant that regions partition total_aram
   exactly (rather than the M0.1 stub's "fixed regions only" model).
+- **snes_spc fork: blarggs-audio-libraries mirror** (M0.5): pinned
+  to commit `ec8ee2bbe30451614c1d02a83f7af1c97d497d45` (2020-10-24,
+  unmodified Blargg 0.9.0 snapshot). Vendored at
+  `tools/snes_spc_oracle/vendor/snes_spc/`; not a submodule.
+- **Oracle wrapper build system: CMake** (M0.5): ~30-line
+  CMakeLists.txt globs `vendor/snes_spc/*.cpp` plus the wrapper's
+  `main.cpp`. C++17, no third-party deps, no package manager. The
+  alternative `build.bat` fallback was unnecessary — CMake worked
+  cleanly with the on-host Visual Studio 18 Community generator.
+- **C++ toolchain on this host** (M0.5): no install needed —
+  Visual Studio 18 Community (cl.exe 14.50.35717), Visual Studio
+  2019 BuildTools (cl.exe 14.29.30133), and CMake 4.3.2 were all
+  already present. CMake auto-selected the VS 18 generator.
+- **Oracle wrapper CLI contract v1** (M0.5): ONE subcommand
+  `render --input-spc <path> --frames <N> --output-pcm <path>
+  --report <path>` plus `--version`. Locked; do not extend without
+  a PM brief. Output PCM is `frames*4` bytes of s16le interleaved
+  stereo at 32 kHz; oracle-side report mirrors the schema described
+  in the M0.5 brief. `spc_clear_echo()` after load enforces
+  determinism.
+- **Oracle smoke baseline** (M0.5): rendering the M0.4 muted
+  smoke `.spc` through the wrapper produces 8,192 zero PCM bytes
+  (max_abs=0, rms=0). M0.5 provisional tolerances are `max_abs=1`,
+  `rms=0.25`; both informational only (`ci_gate: false`). M1
+  freezes the first accepted tolerance table per SPEC §10.1, §21.
 
 ## Open questions remaining
 
@@ -281,8 +361,7 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M0.5 — snes_spc oracle wrapper boundary.** PM to brief. The
-`tools/snes_spc_oracle` binary boundary documented in SPEC §17.1
-gets a defined wire protocol; the host can render an SPC through
-the oracle for cross-verification against future BRR/render
-calibration.
+**M0.6 — Calibration report + M0 acceptance bundle.** PM to
+brief. Bundles the seven M0 reports into a frozen acceptance
+artifact, populates `M0Manifest.generated_at`, and pins the M0
+exit conditions to a reproducible build artifact set.
