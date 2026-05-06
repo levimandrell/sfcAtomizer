@@ -11,7 +11,9 @@ use sfc_atomizer_core::aram::{map_from_image, ARAM_LEN};
 use sfc_atomizer_core::asm::{
     sha256_hex, sha256_hex_file, AsarBackend, AssembleError, AssembleInput, AssemblerBackend,
 };
+use sfc_atomizer_core::audio::AudioFormat;
 use sfc_atomizer_core::brr_fixtures::{run_fixture, M0_RAW_DECODE_FIXTURES};
+use sfc_atomizer_core::import::{import_audio, ImportError, ImportOptions};
 use sfc_atomizer_core::manifest::verify_bundle;
 use sfc_atomizer_core::project::{ProjectIoError, ProjectV1, ValidationError};
 use sfc_atomizer_core::report::{
@@ -134,6 +136,29 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Import a WAV / AIFF / BRR audio file as a new sample-pool entry.
+    ///
+    /// Default behaviour copies the source into `<project_dir>/audio/`
+    /// and rewrites the project. Pass `--no-copy` to skip the copy
+    /// (project records the source path as-is).
+    Import {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        audio: PathBuf,
+        /// Override the auto-derived sample id.
+        #[arg(long)]
+        id: Option<String>,
+        /// Override the auto-derived sample name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Don't copy the audio into `<project_dir>/audio/`.
+        #[arg(long)]
+        no_copy: bool,
+        /// For BRR imports, override the default 32 kHz sample rate.
+        #[arg(long)]
+        brr_sample_rate: Option<u32>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -189,6 +214,23 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::ValidateProject { project, json, out } => {
             cmd_validate_project(&project, json, out.as_deref())
         }
+        Command::Import {
+            project,
+            audio,
+            id,
+            name,
+            no_copy,
+            brr_sample_rate,
+        } => cmd_import(
+            &project,
+            &audio,
+            ImportOptions {
+                id,
+                name,
+                copy_into_project: !no_copy,
+                brr_sample_rate_hz: brr_sample_rate,
+            },
+        ),
     }
 }
 
@@ -1475,6 +1517,50 @@ fn project_io_to_cli(e: ProjectIoError, path: &Path) -> CliError {
     CliError::Io {
         path: path.to_path_buf(),
         source: std::io::Error::other(format!("{e}")),
+    }
+}
+
+fn cmd_import(project: &Path, audio: &Path, options: ImportOptions) -> Result<(), CliError> {
+    match import_audio(project, audio, options) {
+        Ok(r) => {
+            let format = match r.metadata.format {
+                AudioFormat::Wav => "wav",
+                AudioFormat::Aiff => "aiff",
+                AudioFormat::Brr => "brr",
+            };
+            let channels = match r.metadata.channels {
+                1 => "mono",
+                2 => "stereo",
+                n => {
+                    return Err(CliError::Io {
+                        path: audio.to_path_buf(),
+                        source: std::io::Error::other(format!("unexpected channel count {n}")),
+                    })
+                }
+            };
+            let sha_short = r.sha256.get(..8).unwrap_or(&r.sha256);
+            eprintln!(
+                "import: added {} ({:?}) — {} {} Hz {} {} frames; sha={}...",
+                r.sample_id,
+                r.stored_path,
+                format,
+                r.metadata.sample_rate_hz,
+                channels,
+                r.metadata.frames,
+                sha_short,
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("import: {e}");
+            let exit_code = match &e {
+                ImportError::AudioNotFound(_) => 1,
+                ImportError::Project(_) | ImportError::Io(_) => 1,
+                ImportError::Audio(_) | ImportError::PathTraversal(_) => 2,
+                ImportError::ResultingProjectInvalid(_) => 3,
+            };
+            std::process::exit(exit_code);
+        }
     }
 }
 

@@ -1081,3 +1081,111 @@ fn validate_project_io_error_on_missing_file() {
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["status"], "io_error");
 }
+
+// =============================================================================
+// M1.2 — sfcwc import
+// =============================================================================
+
+fn write_minimal_wav(path: &Path, sample_rate: u32, channels: u8, bits: u8, frames: u32) {
+    let bytes_per_sample = u32::from(bits / 8);
+    let block_align = u32::from(channels) * bytes_per_sample;
+    let byte_rate = sample_rate * block_align;
+    let data_size = frames * block_align;
+    let fmt_size = 16u32;
+    let chunk_size = 4 + (8 + fmt_size) + (8 + data_size);
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&chunk_size.to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&fmt_size.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&u16::from(channels).to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&(block_align as u16).to_le_bytes());
+    buf.extend_from_slice(&u16::from(bits).to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_size.to_le_bytes());
+    buf.resize(buf.len() + data_size as usize, 0);
+    std::fs::write(path, buf).unwrap();
+}
+
+#[test]
+fn import_happy_path_exit_0() {
+    let dir = TempDir::new().unwrap();
+    let proj = dir.path().join("p.sfcproj.json");
+    Command::new(bin())
+        .args(["new-project", "--out"])
+        .arg(&proj)
+        .args(["--name", "demo"])
+        .output()
+        .unwrap();
+    let audio = dir.path().join("lead.wav");
+    write_minimal_wav(&audio, 32_000, 1, 16, 4096);
+    let out = Command::new(bin())
+        .args(["import", "--project"])
+        .arg(&proj)
+        .args(["--audio"])
+        .arg(&audio)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("import: added"), "stderr: {stderr}");
+    // Project now validates.
+    let v = Command::new(bin())
+        .args(["validate-project", "--project"])
+        .arg(&proj)
+        .output()
+        .unwrap();
+    assert_eq!(v.status.code(), Some(0));
+}
+
+#[test]
+fn import_missing_audio_exit_1() {
+    let dir = TempDir::new().unwrap();
+    let proj = dir.path().join("p.sfcproj.json");
+    Command::new(bin())
+        .args(["new-project", "--out"])
+        .arg(&proj)
+        .args(["--name", "demo"])
+        .output()
+        .unwrap();
+    let bogus = dir.path().join("does-not-exist.wav");
+    let out = Command::new(bin())
+        .args(["import", "--project"])
+        .arg(&proj)
+        .args(["--audio"])
+        .arg(&bogus)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn import_unsupported_extension_exit_2() {
+    let dir = TempDir::new().unwrap();
+    let proj = dir.path().join("p.sfcproj.json");
+    Command::new(bin())
+        .args(["new-project", "--out"])
+        .arg(&proj)
+        .args(["--name", "demo"])
+        .output()
+        .unwrap();
+    let audio = dir.path().join("a.flac");
+    std::fs::write(&audio, b"fake").unwrap();
+    let out = Command::new(bin())
+        .args(["import", "--project"])
+        .arg(&proj)
+        .args(["--audio"])
+        .arg(&audio)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}

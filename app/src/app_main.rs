@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
+use sfc_atomizer_core::import::{import_audio, ImportOptions};
 use sfc_atomizer_core::project::{ProjectV1, SampleSlot, ValidationError};
 
 const WINDOW_DEFAULT_WIDTH: f32 = 1024.0;
@@ -198,6 +199,15 @@ impl SfcwcApp {
                         ui.close();
                     }
                     ui.separator();
+                    let import_enabled = self.project.is_some() && self.project_path.is_some();
+                    if ui
+                        .add_enabled(import_enabled, egui::Button::new("Import Audio…"))
+                        .clicked()
+                    {
+                        self.do_import_via_dialog();
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         ui.close();
@@ -205,6 +215,39 @@ impl SfcwcApp {
                 });
             });
         });
+    }
+
+    fn do_import_via_dialog(&mut self) {
+        let Some(project_path) = self.project_path.clone() else {
+            self.status_message = Some("import: no project loaded".to_string());
+            return;
+        };
+        let picked = rfd::FileDialog::new()
+            .add_filter(
+                "Audio (wav, aif, aiff, aifc, brr)",
+                &["wav", "aif", "aiff", "aifc", "brr"],
+            )
+            .pick_file();
+        let Some(audio_path) = picked else {
+            self.status_message = Some("import: cancelled".to_string());
+            return;
+        };
+        match import_audio(&project_path, &audio_path, ImportOptions::copy_default()) {
+            Ok(r) => {
+                self.status_message = Some(format!(
+                    "import: added {} ({} frames) from {}",
+                    r.sample_id,
+                    r.metadata.frames,
+                    audio_path.display()
+                ));
+                // Refresh in-memory state from disk so the Sample Pool
+                // panel renders the new entry.
+                self.try_open(&project_path);
+            }
+            Err(e) => {
+                self.status_message = Some(format!("import failed: {e}"));
+            }
+        }
     }
 
     fn draw_left_panel(&mut self, ctx: &egui::Context) {
