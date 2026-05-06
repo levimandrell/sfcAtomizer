@@ -1296,6 +1296,214 @@ fn preview_brr_writes_wav_and_report() {
 }
 
 // =============================================================================
+// M1.7 — m1-acceptance / m1-status
+// =============================================================================
+
+#[test]
+fn cli_m1_acceptance_full_chain_one_project() {
+    use sfc_atomizer_core::tools::{resolve_asar, resolve_snes_spc_oracle};
+    if !resolve_asar().resolved
+        || !resolve_snes_spc_oracle(&workspace_root()).resolved && !oracle_resolved_for_test()
+    {
+        eprintln!("skip cli_m1_acceptance_full_chain_one_project: asar / oracle missing");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "m17_demo");
+    let bundle = dir.path().join("bundle");
+    let oracle = oracle_wrapper_path();
+
+    let out = Command::new(bin())
+        .env("SFCWC_SNES_SPC_ORACLE", &oracle)
+        .args(["m1-acceptance", "--project-a"])
+        .arg(&proj)
+        .args(["--out"])
+        .arg(&bundle)
+        .args(["--frames", "8192"])
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // All step reports present.
+    for name in [
+        "doctor.json",
+        "validate-a.json",
+        "aram-map.json",
+        "compile-spc.json",
+        "audible-spc.json",
+        "compile-sfc.json",
+        "structure-sfc.json",
+        "audible-sfc.json",
+        "manifest.json",
+    ] {
+        assert!(
+            bundle.join(name).is_file(),
+            "missing report {name}: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let manifest = read_json(&bundle.join("manifest.json"));
+    assert_envelope(&manifest, "m1_manifest");
+    assert_eq!(manifest["bundle"]["status"], "ok");
+    assert!(manifest["bundle"]["aram_image_sha256"].is_string());
+    assert!(manifest["bundle"]["spc_file_sha256"].is_string());
+    assert!(manifest["bundle"]["sfc_file_sha256"].is_string());
+    assert!(manifest["bundle"]["module_a_sha256"].is_string());
+    assert!(manifest["bundle"]["driver_code_sha256"].is_string());
+    assert_eq!(manifest["bundle"]["modules_audio_identical"], true);
+}
+
+#[test]
+fn cli_m1_acceptance_two_projects() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved || !oracle_resolved_for_test() {
+        eprintln!("skip: asar / oracle missing");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj_a = make_project_with_one_imported_sample(dir.path(), "m17_a");
+
+    let proj_b = dir.path().join("m17_b.sfcproj.json");
+    Command::new(bin())
+        .args(["new-project", "--out"])
+        .arg(&proj_b)
+        .args(["--name", "m17_b"])
+        .output()
+        .unwrap();
+    let audio_b = dir.path().join("low.wav");
+    let pcm_b = synth_sine_pcm(4096, 128.0, 6000.0);
+    write_pcm16_wav_with_samples(&audio_b, 22050, 1, &pcm_b);
+    Command::new(bin())
+        .args(["import", "--project"])
+        .arg(&proj_b)
+        .args(["--audio"])
+        .arg(&audio_b)
+        .output()
+        .unwrap();
+
+    let bundle = dir.path().join("bundle");
+    let oracle = oracle_wrapper_path();
+    let out = Command::new(bin())
+        .env("SFCWC_SNES_SPC_ORACLE", &oracle)
+        .args(["m1-acceptance", "--project-a"])
+        .arg(&proj_a)
+        .args(["--project-b"])
+        .arg(&proj_b)
+        .args(["--out"])
+        .arg(&bundle)
+        .args(["--frames", "4096"])
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let manifest = read_json(&bundle.join("manifest.json"));
+    assert_eq!(manifest["bundle"]["status"], "ok");
+    assert_eq!(manifest["bundle"]["steps"]["validate_b"], "ok");
+    assert_eq!(manifest["bundle"]["modules_audio_identical"], false);
+    // Distinct module SHAs.
+    let a = manifest["bundle"]["module_a_sha256"].as_str().unwrap();
+    let b = manifest["bundle"]["module_b_sha256"].as_str().unwrap();
+    assert_ne!(a, b);
+}
+
+#[test]
+fn cli_m1_status_on_valid_bundle() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved || !oracle_resolved_for_test() {
+        eprintln!("skip: asar / oracle missing");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "m17_status");
+    let bundle = dir.path().join("bundle");
+    let oracle = oracle_wrapper_path();
+    Command::new(bin())
+        .env("SFCWC_SNES_SPC_ORACLE", &oracle)
+        .args(["m1-acceptance", "--project-a"])
+        .arg(&proj)
+        .args(["--out"])
+        .arg(&bundle)
+        .args(["--frames", "4096"])
+        .output()
+        .unwrap();
+
+    let out = Command::new(bin())
+        .args(["m1-status", "--bundle"])
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn cli_m1_status_on_missing_bundle() {
+    let dir = TempDir::new().unwrap();
+    let out = Command::new(bin())
+        .args(["m1-status", "--bundle"])
+        .arg(dir.path().join("nope"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn cli_m1_status_on_corrupted_bundle() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved || !oracle_resolved_for_test() {
+        eprintln!("skip: asar / oracle missing");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "m17_corrupt");
+    let bundle = dir.path().join("bundle");
+    let oracle = oracle_wrapper_path();
+    Command::new(bin())
+        .env("SFCWC_SNES_SPC_ORACLE", &oracle)
+        .args(["m1-acceptance", "--project-a"])
+        .arg(&proj)
+        .args(["--out"])
+        .arg(&bundle)
+        .args(["--frames", "4096"])
+        .output()
+        .unwrap();
+
+    // Mangle compile-spc.json — change spc_file_sha256.
+    let path = bundle.join("compile-spc.json");
+    let mut v: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    v["spc_file_sha256"] = serde_json::json!("z".repeat(64));
+    std::fs::write(&path, serde_json::to_string(&v).unwrap()).unwrap();
+
+    let out = Command::new(bin())
+        .args(["m1-status", "--bundle"])
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("spc_sha_matches_across_reports   = false")
+            || stdout.contains("integrity findings"),
+        "expected integrity drift in stdout: {stdout}"
+    );
+}
+
+// =============================================================================
 // M1.6 — compile-sfc / verify-sfc-structure / verify-sfc-modules-audible
 // =============================================================================
 
