@@ -718,6 +718,23 @@ The `.sfc` test ROM includes a 65816-side loader stub responsible for the SPC700
 
 The loader contract is exposed via `audio_symbols.inc` and `loader_stub_65816.asm` and is fully specified before M1 ships. Mid-load timing budget, port-handshake validation, and recovery on NAK are part of the contract; silent upload failure is forbidden.
 
+### 19.3 SPC smoke state contract (M0)
+
+The M0 smoke `.spc` boots the SPC700 into a state that is silent, deterministic, and obviously running. Concretely:
+
+| Field                                | Value   | Rationale                                                            |
+|--------------------------------------|---------|----------------------------------------------------------------------|
+| `PC`                                 | `$0200` | Start of driver code per §15.1                                       |
+| `A`, `X`, `Y`                        | 0       | No assumed register state                                            |
+| `PSW`                                | 0       | Direct page = `$00xx`, no flags set                                  |
+| `SP`                                 | `$EF`   | SPC700 post-IPL default; stack starts at `$01EF`                     |
+| DSP `$6C` (FLG)                      | `$60`   | bit 6 (Mute amp) + bit 5 (Echo write disable)                        |
+| All other DSP registers              | 0       | Voices silent, KON unwritten                                         |
+| Extra RAM (`$FFC0..$FFFF` shadow)    | 0       | No RAM contents behind IPL ROM                                       |
+| Memory `$00F1` (CONTROL)             | 0       | Timers off, IPL ROM unmapped                                         |
+
+Result: the SPC700 executes the driver from `$0200` while the DSP produces no audio output (mute amp). M0 smoke verification is "loads in Mesen2, no crash, no audible output." The smoke `.spc` writes ID666 indicator = absent (0x1B) and zero-fills the 210-byte ID666 region. M1+ smoke profiles will replace this with an audible-but-deterministic state.
+
 ---
 
 ## 20. Driver build strategy
