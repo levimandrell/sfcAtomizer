@@ -1076,6 +1076,7 @@ impl SfcwcApp {
             loader_source_override: None,
             working_dir: work.path().to_path_buf(),
             out_sfc_path: out_sfc.clone(),
+            refresh_source_hash: false,
         }) {
             Ok(r) => {
                 self.last_compiled_sfc = Some(r.sfc_path.clone());

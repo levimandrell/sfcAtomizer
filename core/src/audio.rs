@@ -79,6 +79,15 @@ pub enum AudioDecodeError {
     Symphonia(String),
     #[error("decoded sample count {actual} != probed frames {expected}")]
     FrameCountMismatch { expected: u64, actual: u64 },
+    /// Source file SHA-256 doesn't match what the project declared.
+    /// Pass `--refresh-source-hash` (CLI) or set `refresh = true`
+    /// (library) to update the project's recorded SHA in place.
+    #[error("source SHA-256 mismatch for {sample_id:?}: declared {declared}, actual {actual}")]
+    SourceHashMismatch {
+        sample_id: String,
+        declared: String,
+        actual: String,
+    },
 }
 
 const WAV_FORMAT_PCM_INT: u16 = 0x0001;
@@ -222,6 +231,46 @@ fn decode_via_symphonia(
         mono.push(avg.clamp(i16::MIN as i64, i16::MAX as i64) as i16);
     }
     Ok(mono)
+}
+
+/// Outcome of [`check_or_refresh_source_hash`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceHashCheck {
+    /// File SHA matches the declared value; no action needed.
+    Match,
+    /// File SHA differs and refresh mode was on; caller should
+    /// persist `actual` back into the project's `source.sha256`
+    /// field. Carries the previous declared value for logging.
+    Refreshed { previous: String, actual: String },
+}
+
+/// Verify a sample's recorded SHA-256 against the live file. With
+/// `refresh = false` (the default), a mismatch produces
+/// [`AudioDecodeError::SourceHashMismatch`]. With `refresh = true`,
+/// a mismatch returns [`SourceHashCheck::Refreshed`] so the caller
+/// can persist the new value.
+pub fn check_or_refresh_source_hash(
+    path: &Path,
+    sample_id: &str,
+    declared: &str,
+    refresh: bool,
+) -> Result<SourceHashCheck, AudioDecodeError> {
+    let actual = sha256_of_file(path)?;
+    if actual == declared {
+        return Ok(SourceHashCheck::Match);
+    }
+    if refresh {
+        Ok(SourceHashCheck::Refreshed {
+            previous: declared.to_string(),
+            actual,
+        })
+    } else {
+        Err(AudioDecodeError::SourceHashMismatch {
+            sample_id: sample_id.to_string(),
+            declared: declared.to_string(),
+            actual,
+        })
+    }
 }
 
 /// Streaming SHA-256 of `path`. 64 KiB chunks; lowercase hex output.

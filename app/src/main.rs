@@ -192,6 +192,13 @@ enum Command {
         out_sfc: Option<PathBuf>,
         #[arg(long)]
         out_report: Option<PathBuf>,
+        /// M2.0 (consultant #3): when set, recompute and persist
+        /// each sample's `source.sha256` in the project file
+        /// before compiling. Default off — without this flag, a
+        /// SHA mismatch between project file and live source is
+        /// a hard error.
+        #[arg(long)]
+        refresh_source_hash: bool,
     },
     /// Verify the structural integrity of a LoROM `.sfc`: header,
     /// vectors, embedded `module.bin` parsing + in-file SHA match.
@@ -238,6 +245,11 @@ enum Command {
         out_map: Option<PathBuf>,
         #[arg(long)]
         out_report: Option<PathBuf>,
+        /// M2.0 (consultant #3): refresh + persist `source.sha256`
+        /// before compile when the live SHA differs from the
+        /// project's recorded SHA. Default off.
+        #[arg(long)]
+        refresh_source_hash: bool,
     },
     /// Render a `.spc` through the snes_spc oracle and assert
     /// audible (non-silent) output (M1.5).
@@ -281,6 +293,10 @@ enum Command {
         /// driver).
         #[arg(long)]
         driver: Option<PathBuf>,
+        /// M2.0 (consultant #3): refresh + persist `source.sha256`
+        /// before pack. Default off.
+        #[arg(long)]
+        refresh_source_hash: bool,
     },
     /// Encode a WAV / AIFF / BRR audio file to BRR bytes (M1.3).
     ///
@@ -410,7 +426,14 @@ fn run(cli: Cli) -> Result<(), CliError> {
             out_image,
             out_map,
             driver,
-        } => cmd_pack(&project, &out_image, &out_map, driver.as_deref()),
+            refresh_source_hash,
+        } => cmd_pack(
+            &project,
+            &out_image,
+            &out_map,
+            driver.as_deref(),
+            refresh_source_hash,
+        ),
         Command::M1Acceptance {
             project_a,
             project_b,
@@ -423,11 +446,13 @@ fn run(cli: Cli) -> Result<(), CliError> {
             project_b,
             out_sfc,
             out_report,
+            refresh_source_hash,
         } => cmd_compile_sfc(
             &project_a,
             project_b.as_deref(),
             out_sfc.as_deref(),
             out_report.as_deref(),
+            refresh_source_hash,
         ),
         Command::VerifySfcStructure { sfc, out_report } => {
             cmd_verify_sfc_structure(&sfc, out_report.as_deref())
@@ -453,12 +478,14 @@ fn run(cli: Cli) -> Result<(), CliError> {
             out_image,
             out_map,
             out_report,
+            refresh_source_hash,
         } => cmd_compile_spc(
             &project,
             out_spc.as_deref(),
             out_image.as_deref(),
             out_map.as_deref(),
             out_report.as_deref(),
+            refresh_source_hash,
         ),
         Command::VerifySpcAudible {
             spc,
@@ -1883,9 +1910,10 @@ fn compile_aram_image(
     label: &str,
     project_path: &Path,
     driver_override: Option<Vec<u8>>,
+    refresh_source_hash: bool,
 ) -> Result<CompileAramOutcome, ()> {
     // Load + validate.
-    let project = match ProjectV1::load_from_path(project_path) {
+    let mut project = match ProjectV1::load_from_path(project_path) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{label}: load failed for {}: {e}", project_path.display());
@@ -1908,20 +1936,47 @@ fn compile_aram_image(
     // Encode each sample's BRR.
     let project_dir = project_path.parent().unwrap_or_else(|| Path::new("."));
     let mut encoded: Vec<EncodedSample> = Vec::with_capacity(project.sample_pool.len());
-    for slot in &project.sample_pool {
+    let mut hash_refreshes: Vec<(usize, String, String)> = Vec::new();
+    for (idx, slot) in project.sample_pool.iter().enumerate() {
         let raw = Path::new(&slot.source.path);
         let audio_path: PathBuf = if raw.is_absolute() {
             raw.to_path_buf()
         } else {
             project_dir.join(raw)
         };
+
+        // M2.0: enforce declared SHA against the live file. With
+        // --refresh-source-hash, mismatches are converted into
+        // pending project-update entries to apply after the
+        // compile succeeds.
+        match sfc_atomizer_core::audio::check_or_refresh_source_hash(
+            &audio_path,
+            &slot.id,
+            &slot.source.sha256,
+            refresh_source_hash,
+        ) {
+            Ok(sfc_atomizer_core::audio::SourceHashCheck::Match) => {}
+            Ok(sfc_atomizer_core::audio::SourceHashCheck::Refreshed { previous, actual }) => {
+                eprintln!(
+                    "refresh-source-hash: {}: {} -> {}",
+                    slot.id, previous, actual
+                );
+                hash_refreshes.push((idx, previous, actual));
+            }
+            Err(e) => {
+                eprintln!("{label}: {e}");
+                std::process::exit(2);
+            }
+        }
+
         let pcm = match decode_to_mono_pcm(&audio_path) {
             Ok(p) => p,
             Err(e) => {
                 let exit = match &e {
                     AudioDecodeError::Probe(_) | AudioDecodeError::Io(_) => 1,
                     AudioDecodeError::Symphonia(_)
-                    | AudioDecodeError::FrameCountMismatch { .. } => 2,
+                    | AudioDecodeError::FrameCountMismatch { .. }
+                    | AudioDecodeError::SourceHashMismatch { .. } => 2,
                 };
                 eprintln!("{label}: decode failed for sample {}: {e}", slot.id);
                 std::process::exit(exit);
@@ -2009,6 +2064,21 @@ fn compile_aram_image(
         }
     };
 
+    // Persist any --refresh-source-hash updates to the project on
+    // disk, after we know the compile succeeded.
+    if !hash_refreshes.is_empty() {
+        for (idx, _prev, new) in &hash_refreshes {
+            project.sample_pool[*idx].source.sha256 = new.clone();
+        }
+        if let Err(e) = project.save_to_path(project_path) {
+            eprintln!(
+                "{label}: refresh-source-hash: failed to save updated project at {}: {e}",
+                project_path.display()
+            );
+            std::process::exit(1);
+        }
+    }
+
     Ok(CompileAramOutcome {
         project,
         image: result.aram_image,
@@ -2023,6 +2093,7 @@ fn cmd_pack(
     out_image: &Path,
     out_map: &Path,
     driver_path: Option<&Path>,
+    refresh_source_hash: bool,
 ) -> Result<(), CliError> {
     let driver_override = match driver_path {
         Some(p) => match std::fs::read(p) {
@@ -2034,7 +2105,7 @@ fn cmd_pack(
         },
         None => None,
     };
-    let outcome = compile_aram_image("pack", project_path, driver_override)
+    let outcome = compile_aram_image("pack", project_path, driver_override, refresh_source_hash)
         .expect("compile_aram_image returns via exit on error");
     let project = outcome.project;
     let result_image = outcome.image;
@@ -2687,6 +2758,7 @@ fn cmd_compile_sfc(
     project_b_path: Option<&Path>,
     out_sfc: Option<&Path>,
     out_report: Option<&Path>,
+    refresh_source_hash: bool,
 ) -> Result<(), CliError> {
     let stem_a = project_path_stem(project_a_path);
     let out_sfc_owned = out_sfc
@@ -2710,6 +2782,7 @@ fn cmd_compile_sfc(
         loader_source_override: None,
         working_dir: work.path().to_path_buf(),
         out_sfc_path: out_sfc_owned.clone(),
+        refresh_source_hash,
     }) {
         Ok(r) => r,
         Err(e) => {
@@ -3368,8 +3441,9 @@ fn cmd_compile_spc(
     out_image: Option<&Path>,
     out_map: Option<&Path>,
     out_report: Option<&Path>,
+    refresh_source_hash: bool,
 ) -> Result<(), CliError> {
-    let outcome = compile_aram_image("compile-spc", project_path, None)
+    let outcome = compile_aram_image("compile-spc", project_path, None, refresh_source_hash)
         .expect("compile_aram_image returns via exit on error");
     let project = &outcome.project;
 
@@ -3668,7 +3742,9 @@ fn cmd_encode_brr(
         Err(e) => {
             let exit = match &e {
                 AudioDecodeError::Probe(_) | AudioDecodeError::Io(_) => 1,
-                AudioDecodeError::Symphonia(_) | AudioDecodeError::FrameCountMismatch { .. } => 2,
+                AudioDecodeError::Symphonia(_)
+                | AudioDecodeError::FrameCountMismatch { .. }
+                | AudioDecodeError::SourceHashMismatch { .. } => 2,
             };
             eprintln!("encode-brr: decode failed for {}: {e}", audio.display());
             std::process::exit(exit);

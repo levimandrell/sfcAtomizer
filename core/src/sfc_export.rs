@@ -69,6 +69,10 @@ pub struct SfcExportInput<'a> {
     pub working_dir: PathBuf,
     /// Output `.sfc` path.
     pub out_sfc_path: PathBuf,
+    /// M2.0: when true, treat sample-source SHA mismatches as a
+    /// project update rather than an error. Per consultant #3,
+    /// this is opt-in only — never default-on.
+    pub refresh_source_hash: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -154,11 +158,11 @@ pub const LOADER_ASM_SRC: &str = include_str!("../fixtures/asm/m1_loader_65816.a
 
 pub fn export_sfc(input: SfcExportInput<'_>) -> Result<SfcExportOutput, SfcExportError> {
     // 1. Compile project A → module_a.bin.
-    let module_a = compile_module("A", &input.project_a_path)?;
+    let module_a = compile_module("A", &input.project_a_path, input.refresh_source_hash)?;
 
     // 2. Optional project B → module_b.bin (or clone of A).
     let (module_b, module_b_is_clone_of_a) = match &input.project_b_path {
-        Some(p) => (compile_module("B", p)?, false),
+        Some(p) => (compile_module("B", p, input.refresh_source_hash)?, false),
         None => {
             let mut clone = module_a.clone();
             clone.project_name = format!("{}_swap_clone", clone.project_name);
@@ -265,8 +269,9 @@ pub fn export_sfc(input: SfcExportInput<'_>) -> Result<SfcExportOutput, SfcExpor
 fn compile_module(
     label: &'static str,
     project_path: &Path,
+    refresh_source_hash: bool,
 ) -> Result<SfcModuleArtifact, SfcExportError> {
-    let project = ProjectV1::load_from_path(project_path)
+    let mut project = ProjectV1::load_from_path(project_path)
         .map_err(|source| SfcExportError::Load { label, source })?;
     if let Err(errors) = project.validate() {
         return Err(SfcExportError::Validation { label, errors });
@@ -274,13 +279,39 @@ fn compile_module(
 
     let project_dir = project_path.parent().unwrap_or_else(|| Path::new("."));
     let mut encoded: Vec<EncodedSample> = Vec::with_capacity(project.sample_pool.len());
-    for slot in &project.sample_pool {
+    let mut hash_refreshes: Vec<(usize, String, String)> = Vec::new();
+    for (idx, slot) in project.sample_pool.iter().enumerate() {
         let raw = Path::new(&slot.source.path);
         let audio_path: PathBuf = if raw.is_absolute() {
             raw.to_path_buf()
         } else {
             project_dir.join(raw)
         };
+
+        // M2.0 source-SHA enforcement (consultant #3).
+        match crate::audio::check_or_refresh_source_hash(
+            &audio_path,
+            &slot.id,
+            &slot.source.sha256,
+            refresh_source_hash,
+        ) {
+            Ok(crate::audio::SourceHashCheck::Match) => {}
+            Ok(crate::audio::SourceHashCheck::Refreshed { previous, actual }) => {
+                eprintln!(
+                    "refresh-source-hash: {}: {} -> {}",
+                    slot.id, previous, actual
+                );
+                hash_refreshes.push((idx, previous, actual));
+            }
+            Err(source) => {
+                return Err(SfcExportError::Decode {
+                    label,
+                    sample_id: slot.id.clone(),
+                    source,
+                });
+            }
+        }
+
         let pcm = decode_to_mono_pcm(&audio_path).map_err(|source| SfcExportError::Decode {
             label,
             sample_id: slot.id.clone(),
@@ -344,6 +375,20 @@ fn compile_module(
         echo_enabled,
     })
     .map_err(|source| SfcExportError::Module { label, source })?;
+
+    // Persist refreshed source SHAs to the project on disk after a
+    // successful build (consultant #3 — explicit user intent only).
+    if !hash_refreshes.is_empty() {
+        for (idx, _prev, new) in &hash_refreshes {
+            project.sample_pool[*idx].source.sha256 = new.clone();
+        }
+        project
+            .save_to_path(project_path)
+            .map_err(|e| SfcExportError::Io {
+                path: project_path.to_path_buf(),
+                source: std::io::Error::other(format!("save refreshed project: {e}")),
+            })?;
+    }
 
     Ok(SfcModuleArtifact {
         project_name: project.project.name.clone(),
