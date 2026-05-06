@@ -2,11 +2,51 @@
 
 ## Current milestone
 
-**M0 — Research harness** — in progress. Raw BRR decoder is in
-(M0.2) with bit-exact fixture coverage; asar backend smoke is next
-(M0.3).
+**M0 — Research harness** — in progress. Asar backend smoke is in
+(M0.3); minimal `.spc` exporter is next (M0.4).
 
 ## Last pass
+
+**Pass M0.3 — Asar backend smoke.**
+
+- Phase A: New `core::asm` module with `AssemblerBackend` trait
+  (name, version, assemble) and supporting types — `AssembleInput`,
+  `AssembleOutput`, `AssembleError`. Trait keeps the door open for
+  WLA-DX without rewiring the build pipeline; M0.3 ships only
+  `AsarBackend`.
+- Phase B: `AsarBackend::assemble` — pre-creates a 64 KB
+  zero-filled scratch file, invokes asar with the locked
+  `--no-title-check --fix-checksum=off` form, verifies exact 64 KB
+  size, computes SHA-256 of the full image. Asar quirks discovered
+  in probing and locked in the module docs: `org $0200` errors
+  without `lorom + org $008200 + base $0200`; without
+  `--fix-checksum=off` asar writes 4 LoROM checksum bytes into our
+  flat ARAM image at `$7FDC..$7FDF`.
+- Phase C: `core/fixtures/asm/m0_smoke.asm` — trivial NOP + BRA
+  loop yielding sentinel bytes `00 2F FD` at file offset `0x0200`,
+  with every other byte zero. Brief sketched `00 2F FE` but the
+  actual displacement is `-3` (BRA targets `start: nop` at $0200,
+  not the BRA itself), so 0xFD is correct.
+- Phase D: Two new optional fields on `AssembleReport` —
+  `output_image_sha256` and `error`. Both `skip_serializing_if`,
+  so the schema extension is non-breaking; pre-M0.3 reports still
+  parse. `SCHEMA_VERSION` stays at 1.
+- Phase E: `sfcwc assemble-smoke` rewired to invoke the asar
+  pipeline. New `--out-image` flag (default
+  `build/m0/driver.bin`); existing `--out` keeps the JSON report
+  path. Failure-as-data: asar-missing or asar-error writes a
+  populated `AssembleReport` with `status: error` and exit 0.
+- Phase F: Two CLI integration tests — asar-present (gated on
+  `resolve_asar().resolved`, asserts exit 0, 64 KB image, exact
+  sentinel bytes, sha256 in stderr) and asar-missing (forces
+  failure via `SFCWC_ASAR=<bogus>` + isolated `PATH`).
+
+53 tests across the workspace — 32 core unit + 10 BRR fixture
+integration + 11 app CLI integration. `cargo check`, `cargo fmt
+--check`, `cargo clippy --all-targets -- -D warnings`, and `cargo
+test` all green.
+
+## Previous passes
 
 **Pass M0.2 — Raw BRR decoder + deterministic fixture suite.**
 
@@ -150,6 +190,19 @@ test` all green.
   SNESdev wiki and boldowa/snesbrr convention, locked by
   `flags_end_loop_ignored_by_raw_decode` and the `header_parse_layout`
   unit test.
+- **AssemblerBackend trait shape** (M0.3): `name` + `version` +
+  `assemble(&AssembleInput) -> Result<AssembleOutput, AssembleError>`.
+  Version probing is informational, never gating — failures yield
+  `Ok("unknown")`. `WrongOutputSize` is a hard error so a 64 KB
+  image is always exactly 64 KB.
+- **Asar invocation locked**: `asar --no-title-check
+  --fix-checksum=off <source.asm> <output.bin>` (M0.3). Plus the
+  smoke .asm must declare `lorom + arch spc700 + org $008200 +
+  base $0200` to coax asar into a flat 64 KB ARAM workflow without
+  expanding the file or injecting SNES-rom checksum bytes.
+- **Smoke .asm location** `core/fixtures/asm/m0_smoke.asm` (M0.3):
+  first-class fixture, not test-only. Sentinel bytes `00 2F FD` at
+  offset `0x0200` are locked by an integration test.
 
 ## Open questions remaining
 
@@ -162,7 +215,7 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M0.3 — Asar backend smoke.** PM to brief. `assemble-smoke` gets
-real wiring against the resolved asar tool, populating
-`AssembleReport` with backend version, exit code, stdout/stderr line
-counts, and input/output sha256.
+**M0.4 — Minimal `.spc` exporter smoke.** PM to brief. The 64 KB
+ARAM image from M0.3 gets wrapped in a valid SPC-format header so
+the M0 driver can be opened in Mesen2 for manual playback
+verification.
