@@ -2,10 +2,48 @@
 
 ## Current milestone
 
-**M0 — Research harness** — not started. Passes so far have covered repo
-hygiene and spec truth only; no Rust logic yet.
+**M0 — Research harness** — in progress. CLI surface and report
+schemas are in (M0.1); raw BRR decoder and the deterministic fixture
+suite are next (M0.2).
 
 ## Last pass
+
+**Pass M0.1 — CLI surface, JSON report schemas, tool resolution.**
+
+- Phase A: Workspace deps (`serde`, `serde_json`, `clap`,
+  `thiserror`, `sha2`, `tempfile`) declared in
+  `[workspace.dependencies]`; per-crate dependency tables wired in
+  `core/` and `app/`. Binary name pinned to `sfcwc` via `[[bin]]` in
+  `app/Cargo.toml`.
+- Phase B: Seven stable report types in `core::report`
+  (`DoctorReport`, `BrrFixtureReport`, `AramMapReport`,
+  `AssembleReport`, `SpcExportReport`, `CalibrationReport`,
+  `M0Manifest`), each carrying the
+  `{ schema_version: 1, report_type: "...", ... }` envelope and a
+  `stub()` constructor for placeholder bodies. Round-trip serde tests
+  guard every shape.
+- Phase C: Tool resolution in `core::tools` per SPEC §17.1.
+  `resolve_asar`, `resolve_snes_spc_oracle`, `resolve_mesen2` follow
+  env → (PATH or workspace-default, per tool) → missing; asar and the
+  oracle wrapper are best-effort version-probed via `--version`.
+  Mesen2 is env-only with no PATH fallback and no version probe per
+  spec.
+- Phase D: `sfcwc` CLI binary in `app/src/main.rs` with six
+  clap-derive subcommands. `doctor [--json] [--out]` does real
+  resolution and emits `DoctorStatus::{Ok, Warnings, Errors}`. Five
+  stubs (`decode-fixtures`, `assemble-smoke`, `export-spc-smoke`,
+  `calibrate-oracle`, `m0-acceptance`) write valid placeholder
+  reports to `build/m0/` (default) or a `--out` path. Errors flow
+  through a `thiserror`-derived `CliError`.
+- Phase E: 22 tests across the workspace — 12 round-trip unit tests
+  in `core` and 10 CLI integration tests in `app/tests/cli.rs`
+  exercising every subcommand including the `SFCWC_ASAR=<sentinel>`
+  env-resolution path.
+
+`cargo check`, `cargo fmt --check`, `cargo clippy --all-targets --
+-D warnings`, and `cargo test` all green.
+
+## Previous passes
 
 **Pass 2.0 — Pre-M0 spec cleanup + M0-readiness additions.**
 
@@ -20,8 +58,6 @@ hygiene and spec truth only; no Rust logic yet.
   §17 and §18, not §16); §4 architecture diagram cosmetic.
 - Phase D: Rust toolchain pinned to the stable channel via
   `rust-toolchain.toml`; `CLAUDE.md` "External tools" section added.
-
-## Previous passes
 
 **Pass 1 — Repo hygiene + spec truth.**
 
@@ -53,6 +89,16 @@ hygiene and spec truth only; no Rust logic yet.
   oracle, Mesen2 (SPEC §17.1).
 - **Rust toolchain pinned to `stable` channel** (Pass 2.0): no specific
   version pin yet; revisit if regressions appear.
+- **CLI binary name `sfcwc`** (M0.1): pinned in `app/Cargo.toml` so the
+  executable is `sfcwc` regardless of the `sfc-atomizer` package name.
+- **Default report output dir `build/m0/`** (M0.1): every stub command
+  writes there unless `--out` overrides; `m0-acceptance` writes a
+  sibling `manifest.json` next to the six reports.
+- **Report envelope `{ schema_version, report_type }`** (M0.1): every
+  JSON report carries these two top-level fields. `SCHEMA_VERSION = 1`
+  in `core::report` gates breaking shape changes; the `report_type`
+  string lets generic JSON consumers dispatch without a wrapping
+  discriminator.
 
 ## Open questions remaining
 
@@ -65,5 +111,6 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M0.1 — CLI surface, schemas, report shapes.** No audio correctness
-yet. PM to brief.
+**M0.2 — Raw BRR decoder + deterministic fixture suite.** PM to brief.
+The fixture report shape from M0.1 (`BrrFixtureReport`,
+`fixture_set: "m0_raw_decode"`, results array) gets filled in.
