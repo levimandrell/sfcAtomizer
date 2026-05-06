@@ -117,6 +117,11 @@ pub fn map_from_image(aram: &[u8; ARAM_LEN]) -> AramMapReport {
         regions,
         free_bytes,
         collisions: Vec::new(),
+        // Byte-scan path has no project context to derive these from.
+        echo: None,
+        source_directory: None,
+        samples: None,
+        warnings: Vec::new(),
     }
 }
 

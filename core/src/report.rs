@@ -126,6 +126,22 @@ pub struct AramMapReport {
     pub regions: Vec<AramRegion>,
     pub free_bytes: u32,
     pub collisions: Vec<AramCollision>,
+    /// Master-echo summary. `None` when the producer is the M0
+    /// byte-scanning [`crate::aram::map_from_image`] (no project
+    /// context to derive echo state from). Populated by the M1+
+    /// packer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo: Option<AramEchoSummary>,
+    /// Source-directory summary; populated by the M1+ packer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_directory: Option<AramSourceDirSummary>,
+    /// Per-sample BRR-pool layout; populated by the M1+ packer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<AramSamplesSummary>,
+    /// Soft warnings — informational, never block the pack. Examples:
+    /// "FREE_LESS_THAN_256_BYTES", "ECHO_NEAR_TOP_OF_ARAM_REVIEW_IPL_BIT".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl AramMapReport {
@@ -166,8 +182,69 @@ impl AramMapReport {
             regions,
             free_bytes: Self::TOTAL_ARAM - used,
             collisions: Vec::new(),
+            echo: None,
+            source_directory: None,
+            samples: None,
+            warnings: Vec::new(),
         }
     }
+}
+
+/// Echo-buffer summary for the ARAM meter (M1+).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct AramEchoSummary {
+    pub enabled: bool,
+    pub edl: u8,
+    /// `EDL * 2048` bytes when enabled; 0 otherwise.
+    pub buffer_bytes: u32,
+    /// SPEC §15.3 caveat — even with `enabled=false`, the S-DSP still
+    /// performs a 4-byte echo write at `ESA*0x100` unless FLG's
+    /// echo-write-disable bit is set. The driver handles the FLG bit;
+    /// this field is the reminder.
+    pub hardware_tail_bytes: u32,
+    /// `ESA = echo_start >> 8`. Zero when echo is disabled.
+    pub esa: u8,
+    pub percent_of_aram: f64,
+    /// `false` when an `enabled=true / edl=0` configuration would
+    /// corrupt `[ESA*0x100, ESA*0x100 + 4)` (SPEC §15.3 trap). Pack
+    /// validation rejects this so a successful pack never sees
+    /// `writeback_safe=false`, but the field is here for the meter
+    /// to surface the hazard explicitly.
+    pub writeback_safe: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct AramSourceDirSummary {
+    pub source_count: u32,
+    /// `source_count * 4` bytes of actual entries.
+    pub bytes: u32,
+    /// Padding from the end of the directory entries up to the next
+    /// page boundary. The BRR pool starts at the first byte after this
+    /// padding.
+    pub padding_bytes: u32,
+    /// Page-aligned start address of the directory (= S-DSP `DIR`
+    /// register, scaled by 0x100).
+    pub start_addr: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AramSamplesSummary {
+    pub total_samples: u32,
+    pub total_brr_bytes: u32,
+    pub per_sample: Vec<PerSampleAramEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PerSampleAramEntry {
+    pub sample_id: String,
+    /// ARAM start address of this sample's BRR data (matches the
+    /// `start_addr` field in the source-directory entry).
+    pub start_addr: u16,
+    /// ARAM loop-entry address. `Some(start_addr + loop_block * 9)`
+    /// when looped; `Some(start_addr)` for non-looped (S-DSP convention
+    /// — the END flag handles termination).
+    pub loop_addr: Option<u16>,
+    pub bytes: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1065,6 +1142,104 @@ mod tests {
             !json.contains("searched"),
             "empty searched should be omitted: {json}"
         );
+    }
+
+    #[test]
+    fn aram_echo_summary_round_trip() {
+        let r = AramEchoSummary {
+            enabled: true,
+            edl: 4,
+            buffer_bytes: 8192,
+            hardware_tail_bytes: 4,
+            esa: 0xDF,
+            percent_of_aram: 12.5,
+            writeback_safe: true,
+        };
+        round_trip(&r);
+    }
+
+    #[test]
+    fn aram_source_dir_summary_round_trip() {
+        let r = AramSourceDirSummary {
+            source_count: 5,
+            bytes: 20,
+            padding_bytes: 236,
+            start_addr: 0x1200,
+        };
+        round_trip(&r);
+    }
+
+    #[test]
+    fn aram_samples_summary_round_trip() {
+        let r = AramSamplesSummary {
+            total_samples: 2,
+            total_brr_bytes: 27,
+            per_sample: vec![
+                PerSampleAramEntry {
+                    sample_id: "a".to_string(),
+                    start_addr: 0x1300,
+                    loop_addr: Some(0x1300),
+                    bytes: 9,
+                },
+                PerSampleAramEntry {
+                    sample_id: "b".to_string(),
+                    start_addr: 0x1309,
+                    loop_addr: Some(0x1309),
+                    bytes: 18,
+                },
+            ],
+        };
+        round_trip(&r);
+    }
+
+    #[test]
+    fn aram_map_report_round_trip_with_m1_fields() {
+        let mut r = AramMapReport::stub();
+        r.echo = Some(AramEchoSummary {
+            enabled: true,
+            edl: 4,
+            buffer_bytes: 8192,
+            hardware_tail_bytes: 4,
+            esa: 0xDF,
+            percent_of_aram: 12.5,
+            writeback_safe: true,
+        });
+        r.source_directory = Some(AramSourceDirSummary {
+            source_count: 1,
+            bytes: 4,
+            padding_bytes: 252,
+            start_addr: 0x1200,
+        });
+        r.samples = Some(AramSamplesSummary {
+            total_samples: 1,
+            total_brr_bytes: 9,
+            per_sample: vec![PerSampleAramEntry {
+                sample_id: "a".to_string(),
+                start_addr: 0x1300,
+                loop_addr: Some(0x1300),
+                bytes: 9,
+            }],
+        });
+        r.warnings = vec!["FREE_LESS_THAN_256_BYTES".to_string()];
+        round_trip(&r);
+    }
+
+    #[test]
+    fn aram_map_report_pre_m14_without_meter_fields_still_parses() {
+        // M0.6 manifest shape — none of the M1.4 meter summaries.
+        let pre_m14 = r#"{
+            "schema_version": 1,
+            "report_type": "aram_map",
+            "total_aram": 65536,
+            "regions": [],
+            "free_bytes": 65536,
+            "collisions": []
+        }"#;
+        let r: AramMapReport = serde_json::from_str(pre_m14).unwrap();
+        assert!(r.echo.is_none());
+        assert!(r.source_directory.is_none());
+        assert!(r.samples.is_none());
+        assert!(r.warnings.is_empty());
     }
 
     #[test]
