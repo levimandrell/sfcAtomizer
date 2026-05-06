@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use sfc_atomizer_core::brr_fixtures::{run_fixture, M0_RAW_DECODE_FIXTURES};
 use sfc_atomizer_core::report::{
     AramMapReport, AssembleReport, BrrFixtureReport, CalibrationReport, DoctorReport, DoctorStatus,
     DoctorTools, M0Manifest, RustInfo, SpcExportReport, ToolStatus, SCHEMA_VERSION,
@@ -264,9 +265,33 @@ fn status_label(s: DoctorStatus) -> &'static str {
 // =============================================================================
 
 fn cmd_decode_fixtures(out: &Path) -> Result<(), CliError> {
-    let report = BrrFixtureReport::stub();
+    let results: Vec<_> = M0_RAW_DECODE_FIXTURES.iter().map(run_fixture).collect();
+    let total = results.len() as u32;
+    let passed = results.iter().filter(|r| r.passed).count() as u32;
+    let failed = total - passed;
+
+    let report = BrrFixtureReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: BrrFixtureReport::REPORT_TYPE.to_string(),
+        fixture_set: "m0_raw_decode".to_string(),
+        total,
+        passed,
+        failed,
+        skipped: 0,
+        results,
+    };
     write_json(out, &report)?;
-    eprintln!("decode-fixtures: wrote {}", out.display());
+    if failed == 0 {
+        eprintln!(
+            "decode-fixtures: {passed}/{total} passed; wrote {}",
+            out.display()
+        );
+    } else {
+        eprintln!(
+            "decode-fixtures: {passed}/{total} passed ({failed} failed); wrote {}",
+            out.display()
+        );
+    }
     Ok(())
 }
 

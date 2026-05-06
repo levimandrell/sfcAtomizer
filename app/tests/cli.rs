@@ -92,18 +92,50 @@ fn doctor_sfcwc_asar_env_resolves() {
 }
 
 #[test]
-fn decode_fixtures_writes_stub() {
+fn decode_fixtures_runs_corpus() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("brr.json");
     let out = run_with_arg_path(&["decode-fixtures"], "--out", &path);
-    assert!(out.status.success(), "{:?}", out);
+    assert!(
+        out.status.success(),
+        "decode-fixtures failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v = read_json(&path);
     assert_envelope(&v, "brr_fixture");
     assert_eq!(v["fixture_set"], "m0_raw_decode");
-    assert_eq!(v["total"], 0);
-    assert_eq!(v["passed"], 0);
+    assert_eq!(v["total"], 9);
+    assert_eq!(v["passed"], 9);
     assert_eq!(v["failed"], 0);
-    assert!(v["results"].as_array().unwrap().is_empty());
+    assert_eq!(v["skipped"], 0);
+
+    let results = v["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 9);
+    let names: Vec<&str> = results
+        .iter()
+        .map(|r| r["name"].as_str().expect("name string"))
+        .collect();
+    let expected_names = [
+        "filter0_basic",
+        "filter0_shift_clamp",
+        "filter1_zero_history",
+        "filter1_nonzero_history",
+        "filter2_nonzero_history",
+        "filter3_nonzero_history",
+        "multi_block_predictor_history",
+        "loop_boundary_history",
+        "flags_end_loop_ignored_by_raw_decode",
+    ];
+    assert_eq!(names, expected_names);
+    for r in results {
+        assert_eq!(r["passed"], true, "fixture failed: {r}");
+    }
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("9/9 passed"),
+        "expected '9/9 passed' in stderr, got: {stderr}"
+    );
 }
 
 #[test]
