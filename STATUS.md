@@ -2,16 +2,94 @@
 
 ## Current milestone
 
-**M1 in progress — `.sfc` test ROM + module swap shipped.**
-`sfcwc compile-sfc` produces a 256 KB LoROM `.sfc` carrying a
-~580-byte 65816 loader + module A at bank 1 + module B at bank 2
-(clone of A in single-project mode). `verify-sfc-structure`
-checks the LoROM header, vectors, and embedded `module.bin`
-in-file SHAs. `verify-sfc-modules-audible` reconstructs each
-module's ARAM, wraps as M1 SPC, and runs through the snes_spc
-oracle — the audio cross-check that doesn't need an SNES emu.
+**M1 complete.** `sfcwc m1-acceptance` chains the full M1
+pipeline (doctor → validate → compile-spc → verify-spc-audible →
+compile-sfc → verify-sfc-structure → verify-sfc-modules-audible)
+into a single `M1Manifest` with aggregate `BundleStatus`
+semantics analogous to `m0-acceptance`. End-to-end run on this
+host: **bundle.status=ok**, all 9 step reports written, all
+SHA cross-references match, integrity verified. Audible
+thresholds (`min_max_abs=1000`, `min_rms=200`) are frozen here
+per SPEC §21; regressions become CI failures from M2 onward.
+
+**M2 prep next.** PM-led consultant round to plan M2 sub-passes
+(driver capability system per SPEC §M2 / §3 capability manifest).
 
 ## Last pass
+
+**Pass M1.7 — M1 acceptance bundle.**
+
+- Phase A: `M1Manifest` + `M1BundleSummary` + `M1BundleSteps`
+  in `core::report`. Mirrors the M0.6 design (Status enum
+  reused). Carries cross-reference SHAs (aram / spc / sfc /
+  module_a / module_b / driver_code), audible max_abs values
+  for both .spc and .sfc paths, `modules_audio_identical` flag.
+- Phase B: `core::manifest::verify_m1_bundle` reads the bundle
+  from disk and cross-checks: `compile_spc.spc_file_sha256 ==
+  audible_spc.spc_sha256`, `compile_sfc.module_a_in_file_sha256
+  == structure_sfc.module_a.in_file_sha256`, `compile_sfc.sfc_path
+  ↔ structure_sfc.sfc_path`, schema version consistency. The
+  legacy `read_typed` helper was generalised to a trait-based
+  `read_typed_with` so M0 and M1 verifiers share the path.
+- Phase C: `sfcwc m1-acceptance` chains the M1 sub-commands by
+  spawning the sfcwc binary for each step (failure-as-data —
+  every step writes a report regardless of outcome). Reads
+  reports back to compute `M1BundleSteps`; runs `verify_m1_bundle`
+  to populate diagnostics; writes `manifest.json`. Always exits 0;
+  bundle status reflects the run.
+- Phase D: `sfcwc m1-status` read-only summary. Exit 0 on
+  bundle status `ok`/`degraded` AND clean integrity; exit 1
+  otherwise (drift detection mirrors `m0-status`).
+- Phase E: SPEC §21 M1 acceptance bullet expanded with the
+  required-vs-optional step list, doctor mapping, frozen
+  thresholds, and cross-reference invariants. §23 question 1
+  partially resolved (voice/module audible-render thresholds
+  frozen; atom-quality remains open for M3+).
+- Phase F: STATUS — milestone marked complete; M1 baseline
+  SHAs locked under named constants; Awaiting-user-audition
+  section consolidated.
+- Phase G: 5 new `verify_m1_bundle` unit tests + 2
+  `M1Manifest` round-trip tests + 5 CLI integration tests
+  (`m1-acceptance` one-project, two-projects, `m1-status`
+  valid / missing / corrupted). **326 tests across the
+  workspace; all green.**
+
+### M1 acceptance gate result on this host
+
+```
+m1-acceptance: bundle.status=ok; wrote 9 reports + manifest -> bundle\manifest.json
+```
+- `doctor`: ok (asar resolved on PATH; oracle resolved via env;
+  Mesen2 missing — informational only, doesn't downgrade)
+- `validate_a`: ok
+- `validate_b`: skipped (no project B)
+- `compile_spc`: ok — driver 324 B, image 65 KB, spc 66 KB
+- `audible_spc`: ok — max_abs=11072, rms=5519.6
+- `compile_sfc`: ok — sfc 256 KB, module_a 9048 B, clone-of-a
+- `structure_sfc`: ok — 0 findings
+- `audible_sfc`: ok — A.max_abs=11072, B.max_abs=11072, identical=true
+
+All cross-reference SHA invariants pass; integrity bools all
+true. Mangling any one report's SHA correctly trips
+`m1-status` to exit 1 with a finding.
+
+## Awaiting user audible audition
+
+When you're back at your desktop with a working Mesen2 install:
+
+- **`<project>.spc`** from `compile-spc` (or
+  `bundle/project_a.spc` from `m1-acceptance`): sustained sine,
+  no clicks, no silence. Audible immediately on Mesen2 load.
+- **`<project>.sfc`** from `compile-sfc` (or
+  `bundle/project.sfc` from `m1-acceptance`): ~5 seconds of
+  sine → brief gap (RESET_TO_IPL handshake) → ~5 seconds of
+  sine again (module B = clone of A in single-project mode) →
+  repeats. With two distinct projects, modules A and B should
+  sound different.
+- **On Mesen2 load failure**: copy any error dialog text and
+  report.
+
+## Previous passes
 
 **Pass M1.6 — `.sfc` test ROM + module swap.**
 
@@ -734,6 +812,33 @@ test` all green.
 
 ## Decisions log
 
+### M1 baseline locked SHAs
+
+For the canonical one-sample reference project (8192-frame
+8000-amp sine, 32 kHz, echo off, GAIN=127, single-project
+clone mode for the `.sfc` swap):
+
+```
+M1_DRIVER_CODE_SHA256  = 52f9c26bad6df33875f16ae2ef4a6a4e0e5c265e29af74db103b393daef24955
+M1_DRIVER_CODE_BYTES   = 324
+M1_ARAM_IMAGE_SHA256   = b384617ff4d45c5da965d27bd74926070eb3b4985fb051bcda25165f7bfb54eb
+M1_SPC_FILE_SHA256     = edd02b030e1c0f574c4ff1f64dc80f1c643d2ba18628a6f67a35dc93b8759315
+M1_SFC_FILE_SHA256     = fca07fb5f505f1f6e74c4e37a89d576d81ab94a75878131b12406c1f38f1b2ce
+M1_MODULE_A_SHA256     = d138f81fe1c23f5340a426d3e08b3e79e365e7d787bc6cd522f1a3082dc0da86
+M1_LOADER_SIZE_BYTES   = 581
+M1_AUDIBLE_MAX_ABS     = 11072      ; oracle render of either .spc or
+                                    ; either reconstructed-from-.sfc
+                                    ; module identically
+M1_AUDIBLE_RMS         = 5519.6
+M1_AUDIBLE_THRESHOLDS  = min_max_abs=1000, min_rms=200 (frozen at M1.7)
+```
+
+Locked by `m1-acceptance` and re-checked by `m1-status`. Any
+future change to the source `.asm`, the BRR encoder, the
+packer, the driver_build constants generator, the
+module_writer, the SFC export, or the SPC contract that alters
+these SHAs is a producer-side regression and must be flagged.
+
 - **License model:** Apache-2.0 for the host application source; 0BSD for
   generated outputs (`.spc`, `.sfc`, driver/module blobs); snes_spc kept
   out-of-process to avoid LGPL propagation. See `LICENSING.md`.
@@ -850,6 +955,49 @@ test` all green.
   `cmd_calibrate_oracle` computes the SHA on the in-memory PCM
   bytes alongside max_abs/rms; the bundle pulls it from one place
   rather than parsing the wrapper's report.
+
+### M1 acceptance bundle decisions (M1.7)
+
+- **Audible verification thresholds frozen** (M1.7).
+  `min_max_abs = 1000`, `min_rms = 200`. Both the M1.5
+  `verify-spc-audible` and M1.6 `verify-sfc-modules-audible`
+  CLI defaults locked here. Regressions become CI failures
+  from M2 onward (parallel to the M0.6 → M1 calibration
+  freeze pattern).
+- **M1 bundle aggregation rules** (M1.7). Required steps:
+  doctor, validate_a, compile_spc, audible_spc, compile_sfc,
+  structure_sfc, audible_sfc. Optional: validate_b (Skipped is
+  fine when no project_b given). `BundleStatus::Ok` iff every
+  required step is `Ok`. `Error` if any required step is
+  `Error` or `Skipped`. `Degraded` if any required step is
+  `Warnings`. Mirrors the M0.6 aggregation pattern, adapted
+  to the M1 step set.
+- **Doctor mapping carves out Mesen2** (M1.7). Per the brief's
+  guidance: asar missing → Error; oracle missing → Warnings
+  (audible steps then Skip and the bundle drops to Error
+  there); Mesen2 missing → Ok (informational only). The
+  doctor status enum's blanket "Warnings" — which counts
+  Mesen2-missing — would otherwise downgrade a healthy
+  bundle to Degraded; we look at individual tool-resolved
+  flags instead.
+- **Cross-reference SHA invariants enforced by
+  `verify_m1_bundle`** (M1.7):
+  `compile_spc.spc_file_sha256 == audible_spc.spc_sha256`
+  (the same .spc file fed to the oracle), `compile_sfc.
+  module_a_in_file_sha256 == structure_sfc.module_a.
+  in_file_sha256` (the same module.bin embedded in the .sfc),
+  `compile_sfc.sfc_path` and `structure_sfc.sfc_path` resolve
+  to the same filename, all reports share `schema_version`.
+  `m1-status` re-runs these against the on-disk bundle so
+  drift after generation is surfaced.
+- **`m1-acceptance` chains by spawning sfcwc subprocesses**
+  (M1.7). The M1 cmd_* functions exit-on-failure (designed as
+  top-level CLI commands); rather than refactor each into a
+  Result-returning library function, m1-acceptance spawns the
+  current binary for each step and reads the produced report
+  back. Same fail-as-data shape as M0.6. Trade-off: ~50 ms
+  of process spawn overhead per step (×8 steps); acceptable
+  for an acceptance gate.
 
 ### M1 .sfc / module.bin / Mesen2 decisions (M1.6)
 
@@ -1219,8 +1367,8 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M1.7 — M1 acceptance bundle.** PM to brief.
-With `.spc` and `.sfc` paths both shipped, M1 acceptance ties
-together a single bundle (analogous to the M0 `m0-acceptance`
-manifest) covering: doctor, project compile, audible `.spc`,
-audible-on-paper `.sfc` modules, structural `.sfc` integrity.
+**M2 prep — PM-led consultant round.** With M1 closed
+(audible `.spc`, audible-on-paper `.sfc`, bundle acceptance
+gate, frozen thresholds), the next pass is consultant-led
+planning of the M2 sub-passes (driver capability system,
+SPEC §M2 / §3 capability manifest, feature flag wiring).
