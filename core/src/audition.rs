@@ -69,6 +69,30 @@ fn decode_brr_pcm(brr_bytes: &[u8]) -> Vec<i16> {
     pcm
 }
 
+/// Convert interleaved-stereo s16le bytes (the snes_spc oracle's
+/// PCM output) to a mono 32 kHz PCM16 WAV. Each frame's L and R
+/// samples are averaged with truncation toward zero — equal-pan
+/// signals come out identical to either channel; panned signals
+/// land at the obvious midpoint.
+pub fn write_oracle_pcm_to_mono_wav(
+    out_path: &Path,
+    pcm_stereo_le: &[u8],
+    sample_rate_hz: u32,
+) -> Result<(), AuditionError> {
+    if !pcm_stereo_le.len().is_multiple_of(4) {
+        return Err(AuditionError::UnalignedBrrLength(pcm_stereo_le.len()));
+    }
+    let frames = pcm_stereo_le.len() / 4;
+    let mut mono: Vec<i16> = Vec::with_capacity(frames);
+    for f in 0..frames {
+        let off = f * 4;
+        let l = i16::from_le_bytes([pcm_stereo_le[off], pcm_stereo_le[off + 1]]) as i32;
+        let r = i16::from_le_bytes([pcm_stereo_le[off + 2], pcm_stereo_le[off + 3]]) as i32;
+        mono.push(((l + r) / 2) as i16);
+    }
+    write_pcm16_mono_wav(out_path, &mono, sample_rate_hz)
+}
+
 fn write_pcm16_mono_wav(
     out_path: &Path,
     samples: &[i16],

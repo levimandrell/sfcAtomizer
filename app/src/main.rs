@@ -226,6 +226,14 @@ enum Command {
         min_rms: f64,
         #[arg(long)]
         oracle: Option<PathBuf>,
+        /// Optional: write module A's rendered PCM as a 32 kHz mono
+        /// PCM16 WAV alongside the report. Useful for offline
+        /// audition / commit-visible artifacts.
+        #[arg(long)]
+        out_wav_a: Option<PathBuf>,
+        /// Same for module B.
+        #[arg(long)]
+        out_wav_b: Option<PathBuf>,
     },
     /// Compile a project end-to-end into an audible `.spc` file (M1.5).
     ///
@@ -273,6 +281,11 @@ enum Command {
         /// default (same shape as `calibrate-oracle`).
         #[arg(long)]
         oracle: Option<PathBuf>,
+        /// Optional: write the rendered PCM as a 32 kHz mono PCM16
+        /// WAV. The oracle output is interleaved-stereo 16-bit at
+        /// 32 kHz; the WAV-side helper averages L+R per frame.
+        #[arg(long)]
+        out_wav: Option<PathBuf>,
     },
     /// Pack a project into a 64 KB ARAM image + map report (M1.4).
     ///
@@ -464,6 +477,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
             min_max_abs,
             min_rms,
             oracle,
+            out_wav_a,
+            out_wav_b,
         } => cmd_verify_sfc_modules_audible(
             &sfc,
             frames,
@@ -471,6 +486,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
             min_max_abs,
             min_rms,
             oracle.as_deref(),
+            out_wav_a.as_deref(),
+            out_wav_b.as_deref(),
         ),
         Command::CompileSpc {
             project,
@@ -495,6 +512,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             min_max_abs,
             min_rms,
             oracle,
+            out_wav,
         } => cmd_verify_spc_audible(
             &spc,
             frames,
@@ -503,6 +521,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             min_max_abs,
             min_rms,
             oracle.as_deref(),
+            out_wav.as_deref(),
         ),
         Command::EncodeBrr {
             audio,
@@ -3166,6 +3185,7 @@ fn zero_module_summary(embed_offset: usize) -> SfcModuleSummary {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_verify_sfc_modules_audible(
     sfc_path: &Path,
     frames: u32,
@@ -3173,6 +3193,8 @@ fn cmd_verify_sfc_modules_audible(
     min_max_abs: u32,
     min_rms: f64,
     oracle: Option<&Path>,
+    out_wav_a: Option<&Path>,
+    out_wav_b: Option<&Path>,
 ) -> Result<(), CliError> {
     let stem = sfc_path
         .file_stem()
@@ -3222,6 +3244,7 @@ fn cmd_verify_sfc_modules_audible(
         min_rms,
         &oracle_path,
         work.path(),
+        out_wav_a,
     );
     let module_b_audible = render_module_audible(
         &sfc_bytes,
@@ -3233,6 +3256,7 @@ fn cmd_verify_sfc_modules_audible(
         min_rms,
         &oracle_path,
         work.path(),
+        out_wav_b,
     );
 
     let modules_audio_identical = module_a_audible.spc_sha256 == module_b_audible.spc_sha256;
@@ -3299,6 +3323,7 @@ fn render_module_audible(
     min_rms: f64,
     oracle_path: &Path,
     work_dir: &Path,
+    out_wav: Option<&Path>,
 ) -> AudibleVerificationReport {
     let mut report = AudibleVerificationReport {
         schema_version: SCHEMA_VERSION,
@@ -3409,6 +3434,22 @@ fn render_module_audible(
             return report;
         }
     };
+    if let Some(wav_path) = out_wav {
+        if let Some(parent) = wav_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    report.error = Some(format!("write WAV (mkdir): {e}"));
+                    return report;
+                }
+            }
+        }
+        if let Err(e) =
+            sfc_atomizer_core::audition::write_oracle_pcm_to_mono_wav(wav_path, &pcm, 32_000)
+        {
+            report.error = Some(format!("write WAV: {e}"));
+            return report;
+        }
+    }
     let (max_abs, rms) = pcm_stats_from_bytes(&pcm);
     let bytes_zero = pcm.iter().filter(|&&b| b == 0).count() as u32;
     let bytes_total = pcm.len() as u32;
@@ -3533,6 +3574,7 @@ fn cmd_compile_spc(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_verify_spc_audible(
     spc_path: &Path,
     frames: u32,
@@ -3541,6 +3583,7 @@ fn cmd_verify_spc_audible(
     min_max_abs: u32,
     min_rms: f64,
     oracle: Option<&Path>,
+    out_wav: Option<&Path>,
 ) -> Result<(), CliError> {
     let stem = spc_path
         .file_stem()
@@ -3675,6 +3718,25 @@ fn cmd_verify_spc_audible(
             out_report_owned.display()
         );
         std::process::exit(1);
+    }
+
+    if let Some(wav_path) = out_wav {
+        if let Some(parent) = wav_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                create_dir(parent)?;
+            }
+        }
+        if let Err(e) =
+            sfc_atomizer_core::audition::write_oracle_pcm_to_mono_wav(wav_path, &pcm_bytes, 32_000)
+        {
+            report.error = Some(format!("write WAV: {e}"));
+            write_json(&out_report_owned, &report)?;
+            eprintln!(
+                "verify-spc-audible: write WAV failed: {e}; report -> {}",
+                out_report_owned.display()
+            );
+            std::process::exit(1);
+        }
     }
 
     let (max_abs, rms) = pcm_stats_from_bytes(&pcm_bytes);
