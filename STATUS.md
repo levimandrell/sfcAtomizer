@@ -2,10 +2,26 @@
 
 ## Current milestone
 
-**M0 — Research harness** — not started. Pass 1 (this pass) covered repo
+**M0 — Research harness** — not started. Passes so far have covered repo
 hygiene and spec truth only; no Rust logic yet.
 
 ## Last pass
+
+**Pass 2.0 — Pre-M0 spec cleanup + M0-readiness additions.**
+
+- Phase A: §21 M0 acceptance reconciled — removed the contradictory
+  closing paragraph and three superseded acceptance bullets (snes_spc
+  render gate, SPC-player playback, WAV-fixture round-trip).
+- Phase B: `.sfc` exporter deferred to M1 alongside the 65816
+  SPC-upload contract (SPEC §19.2); Mesen2 added as the manual M0
+  `.spc` verification path.
+- Phase C: New §17.1 "Tool discovery" subsection; §10.1
+  cross-reference typo fixed (snes_spc external validation lives in
+  §17 and §18, not §16); §4 architecture diagram cosmetic.
+- Phase D: Rust toolchain pinned to the stable channel via
+  `rust-toolchain.toml`; `CLAUDE.md` "External tools" section added.
+
+## Previous passes
 
 **Pass 1 — Repo hygiene + spec truth.**
 
@@ -27,9 +43,16 @@ hygiene and spec truth only; no Rust logic yet.
   (SPEC §4).
 - **`max_sources`:** 128 (SPEC §5.4); ARAM packer enforces actual
   source-directory footprint.
-- **M0 acceptance split** (resolved this pass per consultant Patch 5): raw
-  BRR decode is bit-identical at M0; voice-render and full-module-render
-  tolerances are provisional at M0 and frozen at M1 (SPEC §10.1, §21, §23).
+- **M0 acceptance split** (resolved per consultant Patch 5): raw BRR
+  decode is bit-identical at M0; voice-render and full-module-render
+  tolerances are provisional at M0 and frozen at M1 (SPEC §10.1, §21,
+  §23).
+- **`.sfc` deferred to M1** (Pass 2.0): the 65816 SPC-upload contract is
+  M1 work (SPEC §19.2); M0 ships `.spc` only.
+- **Tool discovery via `SFCWC_*` env vars** (Pass 2.0): asar, snes_spc
+  oracle, Mesen2 (SPEC §17.1).
+- **Rust toolchain pinned to `stable` channel** (Pass 2.0): no specific
+  version pin yet; revisit if regressions appear.
 
 ## Open questions remaining
 
@@ -42,5 +65,5 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M0 implementation** — TBD by PM. Likely starts with Rust BRR
-encoder/raw-decoder and asar-backed hello-sample driver.
+**M0.1 — CLI surface, schemas, report shapes.** No audio correctness
+yet. PM to brief.

@@ -34,6 +34,19 @@ The workspace has two member crates:
 Adding new dependencies is a PM-approved decision per pass. Don't pull
 crates in unprompted.
 
+## External tools
+
+Resolved via env vars (see SPEC §17.1):
+
+- `SFCWC_ASAR` — path to asar executable, falls back to `asar` on PATH.
+- `SFCWC_SNES_SPC_ORACLE` — path to the oracle wrapper binary, falls
+  back to `tools/snes_spc_oracle`.
+- `SFCWC_MESEN2` — optional, used only by `doctor`; Mesen2 is launched
+  manually for `.spc` smoke tests.
+
+Toolchain is pinned to the stable channel via `rust-toolchain.toml`.
+Don't pin a specific version unless PM directs.
+
 ## Commit convention
 
 `type(scope): subject`
