@@ -138,25 +138,141 @@ fn decode_fixtures_runs_corpus() {
     );
 }
 
+/// Path to `core/fixtures/asm/m0_smoke.asm` resolved relative to the
+/// app crate's manifest dir at compile time so the test works
+/// regardless of cwd.
+fn smoke_asm_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("core")
+        .join("fixtures")
+        .join("asm")
+        .join("m0_smoke.asm")
+}
+
 #[test]
-fn assemble_smoke_writes_stub() {
+fn assemble_smoke_when_asar_resolved() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip assemble_smoke_when_asar_resolved: asar not resolved on this host");
+        return;
+    }
+
     let dir = TempDir::new().unwrap();
-    let src = dir.path().join("hello.asm");
-    std::fs::write(&src, "; placeholder\n").unwrap();
-    let path = dir.path().join("assemble.json");
+    let report_path = dir.path().join("r.json");
+    let image_path = dir.path().join("d.bin");
+    let src = smoke_asm_path();
+    assert!(src.is_file(), "smoke .asm fixture missing at {src:?}");
+
     let out = Command::new(bin())
         .args(["assemble-smoke", "--source"])
         .arg(&src)
         .args(["--out"])
-        .arg(&path)
+        .arg(&report_path)
+        .args(["--out-image"])
+        .arg(&image_path)
         .output()
-        .unwrap();
-    assert!(out.status.success(), "{:?}", out);
-    let v = read_json(&path);
+        .expect("run sfcwc");
+    assert!(
+        out.status.success(),
+        "exit failure: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let v = read_json(&report_path);
     assert_envelope(&v, "assemble");
-    assert_eq!(v["status"], "not_run");
+    assert_eq!(v["status"], "ok", "report status: {v}");
     assert_eq!(v["backend"], "asar");
-    assert_eq!(v["input_path"], Value::Null);
+    assert_eq!(v["output_bytes"], 65536);
+    assert_eq!(v["exit_code"], 0);
+    let sha = v["output_image_sha256"]
+        .as_str()
+        .expect("sha string present on success");
+    assert_eq!(sha.len(), 64, "sha must be 64 hex chars: {sha}");
+    assert!(
+        sha.chars().all(|c| c.is_ascii_hexdigit()),
+        "sha must be hex: {sha}"
+    );
+    assert!(v["error"].is_null(), "error should be null on success: {v}");
+
+    // Image: exactly 64 KB, sentinel bytes at offset 0x0200..0x0202.
+    let image = std::fs::read(&image_path).expect("read image");
+    assert_eq!(image.len(), 65536, "image size");
+    assert_eq!(
+        &image[0x0200..0x0203],
+        &[0x00, 0x2F, 0xFD],
+        "sentinel bytes mismatch — locked to NOP + BRA -3 from m0_smoke.asm"
+    );
+    // Spot-check: every other byte is zero.
+    let nonzero: Vec<usize> = image
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| **b != 0)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        nonzero,
+        vec![0x0201, 0x0202],
+        "expected only the BRA opcode + disp to be nonzero"
+    );
+
+    // Stderr summary line should announce success and the sha.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("asar OK"),
+        "expected 'asar OK' in stderr: {stderr}"
+    );
+    assert!(stderr.contains(sha), "stderr should echo sha: {stderr}");
+}
+
+#[test]
+fn assemble_smoke_when_asar_missing() {
+    let dir = TempDir::new().unwrap();
+    let bogus_asar = dir.path().join("not-asar-does-not-exist");
+    let isolated_path = dir.path().to_path_buf();
+    let report_path = dir.path().join("r.json");
+    let image_path = dir.path().join("d.bin");
+    let src = smoke_asm_path();
+
+    let out = Command::new(bin())
+        .env("SFCWC_ASAR", &bogus_asar)
+        .env("PATH", &isolated_path) // contains no asar.exe
+        .args(["assemble-smoke", "--source"])
+        .arg(&src)
+        .args(["--out"])
+        .arg(&report_path)
+        .args(["--out-image"])
+        .arg(&image_path)
+        .output()
+        .expect("run sfcwc");
+    assert!(
+        out.status.success(),
+        "expected failure-as-data (exit 0) even when asar is missing: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let v = read_json(&report_path);
+    assert_envelope(&v, "assemble");
+    assert_eq!(v["status"], "error", "report status: {v}");
+    let err_msg = v["error"]
+        .as_str()
+        .expect("error string present on failure");
+    assert!(
+        err_msg.contains("SFCWC_ASAR"),
+        "error should mention SFCWC_ASAR: {err_msg}"
+    );
+
+    // Image file should NOT exist (we never reached the assemble step).
+    assert!(
+        !image_path.exists(),
+        "image should not be created when asar is missing"
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("asar not resolved"),
+        "expected 'asar not resolved' in stderr: {stderr}"
+    );
 }
 
 #[test]

@@ -7,10 +7,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use sfc_atomizer_core::asm::{
+    sha256_hex_file, AsarBackend, AssembleError, AssembleInput, AssemblerBackend,
+};
 use sfc_atomizer_core::brr_fixtures::{run_fixture, M0_RAW_DECODE_FIXTURES};
 use sfc_atomizer_core::report::{
-    AramMapReport, AssembleReport, BrrFixtureReport, CalibrationReport, DoctorReport, DoctorStatus,
-    DoctorTools, M0Manifest, RustInfo, SpcExportReport, ToolStatus, SCHEMA_VERSION,
+    AramMapReport, AssembleReport, AssembleStatus, BrrFixtureReport, CalibrationReport,
+    DoctorReport, DoctorStatus, DoctorTools, M0Manifest, RustInfo, SpcExportReport, ToolStatus,
+    SCHEMA_VERSION,
 };
 use sfc_atomizer_core::tools::{self, ResolvedTool, ToolSource};
 use thiserror::Error;
@@ -38,12 +42,15 @@ enum Command {
         #[arg(long, default_value = "build/m0/brr-fixture-report.json")]
         out: PathBuf,
     },
-    /// Smoke-test the assembler (M0.1: stub report only, source not read).
+    /// Smoke-test the asar backend: assemble `--source` into a 64 KB
+    /// ARAM image at `--out-image`, write the report to `--out`.
     AssembleSmoke {
         #[arg(long)]
         source: PathBuf,
         #[arg(long, default_value = "build/m0/assemble-report.json")]
         out: PathBuf,
+        #[arg(long, default_value = "build/m0/driver.bin")]
+        out_image: PathBuf,
     },
     /// Smoke-test SPC export (M0.1: stub report).
     ExportSpcSmoke {
@@ -93,7 +100,11 @@ fn run(cli: Cli) -> Result<(), CliError> {
     match cli.command {
         Command::Doctor { json, out } => cmd_doctor(json, out.as_deref()),
         Command::DecodeFixtures { out } => cmd_decode_fixtures(&out),
-        Command::AssembleSmoke { source, out } => cmd_assemble_smoke(&source, &out),
+        Command::AssembleSmoke {
+            source,
+            out,
+            out_image,
+        } => cmd_assemble_smoke(&source, &out, &out_image),
         Command::ExportSpcSmoke { out } => cmd_export_spc_smoke(&out),
         Command::CalibrateOracle { oracle, out } => cmd_calibrate_oracle(oracle.as_deref(), &out),
         Command::M0Acceptance { out } => cmd_m0_acceptance(&out),
@@ -295,11 +306,122 @@ fn cmd_decode_fixtures(out: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-fn cmd_assemble_smoke(_source: &Path, out: &Path) -> Result<(), CliError> {
-    let report = AssembleReport::stub();
-    write_json(out, &report)?;
-    eprintln!("assemble-smoke: wrote {}", out.display());
-    Ok(())
+fn cmd_assemble_smoke(source: &Path, report_out: &Path, image_out: &Path) -> Result<(), CliError> {
+    let working_dir = std::env::current_dir().map_err(CliError::Cwd)?;
+    let input_sha = sha256_hex_file(source).ok();
+    let input_path_str = source.display().to_string();
+
+    let mut report = AssembleReport::stub();
+    report.input_path = Some(input_path_str.clone());
+    report.input_sha256 = input_sha;
+    report.output_path = Some(image_out.display().to_string());
+
+    match AsarBackend::from_resolution() {
+        Err(AssembleError::NotResolved { hint }) => {
+            report.status = AssembleStatus::Error;
+            report.error = Some(format!("assembler not resolved: {hint}"));
+            write_json(report_out, &report)?;
+            eprintln!(
+                "assemble-smoke: asar not resolved (set SFCWC_ASAR); report -> {}",
+                report_out.display()
+            );
+            Ok(())
+        }
+        Err(other) => {
+            report.status = AssembleStatus::Error;
+            report.error = Some(format!("backend init: {other}"));
+            write_json(report_out, &report)?;
+            eprintln!(
+                "assemble-smoke: backend init failed: {other}; report -> {}",
+                report_out.display()
+            );
+            Ok(())
+        }
+        Ok(backend) => assemble_with_backend(
+            &backend,
+            source,
+            report_out,
+            image_out,
+            &working_dir,
+            report,
+        ),
+    }
+}
+
+fn assemble_with_backend(
+    backend: &AsarBackend,
+    source: &Path,
+    report_out: &Path,
+    image_out: &Path,
+    working_dir: &Path,
+    mut report: AssembleReport,
+) -> Result<(), CliError> {
+    report.backend = backend.name().to_string();
+
+    let input = AssembleInput {
+        source_path: source.to_path_buf(),
+        output_image_path: image_out.to_path_buf(),
+        working_dir: working_dir.to_path_buf(),
+    };
+
+    match backend.assemble(&input) {
+        Ok(out) => {
+            report.backend_version = out.version;
+            report.output_bytes = out.output_bytes;
+            report.exit_code = Some(out.exit_code);
+            report.stdout_lines = count_lines(&out.stdout);
+            report.stderr_lines = count_lines(&out.stderr);
+            report.output_image_sha256 = Some(out.output_image_sha256.clone());
+            report.status = AssembleStatus::Ok;
+            report.error = None;
+
+            write_json(report_out, &report)?;
+            eprintln!(
+                "assemble-smoke: asar OK; wrote {} ({} B, sha256={}); report -> {}",
+                image_out.display(),
+                out.output_bytes,
+                out.output_image_sha256,
+                report_out.display()
+            );
+            Ok(())
+        }
+        Err(err) => {
+            // Failure-as-data: populate what we have, status=error,
+            // exit 0 so callers see the report.
+            report.backend_version = backend.version().unwrap_or_else(|_| "unknown".to_string());
+            if let AssembleError::NonZeroExit { code, ref stderr } = err {
+                report.exit_code = Some(code);
+                report.stderr_lines = count_lines(stderr);
+            }
+            report.status = AssembleStatus::Error;
+            report.error = Some(format!("{err}"));
+
+            write_json(report_out, &report)?;
+            let summary = match &err {
+                AssembleError::NonZeroExit { code, stderr } => {
+                    format!("asar exited {code}: {}", first_line(stderr))
+                }
+                other => format!("{other}"),
+            };
+            eprintln!(
+                "assemble-smoke: {summary}; report -> {}",
+                report_out.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+fn count_lines(s: &str) -> u32 {
+    if s.is_empty() {
+        0
+    } else {
+        s.lines().count() as u32
+    }
+}
+
+fn first_line(s: &str) -> &str {
+    s.lines().next().unwrap_or("").trim()
 }
 
 fn cmd_export_spc_smoke(out: &Path) -> Result<(), CliError> {
