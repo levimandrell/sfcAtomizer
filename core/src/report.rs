@@ -819,6 +819,124 @@ pub enum AudibleStatus {
 }
 
 // =============================================================================
+// Compile-SFC report — `sfcwc compile-sfc` (M1.6)
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompileSfcReport {
+    pub schema_version: u32,
+    pub report_type: String,
+    pub project_a_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_b_name: Option<String>,
+    pub sfc_path: String,
+    pub sfc_size_bytes: u32,
+    pub sfc_sha256: String,
+    /// Module B is a clone of module A when only project A was given.
+    pub module_b_is_clone_of_a: bool,
+    pub module_a_sha256: String,
+    pub module_a_in_file_sha256: String,
+    pub module_a_bytes: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_b_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_b_in_file_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_b_bytes: Option<u32>,
+    pub loader_size_bytes: u32,
+}
+
+impl CompileSfcReport {
+    pub const REPORT_TYPE: &'static str = "compile_sfc";
+}
+
+// =============================================================================
+// SFC structure report — `sfcwc verify-sfc-structure` (M1.6)
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SfcStructureReport {
+    pub schema_version: u32,
+    pub report_type: String,
+    pub sfc_path: String,
+    pub status: SfcStructureStatus,
+    pub findings: Vec<SfcFinding>,
+    pub header_summary: SfcHeaderSummary,
+    pub module_a_summary: SfcModuleSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_b_summary: Option<SfcModuleSummary>,
+}
+
+impl SfcStructureReport {
+    pub const REPORT_TYPE: &'static str = "sfc_structure";
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SfcStructureStatus {
+    Ok,
+    Fail,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SfcFinding {
+    pub kind: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SfcHeaderSummary {
+    pub title: String,
+    pub mode_byte: u8,
+    pub rom_size_byte: u8,
+    pub country_byte: u8,
+    pub checksum: u16,
+    pub checksum_complement: u16,
+    pub reset_vector: u16,
+    pub file_size_bytes: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SfcModuleSummary {
+    pub embed_offset: u32,
+    pub magic_ok: bool,
+    pub schema_version: u16,
+    pub block_count: u16,
+    pub entrypoint: u16,
+    pub total_file_len: u32,
+    pub flags: u16,
+    pub in_file_sha256: String,
+    pub recomputed_in_file_sha256: String,
+    pub in_file_sha_matches: bool,
+}
+
+// =============================================================================
+// SFC modules audible report — `sfcwc verify-sfc-modules-audible` (M1.6)
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SfcModulesAudibleReport {
+    pub schema_version: u32,
+    pub report_type: String,
+    pub sfc_path: String,
+    pub status: AudibleStatus,
+    pub module_a_audible: AudibleVerificationReport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_b_audible: Option<AudibleVerificationReport>,
+    /// `true` when both rendered PCMs hash to the same SHA-256
+    /// (M1.6 single-project clone case). Useful for the user to
+    /// confirm "swap to identical module produced identical
+    /// audio".
+    pub modules_audio_identical: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl SfcModulesAudibleReport {
+    pub const REPORT_TYPE: &'static str = "sfc_modules_audible";
+}
+
+// =============================================================================
 // Tests — round-trip every report through serde to catch field renames.
 // =============================================================================
 
@@ -1211,6 +1329,106 @@ mod tests {
             !json.contains("searched"),
             "empty searched should be omitted: {json}"
         );
+    }
+
+    #[test]
+    fn compile_sfc_report_round_trip() {
+        let r = CompileSfcReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: CompileSfcReport::REPORT_TYPE.to_string(),
+            project_a_name: "demo".to_string(),
+            project_b_name: None,
+            sfc_path: "build/m1/demo.sfc".to_string(),
+            sfc_size_bytes: 262144,
+            sfc_sha256: "0".repeat(64),
+            module_b_is_clone_of_a: true,
+            module_a_sha256: "1".repeat(64),
+            module_a_in_file_sha256: "2".repeat(64),
+            module_a_bytes: 9048,
+            module_b_sha256: None,
+            module_b_in_file_sha256: None,
+            module_b_bytes: None,
+            loader_size_bytes: 581,
+        };
+        round_trip(&r);
+        let mut r2 = r.clone();
+        r2.project_b_name = Some("swap".to_string());
+        r2.module_b_is_clone_of_a = false;
+        r2.module_b_sha256 = Some("3".repeat(64));
+        r2.module_b_in_file_sha256 = Some("4".repeat(64));
+        r2.module_b_bytes = Some(9048);
+        round_trip(&r2);
+    }
+
+    #[test]
+    fn sfc_structure_report_round_trip() {
+        let r = SfcStructureReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: SfcStructureReport::REPORT_TYPE.to_string(),
+            sfc_path: "build/m1/demo.sfc".to_string(),
+            status: SfcStructureStatus::Ok,
+            findings: Vec::new(),
+            header_summary: SfcHeaderSummary {
+                title: "DEMO".to_string(),
+                mode_byte: 0x20,
+                rom_size_byte: 0x08,
+                country_byte: 0x01,
+                checksum: 0x1234,
+                checksum_complement: 0xEDCB,
+                reset_vector: 0x8000,
+                file_size_bytes: 262144,
+            },
+            module_a_summary: SfcModuleSummary {
+                embed_offset: 0x8000,
+                magic_ok: true,
+                schema_version: 1,
+                block_count: 3,
+                entrypoint: 0x0200,
+                total_file_len: 9048,
+                flags: 0,
+                in_file_sha256: "0".repeat(64),
+                recomputed_in_file_sha256: "0".repeat(64),
+                in_file_sha_matches: true,
+            },
+            module_b_summary: None,
+        };
+        round_trip(&r);
+    }
+
+    #[test]
+    fn sfc_modules_audible_report_round_trip() {
+        let mod_a = AudibleVerificationReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: AudibleVerificationReport::REPORT_TYPE.to_string(),
+            spc_path: "demo.sfc#module_A".to_string(),
+            spc_sha256: "0".repeat(64),
+            frames_rendered: 16384,
+            sample_rate_hz: 32000,
+            observed: ObservedAudio {
+                max_abs: 11072,
+                rms: 5520.0,
+                bytes_zero: 0,
+                bytes_total: 65536,
+                fraction_zero: 0.0,
+            },
+            thresholds: AudibleThresholds {
+                min_max_abs: 1000,
+                min_rms: 200.0,
+            },
+            status: AudibleStatus::Ok,
+            error: None,
+        };
+        let r = SfcModulesAudibleReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: SfcModulesAudibleReport::REPORT_TYPE.to_string(),
+            sfc_path: "build/m1/demo.sfc".to_string(),
+            status: AudibleStatus::Ok,
+            module_a_audible: mod_a.clone(),
+            module_b_audible: Some(mod_a),
+            modules_audio_identical: true,
+            error: None,
+        };
+        round_trip(&r);
     }
 
     #[test]
