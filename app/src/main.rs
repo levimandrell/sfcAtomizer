@@ -18,7 +18,7 @@ use sfc_atomizer_core::brr_fixtures::{run_fixture, M0_RAW_DECODE_FIXTURES};
 use sfc_atomizer_core::driver_build::{build as driver_build, DriverBuildInput};
 use sfc_atomizer_core::import::{import_audio, ImportError, ImportOptions};
 use sfc_atomizer_core::loop_finder::{find_loop_candidates, LoopFinderOptions};
-use sfc_atomizer_core::manifest::verify_bundle;
+use sfc_atomizer_core::manifest::{verify_bundle, verify_m1_bundle, M1BundleIntegrity};
 use sfc_atomizer_core::module_writer::{
     parse_module_blocks, parse_module_header, project_blocks_to_aram, recompute_in_file_sha,
     MODULE_MAGIC,
@@ -30,11 +30,11 @@ use sfc_atomizer_core::report::{
     AudibleVerificationReport, AuditionReport, BrrEncodeBlock, BrrEncodeReport, BrrFixtureReport,
     BundleStatus, BundleSteps, BundleSummary, CalibrationReport, CalibrationStatus,
     CompileSfcReport, CompileSpcReport, DoctorReport, DoctorStatus, DoctorTools, FixtureSetInfo,
-    LoopCandidateJson, LoopFinderReport, M0Manifest, ObservedAudio, ObservedInfo, OracleInfo,
-    ProvisionalTolerances, RenderInfo, RustInfo, SfcFinding, SfcHeaderSummary, SfcModuleSummary,
-    SfcModulesAudibleReport, SfcStructureReport, SfcStructureStatus, SpcExportReport,
-    SpcInitialState, SpcStatus, StepStatus, ToolStatus, ValidationErrorJson, ValidationReport,
-    ValidationStatus, SCHEMA_VERSION,
+    LoopCandidateJson, LoopFinderReport, M0Manifest, M1BundleSteps, M1BundleSummary, M1Manifest,
+    ObservedAudio, ObservedInfo, OracleInfo, ProvisionalTolerances, RenderInfo, RustInfo,
+    SfcFinding, SfcHeaderSummary, SfcModuleSummary, SfcModulesAudibleReport, SfcStructureReport,
+    SfcStructureStatus, SpcExportReport, SpcInitialState, SpcStatus, StepStatus, ToolStatus,
+    ValidationErrorJson, ValidationReport, ValidationStatus, SCHEMA_VERSION,
 };
 use sfc_atomizer_core::sfc_export::{
     export_sfc, SfcExportInput, LOROM_HEADER_BASE, LOROM_HEADER_CHECKSUM_COMPLEMENT_OFFSET,
@@ -153,6 +153,28 @@ enum Command {
         /// Also write the report JSON to a file.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Run the full M1 acceptance pipeline (M1.7) and write a
+    /// bundle manifest with aggregate `BundleStatus` semantics
+    /// analogous to `m0-acceptance`. Always exits 0; bundle status
+    /// reflects each step's outcome.
+    M1Acceptance {
+        #[arg(long)]
+        project_a: PathBuf,
+        #[arg(long)]
+        project_b: Option<PathBuf>,
+        #[arg(long, default_value = "build/m1")]
+        out: PathBuf,
+        #[arg(long, default_value_t = 16384u32)]
+        frames: u32,
+    },
+    /// Read-only summary of an existing M1 acceptance bundle. Exits
+    /// 0 on `bundle.status` ok/degraded + clean integrity, 1 otherwise.
+    M1Status {
+        #[arg(long, default_value = "build/m1")]
+        bundle: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
     /// Compile one or two projects into a LoROM `.sfc` test ROM (M1.6).
     ///
@@ -389,6 +411,13 @@ fn run(cli: Cli) -> Result<(), CliError> {
             out_map,
             driver,
         } => cmd_pack(&project, &out_image, &out_map, driver.as_deref()),
+        Command::M1Acceptance {
+            project_a,
+            project_b,
+            out,
+            frames,
+        } => cmd_m1_acceptance(&project_a, project_b.as_deref(), &out, frames),
+        Command::M1Status { bundle, json } => cmd_m1_status(&bundle, json),
         Command::CompileSfc {
             project_a,
             project_b,
@@ -2046,6 +2075,607 @@ fn cmd_pack(
         out_map.display(),
     );
     Ok(())
+}
+
+// =============================================================================
+// m1-acceptance / m1-status (M1.7)
+// =============================================================================
+
+fn cmd_m1_acceptance(
+    project_a: &Path,
+    project_b: Option<&Path>,
+    out_dir: &Path,
+    frames: u32,
+) -> Result<(), CliError> {
+    create_dir(out_dir)?;
+    let workspace_root = std::env::current_dir().map_err(CliError::Cwd)?;
+
+    let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sfcwc"));
+
+    let doctor_path = out_dir.join("doctor.json");
+    let validate_a_path = out_dir.join("validate-a.json");
+    let validate_b_path = out_dir.join("validate-b.json");
+    let aram_map_path = out_dir.join("aram-map.json");
+    let aram_image_path = out_dir.join("project_a.aram.bin");
+    let compile_spc_path = out_dir.join("compile-spc.json");
+    let spc_path = out_dir.join("project_a.spc");
+    let audible_spc_path = out_dir.join("audible-spc.json");
+    let audible_spc_pcm_path = out_dir.join("audible-spc.pcm_s16le");
+    let compile_sfc_path = out_dir.join("compile-sfc.json");
+    let sfc_path = out_dir.join("project.sfc");
+    let structure_sfc_path = out_dir.join("structure-sfc.json");
+    let audible_sfc_path = out_dir.join("audible-sfc.json");
+    let manifest_path = out_dir.join("manifest.json");
+
+    // 1. Doctor.
+    let _ = run_subcommand(&bin, &["doctor"], &[("--out", doctor_path.as_path())]);
+    let doctor = read_report::<DoctorReport>(&doctor_path);
+    eprintln!("m1-acceptance: doctor -> {}", doctor_path.display());
+
+    // 2. Validate project A.
+    let _ = run_subcommand(
+        &bin,
+        &["validate-project"],
+        &[
+            ("--project", project_a),
+            ("--out", validate_a_path.as_path()),
+        ],
+    );
+    let validate_a = read_report::<ValidationReport>(&validate_a_path);
+
+    // 3. Validate project B (optional).
+    let validate_b = match project_b {
+        Some(p) => {
+            let _ = run_subcommand(
+                &bin,
+                &["validate-project"],
+                &[("--project", p), ("--out", validate_b_path.as_path())],
+            );
+            read_report::<ValidationReport>(&validate_b_path)
+        }
+        None => None,
+    };
+
+    // 4. compile-spc on project A.
+    let _ = run_subcommand(
+        &bin,
+        &["compile-spc"],
+        &[
+            ("--project", project_a),
+            ("--out-spc", spc_path.as_path()),
+            ("--out-image", aram_image_path.as_path()),
+            ("--out-map", aram_map_path.as_path()),
+            ("--out-report", compile_spc_path.as_path()),
+        ],
+    );
+    let compile_spc = read_report::<CompileSpcReport>(&compile_spc_path);
+    let aram_map = read_report::<AramMapReport>(&aram_map_path);
+
+    // 5. verify-spc-audible on the produced .spc.
+    let _ = run_subcommand_with_kv(
+        &bin,
+        &["verify-spc-audible"],
+        &[
+            ("--spc", spc_path.as_path()),
+            ("--out-report", audible_spc_path.as_path()),
+            ("--out-pcm", audible_spc_pcm_path.as_path()),
+        ],
+        &[("--frames", frames.to_string())],
+    );
+    let audible_spc = read_report::<AudibleVerificationReport>(&audible_spc_path);
+
+    // 6. compile-sfc on project A (and B if provided).
+    let mut sfc_args: Vec<(&str, &Path)> = vec![
+        ("--project-a", project_a),
+        ("--out-sfc", sfc_path.as_path()),
+        ("--out-report", compile_sfc_path.as_path()),
+    ];
+    if let Some(b) = project_b {
+        sfc_args.push(("--project-b", b));
+    }
+    let _ = run_subcommand(&bin, &["compile-sfc"], &sfc_args);
+    let compile_sfc = read_report::<CompileSfcReport>(&compile_sfc_path);
+
+    // 7. verify-sfc-structure on the produced .sfc.
+    let _ = run_subcommand(
+        &bin,
+        &["verify-sfc-structure"],
+        &[
+            ("--sfc", sfc_path.as_path()),
+            ("--out-report", structure_sfc_path.as_path()),
+        ],
+    );
+    let structure_sfc = read_report::<SfcStructureReport>(&structure_sfc_path);
+
+    // 8. verify-sfc-modules-audible on the produced .sfc.
+    let _ = run_subcommand_with_kv(
+        &bin,
+        &["verify-sfc-modules-audible"],
+        &[
+            ("--sfc", sfc_path.as_path()),
+            ("--out-report", audible_sfc_path.as_path()),
+        ],
+        &[("--frames", frames.to_string())],
+    );
+    let audible_sfc = read_report::<SfcModulesAudibleReport>(&audible_sfc_path);
+
+    // 9. Map step statuses.
+    let asar_resolved = doctor
+        .as_ref()
+        .map(|d| d.tools.asar.resolved)
+        .unwrap_or(false);
+    let oracle_resolved = doctor
+        .as_ref()
+        .map(|d| d.tools.snes_spc_oracle.resolved)
+        .unwrap_or(false);
+
+    let steps = M1BundleSteps {
+        doctor: doctor_step_status_m1(doctor.as_ref()),
+        validate_a: validation_step_status(validate_a.as_ref()),
+        validate_b: match (project_b, validate_b.as_ref()) {
+            (None, _) => StepStatus::Skipped,
+            (Some(_), Some(v)) => validation_step_status(Some(v)),
+            (Some(_), None) => StepStatus::Error,
+        },
+        compile_spc: compile_spc_step_status(compile_spc.as_ref(), asar_resolved),
+        audible_spc: audible_step_status(audible_spc.as_ref(), oracle_resolved),
+        compile_sfc: compile_sfc_step_status(compile_sfc.as_ref(), asar_resolved),
+        structure_sfc: structure_sfc_step_status(structure_sfc.as_ref()),
+        audible_sfc: sfc_modules_audible_step_status(audible_sfc.as_ref(), oracle_resolved),
+    };
+
+    let bundle_status = aggregate_m1_bundle_status(&steps, project_b.is_some());
+
+    // 10. Diagnostics rollup.
+    let mut diagnostics: Vec<String> = Vec::new();
+    if let Some(d) = doctor.as_ref() {
+        for s in &d.diagnostics {
+            diagnostics.push(format!("doctor: {s}"));
+        }
+    }
+    if let Some(v) = validate_a.as_ref() {
+        for e in &v.errors {
+            diagnostics.push(format!("validate_a: {} {}", e.path, e.message));
+        }
+    }
+    if let Some(v) = validate_b.as_ref() {
+        for e in &v.errors {
+            diagnostics.push(format!("validate_b: {} {}", e.path, e.message));
+        }
+    }
+    if let Some(s) = structure_sfc.as_ref() {
+        for f in &s.findings {
+            diagnostics.push(format!("structure_sfc: {} {}", f.kind, f.message));
+        }
+    }
+    if let Some(a) = audible_spc.as_ref() {
+        if !matches!(a.status, AudibleStatus::Ok) {
+            diagnostics.push(format!(
+                "audible_spc: status={:?} max_abs={}",
+                a.status, a.observed.max_abs
+            ));
+        }
+    }
+    if let Some(a) = audible_sfc.as_ref() {
+        if !matches!(a.status, AudibleStatus::Ok) {
+            diagnostics.push(format!(
+                "audible_sfc: status={:?} A.max_abs={} B.max_abs={}",
+                a.status,
+                a.module_a_audible.observed.max_abs,
+                a.module_b_audible
+                    .as_ref()
+                    .map(|m| m.observed.max_abs)
+                    .unwrap_or(0)
+            ));
+        }
+    }
+
+    // 11. Cross-reference SHA fields for the bundle.
+    let bundle = M1BundleSummary {
+        steps: steps.clone(),
+        status: bundle_status,
+        aram_image_sha256: compile_spc.as_ref().map(|c| c.aram_image_sha256.clone()),
+        spc_file_sha256: compile_spc.as_ref().map(|c| c.spc_file_sha256.clone()),
+        sfc_file_sha256: compile_sfc.as_ref().map(|c| c.sfc_sha256.clone()),
+        module_a_sha256: compile_sfc.as_ref().map(|c| c.module_a_sha256.clone()),
+        module_b_sha256: compile_sfc.as_ref().and_then(|c| c.module_b_sha256.clone()),
+        driver_code_sha256: compile_spc.as_ref().map(|c| c.driver_code_sha256.clone()),
+        spc_audible_max_abs: audible_spc.as_ref().map(|a| a.observed.max_abs),
+        sfc_audible_module_a_max_abs: audible_sfc
+            .as_ref()
+            .map(|a| a.module_a_audible.observed.max_abs),
+        sfc_audible_module_b_max_abs: audible_sfc
+            .as_ref()
+            .and_then(|a| a.module_b_audible.as_ref().map(|m| m.observed.max_abs)),
+        modules_audio_identical: audible_sfc.as_ref().map(|a| a.modules_audio_identical),
+        diagnostics: diagnostics.clone(),
+    };
+
+    let _ = aram_map;
+    let _ = workspace_root;
+
+    let manifest_pre = M1Manifest {
+        schema_version: SCHEMA_VERSION,
+        report_type: M1Manifest::REPORT_TYPE.to_string(),
+        generated_at: rfc3339_now(),
+        project_a: project_a.display().to_string(),
+        project_b: project_b.map(|p| p.display().to_string()),
+        doctor_report: doctor_path.display().to_string(),
+        validate_a_report: validate_a_path.display().to_string(),
+        validate_b_report: project_b.map(|_| validate_b_path.display().to_string()),
+        aram_map_report: aram_map_path.display().to_string(),
+        compile_spc_report: compile_spc_path.display().to_string(),
+        audible_spc_report: audible_spc_path.display().to_string(),
+        compile_sfc_report: compile_sfc_path.display().to_string(),
+        structure_sfc_report: structure_sfc_path.display().to_string(),
+        audible_sfc_report: audible_sfc_path.display().to_string(),
+        bundle: bundle.clone(),
+    };
+    write_json(&manifest_path, &manifest_pre)?;
+
+    // 12. Run integrity check on the just-written bundle and fold
+    //     findings into bundle diagnostics.
+    let integrity = verify_m1_bundle(out_dir);
+    let mut final_diagnostics = diagnostics.clone();
+    for f in &integrity.findings {
+        final_diagnostics.push(format!("integrity: {f}"));
+    }
+    truncate_diagnostics(&mut final_diagnostics);
+
+    let final_bundle = M1BundleSummary {
+        diagnostics: final_diagnostics,
+        ..bundle
+    };
+    let manifest = M1Manifest {
+        bundle: final_bundle,
+        ..manifest_pre
+    };
+    write_json(&manifest_path, &manifest)?;
+
+    eprintln!(
+        "m1-acceptance: bundle.status={}; wrote 9 reports + manifest -> {}",
+        bundle_status_label(bundle_status),
+        manifest_path.display()
+    );
+    Ok(())
+}
+
+fn cmd_m1_status(bundle_dir: &Path, json: bool) -> Result<(), CliError> {
+    let manifest_path = bundle_dir.join("manifest.json");
+    let manifest_bytes = match std::fs::read(&manifest_path) {
+        Ok(b) => b,
+        Err(_) => {
+            eprintln!(
+                "m1-status: no bundle at {} (run `sfcwc m1-acceptance` first)",
+                bundle_dir.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    let manifest: M1Manifest = match serde_json::from_slice(&manifest_bytes) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("m1-status: cannot parse {}: {e}", manifest_path.display());
+            std::process::exit(1);
+        }
+    };
+
+    let integrity = verify_m1_bundle(bundle_dir);
+
+    if json {
+        let s = serde_json::to_string_pretty(&manifest)?;
+        println!("{s}");
+    } else {
+        print_m1_status_human(&manifest, &integrity);
+    }
+
+    let bundle_ok = matches!(
+        manifest.bundle.status,
+        BundleStatus::Ok | BundleStatus::Degraded
+    );
+    let integrity_ok = integrity.all_reports_present
+        && integrity.reports_parse
+        && integrity.schema_versions_consistent
+        && integrity.aram_sha_matches_across_reports
+        && integrity.spc_sha_matches_across_reports
+        && integrity.sfc_sha_matches_across_reports
+        && integrity.module_a_sha_matches_across_reports;
+
+    if bundle_ok && integrity_ok {
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
+}
+
+fn print_m1_status_human(m: &M1Manifest, integrity: &M1BundleIntegrity) {
+    println!("m1-status:");
+    println!(
+        "  bundle.status   = {}",
+        bundle_status_label(m.bundle.status)
+    );
+    println!("  generated_at    = {}", m.generated_at);
+    println!("  project_a       = {}", m.project_a);
+    if let Some(b) = &m.project_b {
+        println!("  project_b       = {b}");
+    }
+    println!("  steps:");
+    let s = &m.bundle.steps;
+    println!("    doctor        = {}", step_status_label(s.doctor));
+    println!("    validate_a    = {}", step_status_label(s.validate_a));
+    println!("    validate_b    = {}", step_status_label(s.validate_b));
+    println!("    compile_spc   = {}", step_status_label(s.compile_spc));
+    println!("    audible_spc   = {}", step_status_label(s.audible_spc));
+    println!("    compile_sfc   = {}", step_status_label(s.compile_sfc));
+    println!("    structure_sfc = {}", step_status_label(s.structure_sfc));
+    println!("    audible_sfc   = {}", step_status_label(s.audible_sfc));
+    println!("  cross-references:");
+    println!(
+        "    aram_image_sha256        = {}",
+        m.bundle.aram_image_sha256.as_deref().unwrap_or("<absent>")
+    );
+    println!(
+        "    spc_file_sha256          = {}",
+        m.bundle.spc_file_sha256.as_deref().unwrap_or("<absent>")
+    );
+    println!(
+        "    sfc_file_sha256          = {}",
+        m.bundle.sfc_file_sha256.as_deref().unwrap_or("<absent>")
+    );
+    println!(
+        "    module_a_sha256          = {}",
+        m.bundle.module_a_sha256.as_deref().unwrap_or("<absent>")
+    );
+    println!(
+        "    module_b_sha256          = {}",
+        m.bundle.module_b_sha256.as_deref().unwrap_or("<absent>")
+    );
+    println!(
+        "    driver_code_sha256       = {}",
+        m.bundle.driver_code_sha256.as_deref().unwrap_or("<absent>")
+    );
+    println!(
+        "    spc_audible_max_abs      = {}",
+        m.bundle
+            .spc_audible_max_abs
+            .map(|x| x.to_string())
+            .unwrap_or_else(|| "<absent>".to_string())
+    );
+    println!(
+        "    sfc_audible_a_max_abs    = {}",
+        m.bundle
+            .sfc_audible_module_a_max_abs
+            .map(|x| x.to_string())
+            .unwrap_or_else(|| "<absent>".to_string())
+    );
+    println!(
+        "    sfc_audible_b_max_abs    = {}",
+        m.bundle
+            .sfc_audible_module_b_max_abs
+            .map(|x| x.to_string())
+            .unwrap_or_else(|| "<absent>".to_string())
+    );
+    println!(
+        "    modules_audio_identical  = {}",
+        m.bundle
+            .modules_audio_identical
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "<absent>".to_string())
+    );
+    println!("  integrity:");
+    println!(
+        "    all_reports_present              = {}",
+        integrity.all_reports_present
+    );
+    println!(
+        "    reports_parse                    = {}",
+        integrity.reports_parse
+    );
+    println!(
+        "    schema_versions_consistent       = {}",
+        integrity.schema_versions_consistent
+    );
+    println!(
+        "    aram_sha_matches_across_reports  = {}",
+        integrity.aram_sha_matches_across_reports
+    );
+    println!(
+        "    spc_sha_matches_across_reports   = {}",
+        integrity.spc_sha_matches_across_reports
+    );
+    println!(
+        "    sfc_sha_matches_across_reports   = {}",
+        integrity.sfc_sha_matches_across_reports
+    );
+    println!(
+        "    module_a_sha_matches             = {}",
+        integrity.module_a_sha_matches_across_reports
+    );
+    if !integrity.findings.is_empty() {
+        println!("  integrity findings:");
+        for f in integrity.findings.iter().take(10) {
+            println!("    - {f}");
+        }
+        if integrity.findings.len() > 10 {
+            println!("    ... ({} more truncated)", integrity.findings.len() - 10);
+        }
+    }
+    if !m.bundle.diagnostics.is_empty() {
+        println!("  diagnostics (top 5):");
+        for d in m.bundle.diagnostics.iter().take(5) {
+            println!("    - {d}");
+        }
+    }
+}
+
+fn run_subcommand(
+    bin: &Path,
+    args: &[&str],
+    flag_paths: &[(&str, &Path)],
+) -> std::process::ExitStatus {
+    let mut cmd = std::process::Command::new(bin);
+    for a in args {
+        cmd.arg(a);
+    }
+    for (k, v) in flag_paths {
+        cmd.arg(k).arg(v);
+    }
+    cmd.status()
+        .unwrap_or_else(|_| std::process::ExitStatus::from_raw(127))
+}
+
+fn run_subcommand_with_kv(
+    bin: &Path,
+    args: &[&str],
+    flag_paths: &[(&str, &Path)],
+    flag_strs: &[(&str, String)],
+) -> std::process::ExitStatus {
+    let mut cmd = std::process::Command::new(bin);
+    for a in args {
+        cmd.arg(a);
+    }
+    for (k, v) in flag_paths {
+        cmd.arg(k).arg(v);
+    }
+    for (k, v) in flag_strs {
+        cmd.arg(k).arg(v);
+    }
+    cmd.status()
+        .unwrap_or_else(|_| std::process::ExitStatus::from_raw(127))
+}
+
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+#[cfg(windows)]
+trait ExitStatusFromRaw {
+    fn from_raw(code: u32) -> std::process::ExitStatus;
+}
+#[cfg(windows)]
+impl ExitStatusFromRaw for std::process::ExitStatus {
+    fn from_raw(code: u32) -> std::process::ExitStatus {
+        std::os::windows::process::ExitStatusExt::from_raw(code)
+    }
+}
+
+fn doctor_step_status_m1(d: Option<&DoctorReport>) -> StepStatus {
+    match d {
+        None => StepStatus::Error,
+        Some(d) => {
+            // M1.7 doctor mapping. Per the bundle aggregation rule
+            // documented in STATUS, Mesen2 absence is informational
+            // and must NOT downgrade the bundle. So we look at the
+            // individual tool flags rather than the doctor's
+            // overall enum (which counts Mesen2 missing as Warnings).
+            //
+            //   asar missing       → Error (M1 cannot ship)
+            //   oracle missing     → Warnings on doctor; the audible
+            //                        steps will Skip and the bundle
+            //                        downgrades there
+            //   mesen2 missing     → Ok (manual audition only)
+            if !d.tools.asar.resolved {
+                StepStatus::Error
+            } else if !d.tools.snes_spc_oracle.resolved {
+                StepStatus::Warnings
+            } else {
+                StepStatus::Ok
+            }
+        }
+    }
+}
+
+fn validation_step_status(v: Option<&ValidationReport>) -> StepStatus {
+    match v {
+        Some(v) if matches!(v.status, ValidationStatus::Ok) => StepStatus::Ok,
+        Some(_) => StepStatus::Error,
+        None => StepStatus::Error,
+    }
+}
+
+fn compile_spc_step_status(c: Option<&CompileSpcReport>, asar_resolved: bool) -> StepStatus {
+    if !asar_resolved {
+        return StepStatus::Skipped;
+    }
+    match c {
+        Some(_) => StepStatus::Ok,
+        None => StepStatus::Error,
+    }
+}
+
+fn compile_sfc_step_status(c: Option<&CompileSfcReport>, asar_resolved: bool) -> StepStatus {
+    if !asar_resolved {
+        return StepStatus::Skipped;
+    }
+    match c {
+        Some(_) => StepStatus::Ok,
+        None => StepStatus::Error,
+    }
+}
+
+fn structure_sfc_step_status(s: Option<&SfcStructureReport>) -> StepStatus {
+    match s {
+        Some(s) if matches!(s.status, SfcStructureStatus::Ok) => StepStatus::Ok,
+        Some(_) => StepStatus::Error,
+        None => StepStatus::Error,
+    }
+}
+
+fn audible_step_status(a: Option<&AudibleVerificationReport>, oracle_resolved: bool) -> StepStatus {
+    if !oracle_resolved {
+        return StepStatus::Skipped;
+    }
+    match a {
+        Some(a) => match a.status {
+            AudibleStatus::Ok => StepStatus::Ok,
+            AudibleStatus::SilentFail => StepStatus::Error,
+            AudibleStatus::OracleError => StepStatus::Error,
+        },
+        None => StepStatus::Error,
+    }
+}
+
+fn sfc_modules_audible_step_status(
+    a: Option<&SfcModulesAudibleReport>,
+    oracle_resolved: bool,
+) -> StepStatus {
+    if !oracle_resolved {
+        return StepStatus::Skipped;
+    }
+    match a {
+        Some(a) => match a.status {
+            AudibleStatus::Ok => StepStatus::Ok,
+            AudibleStatus::SilentFail => StepStatus::Error,
+            AudibleStatus::OracleError => StepStatus::Error,
+        },
+        None => StepStatus::Error,
+    }
+}
+
+/// Required steps: doctor, validate_a, compile_spc, audible_spc,
+/// compile_sfc, structure_sfc, audible_sfc. Optional: validate_b
+/// (Skipped is fine when no project_b given).
+fn aggregate_m1_bundle_status(steps: &M1BundleSteps, has_project_b: bool) -> BundleStatus {
+    let required = [
+        steps.doctor,
+        steps.validate_a,
+        steps.compile_spc,
+        steps.audible_spc,
+        steps.compile_sfc,
+        steps.structure_sfc,
+        steps.audible_sfc,
+    ];
+    if required
+        .iter()
+        .any(|s| matches!(s, StepStatus::Error | StepStatus::Skipped))
+    {
+        return BundleStatus::Error;
+    }
+    if has_project_b && matches!(steps.validate_b, StepStatus::Error | StepStatus::Skipped) {
+        return BundleStatus::Error;
+    }
+    if required.iter().any(|s| matches!(s, StepStatus::Warnings)) {
+        return BundleStatus::Degraded;
+    }
+    BundleStatus::Ok
 }
 
 // =============================================================================
