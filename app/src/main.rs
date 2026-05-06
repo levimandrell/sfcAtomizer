@@ -12,11 +12,13 @@ use sfc_atomizer_core::asm::{
     sha256_hex, sha256_hex_file, AsarBackend, AssembleError, AssembleInput, AssemblerBackend,
 };
 use sfc_atomizer_core::brr_fixtures::{run_fixture, M0_RAW_DECODE_FIXTURES};
+use sfc_atomizer_core::manifest::verify_bundle;
 use sfc_atomizer_core::report::{
-    AramMapReport, AssembleReport, AssembleStatus, BrrFixtureReport, CalibrationReport,
-    CalibrationStatus, DoctorReport, DoctorStatus, DoctorTools, FixtureSetInfo, M0Manifest,
-    ObservedInfo, OracleInfo, ProvisionalTolerances, RenderInfo, RustInfo, SpcExportReport,
-    SpcInitialState, SpcStatus, ToolStatus, SCHEMA_VERSION,
+    AramKind, AramMapReport, AssembleReport, AssembleStatus, BrrFixtureReport, BundleStatus,
+    BundleSteps, BundleSummary, CalibrationReport, CalibrationStatus, DoctorReport, DoctorStatus,
+    DoctorTools, FixtureSetInfo, M0Manifest, ObservedInfo, OracleInfo, ProvisionalTolerances,
+    RenderInfo, RustInfo, SpcExportReport, SpcInitialState, SpcStatus, StepStatus, ToolStatus,
+    SCHEMA_VERSION,
 };
 use sfc_atomizer_core::spc::{
     build_smoke_image, verify_structure, SpcCpuState, SpcImage, SMOKE_CPU_STATE, SPC_ARAM_SIZE,
@@ -91,6 +93,19 @@ enum Command {
         #[arg(long, default_value = "build/m0")]
         out: PathBuf,
     },
+    /// Read-only summary of an existing M0 acceptance bundle.
+    ///
+    /// Re-runs the integrity check against the on-disk bundle, prints
+    /// the per-step rollup, and exits 0 if `bundle.status` is `ok` or
+    /// `degraded`, 1 otherwise.
+    M0Status {
+        #[arg(long, default_value = "build/m0")]
+        bundle: PathBuf,
+        /// Print the manifest as JSON to stdout instead of the
+        /// human-readable summary.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -141,6 +156,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             out_pcm,
         } => cmd_calibrate_oracle(oracle.as_deref(), &input_spc, frames, &out, &out_pcm),
         Command::M0Acceptance { out } => cmd_m0_acceptance(&out),
+        Command::M0Status { bundle, json } => cmd_m0_status(&bundle, json),
     }
 }
 
@@ -757,6 +773,7 @@ fn cmd_calibrate_oracle(
         voice_render_max_abs_lsb: max_abs,
         voice_render_rms_lsb: rms,
     });
+    report.oracle_pcm_sha256 = Some(sha256_hex(&pcm_bytes));
 
     if max_abs != 0 {
         report.diagnostics.push(format!(
@@ -846,17 +863,22 @@ fn cmd_m0_acceptance(out_dir: &Path) -> Result<(), CliError> {
     let smoke_spc = out_dir.join("smoke.spc");
     let aram_map_path = out_dir.join("aram-map.json");
     let calibration_path = out_dir.join("calibration-report.json");
+    let oracle_pcm = out_dir.join("oracle.pcm_s16le");
     let manifest_path = out_dir.join("manifest.json");
 
-    // 1. Doctor.
-    write_json(&doctor_path, &build_doctor_report(&workspace_root))?;
+    // Run each step, writing its report. Failure-as-data is the
+    // contract throughout — every step writes a report regardless of
+    // success/failure, and we read them back to compute the bundle.
+
+    // 1. Doctor (also kept in memory for step-status mapping).
+    let doctor = build_doctor_report(&workspace_root);
+    write_json(&doctor_path, &doctor)?;
     eprintln!("m0-acceptance: doctor -> {}", doctor_path.display());
 
-    // 2. Decode BRR fixtures.
+    // 2. BRR fixtures.
     cmd_decode_fixtures(&brr_path)?;
 
-    // 3. Assemble. Source is the canonical M0 smoke .asm relative to
-    // the workspace root (assumed to be cwd).
+    // 3. Assemble.
     let smoke_asm = workspace_root
         .join("core")
         .join("fixtures")
@@ -864,47 +886,211 @@ fn cmd_m0_acceptance(out_dir: &Path) -> Result<(), CliError> {
         .join("m0_smoke.asm");
     cmd_assemble_smoke(&smoke_asm, &assemble_path, &driver_bin)?;
 
-    // 4. Export SPC. Reads driver.bin from step 3; failure-as-data if
-    // assemble didn't produce one.
+    // 4. SPC export.
     cmd_export_spc_smoke(&driver_bin, &spc_path, &smoke_spc, true)?;
 
-    // 5. ARAM map. Real if assemble succeeded, stub otherwise.
-    let aram_report = match read_aram_image(&driver_bin) {
-        Some(img) => map_from_image(&img),
-        None => AramMapReport::stub(),
+    // 5. ARAM map: real walk if driver.bin is the right size,
+    // otherwise the M0.1 stub (kept so the report file always exists).
+    let (aram_report, aram_real) = match read_aram_image(&driver_bin) {
+        Some(img) => (map_from_image(&img), true),
+        None => (AramMapReport::stub(), false),
     };
     write_json(&aram_map_path, &aram_report)?;
     eprintln!("m0-acceptance: aram-map -> {}", aram_map_path.display());
 
-    // 6. Calibrate-oracle. Real if oracle wrapper resolves; failure-
-    // as-data otherwise. The chain continues regardless.
-    let oracle_pcm = out_dir.join("oracle.pcm_s16le");
+    // 6. Calibrate oracle.
     cmd_calibrate_oracle(None, &smoke_spc, 2048, &calibration_path, &oracle_pcm)?;
 
-    // 7. Manifest.
-    let manifest = M0Manifest {
+    // 7. Read each report back to compute the bundle. We don't trust
+    // in-memory state because the per-cmd functions are the source of
+    // truth for what's on disk, and m0-status needs to reproduce the
+    // computation from the same on-disk files.
+    let brr_report = read_report::<BrrFixtureReport>(&brr_path);
+    let assemble_report = read_report::<AssembleReport>(&assemble_path);
+    let spc_report = read_report::<SpcExportReport>(&spc_path);
+    let calibration_report = read_report::<CalibrationReport>(&calibration_path);
+
+    let steps = BundleSteps {
+        doctor: doctor_step_status(&doctor),
+        decode_fixtures: brr_step_status(brr_report.as_ref()),
+        assemble: assemble_step_status(assemble_report.as_ref(), &doctor),
+        spc_export: spc_step_status(spc_report.as_ref()),
+        aram_map: aram_step_status(&aram_report, aram_real),
+        calibration: calibration_step_status(calibration_report.as_ref(), &doctor),
+    };
+    let bundle_status = aggregate_bundle_status(&steps);
+
+    let mut diagnostics = aggregate_diagnostics(
+        &doctor,
+        brr_report.as_ref(),
+        assemble_report.as_ref(),
+        spc_report.as_ref(),
+        calibration_report.as_ref(),
+    );
+
+    // Cross-check via verify_bundle on the fresh bundle.
+    // Anything it flags becomes a bundle-level diagnostic too.
+    let manifest_pre = M0Manifest {
         schema_version: SCHEMA_VERSION,
         report_type: M0Manifest::REPORT_TYPE.to_string(),
-        generated_at: None,
+        generated_at: Some(rfc3339_now()),
         doctor_report: doctor_path.display().to_string(),
         brr_fixture_report: brr_path.display().to_string(),
         aram_map_report: aram_map_path.display().to_string(),
         assemble_report: assemble_path.display().to_string(),
         spc_export_report: spc_path.display().to_string(),
         calibration_report: calibration_path.display().to_string(),
+        bundle: BundleSummary::default(),
+    };
+    write_json(&manifest_path, &manifest_pre)?;
+    let integrity = verify_bundle(out_dir);
+    for f in &integrity.findings {
+        diagnostics.push(format!("integrity: {f}"));
+    }
+    truncate_diagnostics(&mut diagnostics);
+
+    let bundle = BundleSummary {
+        steps,
+        status: bundle_status,
+        aram_image_sha256: assemble_report
+            .as_ref()
+            .and_then(|r| r.output_image_sha256.clone()),
+        spc_file_sha256: spc_report.as_ref().and_then(|r| r.spc_file_sha256.clone()),
+        oracle_pcm_sha256: calibration_report
+            .as_ref()
+            .and_then(|r| r.oracle_pcm_sha256.clone()),
+        diagnostics,
+    };
+    let manifest = M0Manifest {
+        bundle,
+        ..manifest_pre
     };
     write_json(&manifest_path, &manifest)?;
+
     eprintln!(
-        "m0-acceptance: wrote 7 reports + manifest -> {}",
+        "m0-acceptance: bundle.status={}; wrote 7 reports + manifest -> {}",
+        bundle_status_label(bundle_status),
         manifest_path.display()
     );
 
     Ok(())
 }
 
+fn cmd_m0_status(bundle_dir: &Path, json: bool) -> Result<(), CliError> {
+    let manifest_path = bundle_dir.join("manifest.json");
+    let manifest_bytes = match std::fs::read(&manifest_path) {
+        Ok(b) => b,
+        Err(_) => {
+            eprintln!(
+                "m0-status: no bundle at {} (run `sfcwc m0-acceptance` first)",
+                bundle_dir.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    let manifest: M0Manifest = match serde_json::from_slice(&manifest_bytes) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("m0-status: cannot parse {}: {e}", manifest_path.display());
+            std::process::exit(1);
+        }
+    };
+
+    let integrity = verify_bundle(bundle_dir);
+
+    if json {
+        let s = serde_json::to_string_pretty(&manifest)?;
+        println!("{s}");
+    } else {
+        print_m0_status_human(&manifest, &integrity);
+    }
+
+    let bundle_ok = matches!(
+        manifest.bundle.status,
+        BundleStatus::Ok | BundleStatus::Degraded
+    );
+    let integrity_ok = integrity.all_reports_present
+        && integrity.reports_parse
+        && integrity.schema_versions_consistent
+        && integrity.aram_sha_matches_across_reports;
+
+    if bundle_ok && integrity_ok {
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
+}
+
+fn print_m0_status_human(m: &M0Manifest, integrity: &sfc_atomizer_core::manifest::BundleIntegrity) {
+    println!("m0-status:");
+    println!(
+        "  bundle.status   = {}",
+        bundle_status_label(m.bundle.status)
+    );
+    println!(
+        "  generated_at    = {}",
+        m.generated_at.as_deref().unwrap_or("<unknown>")
+    );
+    println!("  steps:");
+    let s = &m.bundle.steps;
+    println!("    doctor          = {}", step_status_label(s.doctor));
+    println!(
+        "    decode_fixtures = {}",
+        step_status_label(s.decode_fixtures)
+    );
+    println!("    assemble        = {}", step_status_label(s.assemble));
+    println!("    spc_export      = {}", step_status_label(s.spc_export));
+    println!("    aram_map        = {}", step_status_label(s.aram_map));
+    println!("    calibration     = {}", step_status_label(s.calibration));
+    println!("  cross-references:");
+    println!(
+        "    aram_image_sha256  = {}",
+        m.bundle.aram_image_sha256.as_deref().unwrap_or("<absent>")
+    );
+    println!(
+        "    spc_file_sha256    = {}",
+        m.bundle.spc_file_sha256.as_deref().unwrap_or("<absent>")
+    );
+    println!(
+        "    oracle_pcm_sha256  = {}",
+        m.bundle.oracle_pcm_sha256.as_deref().unwrap_or("<absent>")
+    );
+    println!("  integrity:");
+    println!(
+        "    all_reports_present              = {}",
+        integrity.all_reports_present
+    );
+    println!(
+        "    reports_parse                    = {}",
+        integrity.reports_parse
+    );
+    println!(
+        "    schema_versions_consistent       = {}",
+        integrity.schema_versions_consistent
+    );
+    println!(
+        "    aram_sha_matches_across_reports  = {}",
+        integrity.aram_sha_matches_across_reports
+    );
+    if !integrity.findings.is_empty() {
+        println!("  integrity findings:");
+        for f in integrity.findings.iter().take(10) {
+            println!("    - {f}");
+        }
+        if integrity.findings.len() > 10 {
+            println!("    ... ({} more truncated)", integrity.findings.len() - 10);
+        }
+    }
+    if !m.bundle.diagnostics.is_empty() {
+        println!("  diagnostics (top 5):");
+        for d in m.bundle.diagnostics.iter().take(5) {
+            println!("    - {d}");
+        }
+    }
+}
+
 /// Read a 64 KB ARAM image into a fixed array. Returns `None` if the
-/// file is missing or not exactly the right size — m0-acceptance
-/// uses that to decide between a real ARAM map and the stub.
+/// file is missing or not exactly the right size.
 fn read_aram_image(path: &Path) -> Option<[u8; ARAM_LEN]> {
     let bytes = std::fs::read(path).ok()?;
     if bytes.len() != ARAM_LEN {
@@ -913,6 +1099,230 @@ fn read_aram_image(path: &Path) -> Option<[u8; ARAM_LEN]> {
     let mut img = [0u8; ARAM_LEN];
     img.copy_from_slice(&bytes);
     Some(img)
+}
+
+fn read_report<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+// =============================================================================
+// Bundle aggregation
+// =============================================================================
+
+fn doctor_step_status(d: &DoctorReport) -> StepStatus {
+    match d.status {
+        DoctorStatus::Ok => StepStatus::Ok,
+        DoctorStatus::Warnings => StepStatus::Warnings,
+        DoctorStatus::Errors => StepStatus::Error,
+    }
+}
+
+fn brr_step_status(r: Option<&BrrFixtureReport>) -> StepStatus {
+    match r {
+        Some(r) if r.failed == 0 && r.total > 0 => StepStatus::Ok,
+        Some(_) => StepStatus::Error,
+        None => StepStatus::Skipped,
+    }
+}
+
+fn assemble_step_status(r: Option<&AssembleReport>, doctor: &DoctorReport) -> StepStatus {
+    if !doctor.tools.asar.resolved {
+        return StepStatus::Skipped;
+    }
+    match r {
+        Some(r) => match r.status {
+            AssembleStatus::Ok => StepStatus::Ok,
+            AssembleStatus::Error => StepStatus::Error,
+            AssembleStatus::NotRun => StepStatus::Skipped,
+        },
+        None => StepStatus::Skipped,
+    }
+}
+
+fn spc_step_status(r: Option<&SpcExportReport>) -> StepStatus {
+    match r {
+        Some(r) if r.status == SpcStatus::Ok && r.verified_structure => StepStatus::Ok,
+        Some(r) if r.status == SpcStatus::NotRun => StepStatus::Skipped,
+        Some(_) => StepStatus::Error,
+        None => StepStatus::Skipped,
+    }
+}
+
+fn aram_step_status(r: &AramMapReport, real_walk: bool) -> StepStatus {
+    if !real_walk {
+        return StepStatus::Skipped;
+    }
+    if !r.collisions.is_empty() {
+        return StepStatus::Error;
+    }
+    let sum: u32 = r.regions.iter().map(|x| x.bytes).sum();
+    if sum != r.total_aram {
+        return StepStatus::Error;
+    }
+    let claimed_free: u32 = r
+        .regions
+        .iter()
+        .filter(|x| x.kind == AramKind::Free)
+        .map(|x| x.bytes)
+        .sum();
+    if claimed_free != r.free_bytes {
+        return StepStatus::Error;
+    }
+    StepStatus::Ok
+}
+
+fn calibration_step_status(r: Option<&CalibrationReport>, doctor: &DoctorReport) -> StepStatus {
+    if !doctor.tools.snes_spc_oracle.resolved {
+        return StepStatus::Skipped;
+    }
+    match r {
+        Some(r) => match r.status {
+            CalibrationStatus::ProvisionalNotCiGate => match r.observed.as_ref() {
+                Some(o) if o.voice_render_max_abs_lsb == 0 => StepStatus::Ok,
+                Some(_) => StepStatus::Warnings, // smoke contract violation
+                None => StepStatus::Error,
+            },
+            CalibrationStatus::Frozen => StepStatus::Ok,
+            CalibrationStatus::NotRun => StepStatus::Skipped,
+            CalibrationStatus::Error => StepStatus::Error,
+        },
+        None => StepStatus::Skipped,
+    }
+}
+
+/// Aggregation rules — see SPEC §21 M0 acceptance.
+///
+/// Required steps: doctor, decode_fixtures, assemble, spc_export,
+/// aram_map. Calibration is optional at M0 (oracle missing is
+/// acceptable; bundle drops to `degraded` rather than `error`).
+///
+/// - Any required step `Error` or `Skipped` → bundle `Error`.
+/// - All required `Ok` AND calibration `Ok`               → bundle `Ok`.
+/// - Otherwise (required has `Warnings`, OR calibration is
+///   `Warnings`/`Error`/`Skipped`)                         → bundle `Degraded`.
+fn aggregate_bundle_status(steps: &BundleSteps) -> BundleStatus {
+    let required = [
+        steps.doctor,
+        steps.decode_fixtures,
+        steps.assemble,
+        steps.spc_export,
+        steps.aram_map,
+    ];
+    if required
+        .iter()
+        .any(|s| matches!(s, StepStatus::Error | StepStatus::Skipped))
+    {
+        return BundleStatus::Error;
+    }
+    let all_required_ok = required.iter().all(|s| matches!(s, StepStatus::Ok));
+    let calibration_ok = matches!(steps.calibration, StepStatus::Ok);
+    if all_required_ok && calibration_ok {
+        BundleStatus::Ok
+    } else {
+        BundleStatus::Degraded
+    }
+}
+
+fn aggregate_diagnostics(
+    doctor: &DoctorReport,
+    brr: Option<&BrrFixtureReport>,
+    assemble: Option<&AssembleReport>,
+    spc: Option<&SpcExportReport>,
+    calibration: Option<&CalibrationReport>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for d in &doctor.diagnostics {
+        out.push(format!("doctor: {d}"));
+    }
+    if let Some(b) = brr {
+        if b.failed > 0 {
+            out.push(format!(
+                "decode_fixtures: {} of {} fixtures failed",
+                b.failed, b.total
+            ));
+        }
+    }
+    if let Some(a) = assemble {
+        if let Some(e) = a.error.as_deref() {
+            out.push(format!("assemble: {e}"));
+        }
+    }
+    if let Some(s) = spc {
+        if let Some(e) = s.error.as_deref() {
+            out.push(format!("spc_export: {e}"));
+        }
+        if !s.verified_structure && s.status == SpcStatus::Ok {
+            out.push("spc_export: structure verification skipped".to_string());
+        }
+    }
+    if let Some(c) = calibration {
+        if let Some(e) = c.error.as_deref() {
+            out.push(format!("calibration: {e}"));
+        }
+        for d in &c.diagnostics {
+            out.push(format!("calibration: {d}"));
+        }
+    }
+    out
+}
+
+const MAX_DIAGNOSTICS: usize = 50;
+
+fn truncate_diagnostics(d: &mut Vec<String>) {
+    if d.len() > MAX_DIAGNOSTICS {
+        let extra = d.len() - MAX_DIAGNOSTICS;
+        d.truncate(MAX_DIAGNOSTICS);
+        d.push(format!("... ({extra} more truncated)"));
+    }
+}
+
+fn bundle_status_label(s: BundleStatus) -> &'static str {
+    match s {
+        BundleStatus::Ok => "ok",
+        BundleStatus::Degraded => "degraded",
+        BundleStatus::Error => "error",
+    }
+}
+
+fn step_status_label(s: StepStatus) -> &'static str {
+    match s {
+        StepStatus::Ok => "ok",
+        StepStatus::Warnings => "warnings",
+        StepStatus::Error => "error",
+        StepStatus::Skipped => "skipped",
+    }
+}
+
+/// RFC3339 timestamp using only `std::time` + Howard Hinnant's
+/// civil-from-days algorithm. UTC, second precision, 'Z' suffix.
+fn rfc3339_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    rfc3339_from_unix(secs)
+}
+
+fn rfc3339_from_unix(secs: u64) -> String {
+    let s = (secs % 60) as u32;
+    let m = ((secs / 60) % 60) as u32;
+    let h = ((secs / 3600) % 24) as u32;
+    let days = (secs / 86400) as i64;
+
+    // Howard Hinnant's civil_from_days. Valid for 0001-01-01 onward.
+    let z = days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if mo <= 2 { y + 1 } else { y };
+
+    format!("{year:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
 // =============================================================================
