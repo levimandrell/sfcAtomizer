@@ -1,0 +1,7 @@
+[package]
+name = "sfc-atomizer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host application (GUI/CLI) for the SFC Wave Compiler."

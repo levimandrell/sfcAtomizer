@@ -1,0 +1,22 @@
+# Rust
+/target/
+**/target/
+
+# Build output for compiled SNES artifacts (.spc, .sfc, BRR pools, etc.)
+/build/
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*.pdb
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude Code working directory
+.claude/
