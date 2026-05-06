@@ -19,16 +19,27 @@ use sfc_atomizer_core::driver_build::{build as driver_build, DriverBuildInput};
 use sfc_atomizer_core::import::{import_audio, ImportError, ImportOptions};
 use sfc_atomizer_core::loop_finder::{find_loop_candidates, LoopFinderOptions};
 use sfc_atomizer_core::manifest::verify_bundle;
+use sfc_atomizer_core::module_writer::{
+    parse_module_blocks, parse_module_header, project_blocks_to_aram, recompute_in_file_sha,
+    MODULE_MAGIC,
+};
 use sfc_atomizer_core::packer::{pack as packer_pack, EncodedSample, PackInput};
 use sfc_atomizer_core::project::{ProjectIoError, ProjectV1, ValidationError};
 use sfc_atomizer_core::report::{
     AramKind, AramMapReport, AssembleReport, AssembleStatus, AudibleStatus, AudibleThresholds,
     AudibleVerificationReport, AuditionReport, BrrEncodeBlock, BrrEncodeReport, BrrFixtureReport,
     BundleStatus, BundleSteps, BundleSummary, CalibrationReport, CalibrationStatus,
-    CompileSpcReport, DoctorReport, DoctorStatus, DoctorTools, FixtureSetInfo, LoopCandidateJson,
-    LoopFinderReport, M0Manifest, ObservedAudio, ObservedInfo, OracleInfo, ProvisionalTolerances,
-    RenderInfo, RustInfo, SpcExportReport, SpcInitialState, SpcStatus, StepStatus, ToolStatus,
-    ValidationErrorJson, ValidationReport, ValidationStatus, SCHEMA_VERSION,
+    CompileSfcReport, CompileSpcReport, DoctorReport, DoctorStatus, DoctorTools, FixtureSetInfo,
+    LoopCandidateJson, LoopFinderReport, M0Manifest, ObservedAudio, ObservedInfo, OracleInfo,
+    ProvisionalTolerances, RenderInfo, RustInfo, SfcFinding, SfcHeaderSummary, SfcModuleSummary,
+    SfcModulesAudibleReport, SfcStructureReport, SfcStructureStatus, SpcExportReport,
+    SpcInitialState, SpcStatus, StepStatus, ToolStatus, ValidationErrorJson, ValidationReport,
+    ValidationStatus, SCHEMA_VERSION,
+};
+use sfc_atomizer_core::sfc_export::{
+    export_sfc, SfcExportInput, LOROM_HEADER_BASE, LOROM_HEADER_CHECKSUM_COMPLEMENT_OFFSET,
+    LOROM_HEADER_CHECKSUM_OFFSET, LOROM_HEADER_MODE_OFFSET, LOROM_HEADER_RESET_VECTOR_OFFSET,
+    LOROM_HEADER_TITLE_LEN, MODULE_A_FILE_OFFSET, MODULE_B_FILE_OFFSET,
 };
 use sfc_atomizer_core::spc::{
     build_m1_image, build_smoke_image, verify_structure, SpcCpuState, SpcImage, SMOKE_CPU_STATE,
@@ -142,6 +153,50 @@ enum Command {
         /// Also write the report JSON to a file.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Compile one or two projects into a LoROM `.sfc` test ROM (M1.6).
+    ///
+    /// With only `--project-a`, the loader uploads a single module
+    /// twice (module B is a clone of A) so the swap mechanism is
+    /// still exercised. Exit codes: 0 ok, 1 IO/parse, 2 project-
+    /// invalid, 3 pack error, 4 module-write error, 5 sfc-build
+    /// error.
+    CompileSfc {
+        #[arg(long)]
+        project_a: PathBuf,
+        #[arg(long)]
+        project_b: Option<PathBuf>,
+        #[arg(long)]
+        out_sfc: Option<PathBuf>,
+        #[arg(long)]
+        out_report: Option<PathBuf>,
+    },
+    /// Verify the structural integrity of a LoROM `.sfc`: header,
+    /// vectors, embedded `module.bin` parsing + in-file SHA match.
+    /// Exit codes: 0 ok, 1 IO error, 2 structural failure.
+    VerifySfcStructure {
+        #[arg(long)]
+        sfc: PathBuf,
+        #[arg(long)]
+        out_report: Option<PathBuf>,
+    },
+    /// Cross-check audio: parse each embedded module, project blocks
+    /// back into a 64 KB ARAM image, wrap as M1 SPC, render via
+    /// snes_spc oracle, assert non-silent. Exit codes: 0 ok, 1
+    /// IO/oracle error, 2 silent_fail (any module silent).
+    VerifySfcModulesAudible {
+        #[arg(long)]
+        sfc: PathBuf,
+        #[arg(long, default_value_t = 16384u32)]
+        frames: u32,
+        #[arg(long)]
+        out_report: Option<PathBuf>,
+        #[arg(long, default_value_t = 1000u32)]
+        min_max_abs: u32,
+        #[arg(long, default_value_t = 200.0f64)]
+        min_rms: f64,
+        #[arg(long)]
+        oracle: Option<PathBuf>,
     },
     /// Compile a project end-to-end into an audible `.spc` file (M1.5).
     ///
@@ -334,6 +389,35 @@ fn run(cli: Cli) -> Result<(), CliError> {
             out_map,
             driver,
         } => cmd_pack(&project, &out_image, &out_map, driver.as_deref()),
+        Command::CompileSfc {
+            project_a,
+            project_b,
+            out_sfc,
+            out_report,
+        } => cmd_compile_sfc(
+            &project_a,
+            project_b.as_deref(),
+            out_sfc.as_deref(),
+            out_report.as_deref(),
+        ),
+        Command::VerifySfcStructure { sfc, out_report } => {
+            cmd_verify_sfc_structure(&sfc, out_report.as_deref())
+        }
+        Command::VerifySfcModulesAudible {
+            sfc,
+            frames,
+            out_report,
+            min_max_abs,
+            min_rms,
+            oracle,
+        } => cmd_verify_sfc_modules_audible(
+            &sfc,
+            frames,
+            out_report.as_deref(),
+            min_max_abs,
+            min_rms,
+            oracle.as_deref(),
+        ),
         Command::CompileSpc {
             project,
             out_spc,
@@ -663,11 +747,11 @@ fn assemble_with_backend(
 ) -> Result<(), CliError> {
     report.backend = backend.name().to_string();
 
-    let input = AssembleInput {
-        source_path: source.to_path_buf(),
-        output_image_path: image_out.to_path_buf(),
-        working_dir: working_dir.to_path_buf(),
-    };
+    let input = AssembleInput::for_spc700_aram(
+        source.to_path_buf(),
+        image_out.to_path_buf(),
+        working_dir.to_path_buf(),
+    );
 
     match backend.assemble(&input) {
         Ok(out) => {
@@ -1962,6 +2046,686 @@ fn cmd_pack(
         out_map.display(),
     );
     Ok(())
+}
+
+// =============================================================================
+// compile-sfc / verify-sfc-structure / verify-sfc-modules-audible (M1.6)
+// =============================================================================
+
+fn cmd_compile_sfc(
+    project_a_path: &Path,
+    project_b_path: Option<&Path>,
+    out_sfc: Option<&Path>,
+    out_report: Option<&Path>,
+) -> Result<(), CliError> {
+    let stem_a = project_path_stem(project_a_path);
+    let out_sfc_owned = out_sfc
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m1").join(format!("{stem_a}.sfc")));
+    let out_report_owned = out_report.map(|p| p.to_path_buf()).unwrap_or_else(|| {
+        PathBuf::from("build/m1").join(format!("{stem_a}.compile-sfc-report.json"))
+    });
+
+    let work = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("compile-sfc: tempdir: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let result = match export_sfc(SfcExportInput {
+        project_a_path: project_a_path.to_path_buf(),
+        project_b_path: project_b_path.map(|p| p.to_path_buf()),
+        loader_source_override: None,
+        working_dir: work.path().to_path_buf(),
+        out_sfc_path: out_sfc_owned.clone(),
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            use sfc_atomizer_core::sfc_export::SfcExportError;
+            let exit = match &e {
+                SfcExportError::Load { .. } | SfcExportError::Io { .. } => 1,
+                SfcExportError::Validation { .. } => 2,
+                SfcExportError::Decode { .. } => 1,
+                SfcExportError::Encode { .. } | SfcExportError::Pack { .. } => 3,
+                SfcExportError::Module { .. } => 4,
+                SfcExportError::Driver { .. } | SfcExportError::Assemble(_) => 5,
+                SfcExportError::ModuleTooLarge(..) => 5,
+            };
+            eprintln!("compile-sfc: {e}");
+            std::process::exit(exit);
+        }
+    };
+
+    let report = CompileSfcReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: CompileSfcReport::REPORT_TYPE.to_string(),
+        project_a_name: result.module_a.project_name.clone(),
+        project_b_name: if result.module_b_is_clone_of_a {
+            None
+        } else {
+            Some(result.module_b.project_name.clone())
+        },
+        sfc_path: result.sfc_path.display().to_string(),
+        sfc_size_bytes: result.sfc_size_bytes,
+        sfc_sha256: result.sfc_sha256.clone(),
+        module_b_is_clone_of_a: result.module_b_is_clone_of_a,
+        module_a_sha256: result.module_a.module_file_sha256.clone(),
+        module_a_in_file_sha256: result.module_a.module_in_file_sha256.clone(),
+        module_a_bytes: result.module_a.module_bytes.len() as u32,
+        module_b_sha256: if result.module_b_is_clone_of_a {
+            None
+        } else {
+            Some(result.module_b.module_file_sha256.clone())
+        },
+        module_b_in_file_sha256: if result.module_b_is_clone_of_a {
+            None
+        } else {
+            Some(result.module_b.module_in_file_sha256.clone())
+        },
+        module_b_bytes: if result.module_b_is_clone_of_a {
+            None
+        } else {
+            Some(result.module_b.module_bytes.len() as u32)
+        },
+        loader_size_bytes: result.loader_size_bytes,
+    };
+    write_json(&out_report_owned, &report)?;
+
+    let clone_label = if result.module_b_is_clone_of_a {
+        " (clone)"
+    } else {
+        ""
+    };
+    eprintln!(
+        "compile-sfc: A={} ({} B), B={}{} ({} B); .sfc={} B (sha={}); -> {}",
+        result.module_a.project_name,
+        result.module_a.module_bytes.len(),
+        result.module_b.project_name,
+        clone_label,
+        result.module_b.module_bytes.len(),
+        result.sfc_size_bytes,
+        result.sfc_sha256,
+        result.sfc_path.display(),
+    );
+    Ok(())
+}
+
+fn project_path_stem(p: &Path) -> String {
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".to_string());
+    stem.strip_suffix(".sfcproj")
+        .map(str::to_string)
+        .unwrap_or(stem)
+}
+
+fn cmd_verify_sfc_structure(sfc_path: &Path, out_report: Option<&Path>) -> Result<(), CliError> {
+    let stem = sfc_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sfc".to_string());
+    let out_report_owned = out_report
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m1").join(format!("{stem}.structure-report.json")));
+
+    let bytes = match std::fs::read(sfc_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("verify-sfc-structure: read {}: {e}", sfc_path.display());
+            std::process::exit(1);
+        }
+    };
+
+    let mut findings: Vec<SfcFinding> = Vec::new();
+
+    // Power-of-two LoROM size.
+    let valid_sizes = [
+        256 * 1024,
+        512 * 1024,
+        1024 * 1024,
+        2048 * 1024,
+        4096 * 1024,
+    ];
+    if !valid_sizes.contains(&bytes.len()) {
+        findings.push(SfcFinding {
+            kind: "size".to_string(),
+            message: format!(
+                "file size {} not a LoROM power-of-two (256K..4M)",
+                bytes.len()
+            ),
+        });
+    }
+
+    // Header.
+    let title = if bytes.len() >= LOROM_HEADER_BASE + LOROM_HEADER_TITLE_LEN {
+        String::from_utf8_lossy(
+            &bytes[LOROM_HEADER_BASE..LOROM_HEADER_BASE + LOROM_HEADER_TITLE_LEN],
+        )
+        .into_owned()
+    } else {
+        String::new()
+    };
+    let mode_byte = bytes.get(LOROM_HEADER_MODE_OFFSET).copied().unwrap_or(0);
+    let rom_size_byte = bytes.get(LOROM_HEADER_BASE + 0x17).copied().unwrap_or(0);
+    let country_byte = bytes.get(LOROM_HEADER_BASE + 0x19).copied().unwrap_or(0);
+    let checksum_complement = u16::from_le_bytes(
+        bytes[LOROM_HEADER_CHECKSUM_COMPLEMENT_OFFSET..LOROM_HEADER_CHECKSUM_COMPLEMENT_OFFSET + 2]
+            .try_into()
+            .unwrap_or([0, 0]),
+    );
+    let checksum = u16::from_le_bytes(
+        bytes[LOROM_HEADER_CHECKSUM_OFFSET..LOROM_HEADER_CHECKSUM_OFFSET + 2]
+            .try_into()
+            .unwrap_or([0, 0]),
+    );
+    let reset_vector = u16::from_le_bytes(
+        bytes[LOROM_HEADER_RESET_VECTOR_OFFSET..LOROM_HEADER_RESET_VECTOR_OFFSET + 2]
+            .try_into()
+            .unwrap_or([0, 0]),
+    );
+
+    if mode_byte != 0x20 {
+        findings.push(SfcFinding {
+            kind: "header_mode".to_string(),
+            message: format!("mode byte ${mode_byte:02X} != $20 (LoROM SlowROM)"),
+        });
+    }
+    if country_byte != 0x01 {
+        findings.push(SfcFinding {
+            kind: "header_country".to_string(),
+            message: format!("country byte ${country_byte:02X} != $01 (US)"),
+        });
+    }
+    if !title.is_ascii() {
+        findings.push(SfcFinding {
+            kind: "header_title".to_string(),
+            message: "title contains non-ASCII bytes".to_string(),
+        });
+    }
+    if checksum_complement ^ checksum != 0xFFFF {
+        findings.push(SfcFinding {
+            kind: "checksum".to_string(),
+            message: format!(
+                "complement ${checksum_complement:04X} ^ checksum ${checksum:04X} = ${:04X}, want $FFFF",
+                checksum_complement ^ checksum,
+            ),
+        });
+    }
+    if reset_vector < 0x8000 {
+        findings.push(SfcFinding {
+            kind: "reset_vector".to_string(),
+            message: format!("reset vector ${reset_vector:04X} < $8000"),
+        });
+    }
+
+    // Module summaries.
+    let module_a_summary = parse_embedded_module(&bytes, MODULE_A_FILE_OFFSET, "A", &mut findings);
+    let module_b_summary = parse_embedded_module(&bytes, MODULE_B_FILE_OFFSET, "B", &mut findings);
+
+    let header_summary = SfcHeaderSummary {
+        title: title.trim_end().to_string(),
+        mode_byte,
+        rom_size_byte,
+        country_byte,
+        checksum,
+        checksum_complement,
+        reset_vector,
+        file_size_bytes: bytes.len() as u32,
+    };
+
+    let status = if findings.is_empty() {
+        SfcStructureStatus::Ok
+    } else {
+        SfcStructureStatus::Fail
+    };
+
+    let report = SfcStructureReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: SfcStructureReport::REPORT_TYPE.to_string(),
+        sfc_path: sfc_path.display().to_string(),
+        status,
+        findings,
+        header_summary,
+        module_a_summary,
+        module_b_summary: Some(module_b_summary),
+    };
+    write_json(&out_report_owned, &report)?;
+
+    let nfind = report.findings.len();
+    eprintln!(
+        "verify-sfc-structure: status={} ({} finding{}); report -> {}",
+        match status {
+            SfcStructureStatus::Ok => "ok",
+            SfcStructureStatus::Fail => "fail",
+        },
+        nfind,
+        if nfind == 1 { "" } else { "s" },
+        out_report_owned.display()
+    );
+    if status == SfcStructureStatus::Fail {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+fn parse_embedded_module(
+    bytes: &[u8],
+    embed_offset: usize,
+    label: &str,
+    findings: &mut Vec<SfcFinding>,
+) -> SfcModuleSummary {
+    if embed_offset + 64 > bytes.len() {
+        findings.push(SfcFinding {
+            kind: format!("module_{label}_offset"),
+            message: format!("embed offset ${embed_offset:X} past file end"),
+        });
+        return zero_module_summary(embed_offset);
+    }
+    // Parse just the first 64 bytes for header. We need block table
+    // + data so feed enough slice. Module length is at $18..$1C.
+    let mod_total_len = u32::from_le_bytes(
+        bytes[embed_offset + 0x18..embed_offset + 0x1C]
+            .try_into()
+            .unwrap_or([0; 4]),
+    );
+    let mod_end = embed_offset + mod_total_len as usize;
+    if mod_end > bytes.len() {
+        findings.push(SfcFinding {
+            kind: format!("module_{label}_size"),
+            message: format!("module total_file_len {mod_total_len} runs past file end"),
+        });
+        return zero_module_summary(embed_offset);
+    }
+    let module_slice = &bytes[embed_offset..mod_end];
+    let header = match parse_module_header(module_slice) {
+        Ok(h) => h,
+        Err(e) => {
+            findings.push(SfcFinding {
+                kind: format!("module_{label}_parse"),
+                message: format!("{e}"),
+            });
+            return zero_module_summary(embed_offset);
+        }
+    };
+    if !header.magic_ok {
+        findings.push(SfcFinding {
+            kind: format!("module_{label}_magic"),
+            message: format!("magic != {:?}", MODULE_MAGIC),
+        });
+    }
+    if header.schema_version != 1 {
+        findings.push(SfcFinding {
+            kind: format!("module_{label}_schema"),
+            message: format!("schema {} != 1", header.schema_version),
+        });
+    }
+    if header.header_len != 64 {
+        findings.push(SfcFinding {
+            kind: format!("module_{label}_header_len"),
+            message: format!("header_len {} != 64", header.header_len),
+        });
+    }
+    if header.entrypoint != 0x0200 {
+        findings.push(SfcFinding {
+            kind: format!("module_{label}_entry"),
+            message: format!("entrypoint ${:04X} != $0200", header.entrypoint),
+        });
+    }
+    let blocks = match parse_module_blocks(module_slice, &header) {
+        Ok(b) => b,
+        Err(e) => {
+            findings.push(SfcFinding {
+                kind: format!("module_{label}_blocks"),
+                message: format!("{e}"),
+            });
+            Vec::new()
+        }
+    };
+    if blocks.is_empty() && header.block_count > 0 {
+        findings.push(SfcFinding {
+            kind: format!("module_{label}_blocks"),
+            message: "block table parse failed".to_string(),
+        });
+    }
+    let mut prev_addr: Option<u16> = None;
+    for b in &blocks {
+        if b.dest_addr < 0x0200 {
+            findings.push(SfcFinding {
+                kind: format!("module_{label}_block_below_driver"),
+                message: format!("block @${:04X} below $0200", b.dest_addr),
+            });
+        }
+        let end = b.dest_addr as u32 + b.length as u32;
+        if (b.dest_addr as u32) < 0x0100 && end > 0x00F0 {
+            findings.push(SfcFinding {
+                kind: format!("module_{label}_block_io"),
+                message: format!("block @${:04X} intersects $00F0..$00FF", b.dest_addr),
+            });
+        }
+        if let Some(prev) = prev_addr {
+            if b.dest_addr <= prev {
+                findings.push(SfcFinding {
+                    kind: format!("module_{label}_block_unsorted"),
+                    message: format!(
+                        "block @${:04X} not strictly above prev ${prev:04X}",
+                        b.dest_addr
+                    ),
+                });
+            }
+        }
+        prev_addr = Some(b.dest_addr);
+    }
+
+    // SHA: in-file value vs recomputed.
+    let mut in_file_sha_hex = String::with_capacity(64);
+    for b in &header.content_sha256_in_file {
+        use std::fmt::Write as _;
+        let _ = write!(in_file_sha_hex, "{b:02x}");
+    }
+    let recomputed = recompute_in_file_sha(module_slice);
+    let matches = in_file_sha_hex == recomputed;
+    if !matches {
+        findings.push(SfcFinding {
+            kind: format!("module_{label}_sha"),
+            message: format!("in-file SHA {in_file_sha_hex} != recomputed {recomputed}"),
+        });
+    }
+
+    SfcModuleSummary {
+        embed_offset: embed_offset as u32,
+        magic_ok: header.magic_ok,
+        schema_version: header.schema_version,
+        block_count: header.block_count,
+        entrypoint: header.entrypoint,
+        total_file_len: header.total_file_len,
+        flags: header.flags,
+        in_file_sha256: in_file_sha_hex,
+        recomputed_in_file_sha256: recomputed,
+        in_file_sha_matches: matches,
+    }
+}
+
+fn zero_module_summary(embed_offset: usize) -> SfcModuleSummary {
+    SfcModuleSummary {
+        embed_offset: embed_offset as u32,
+        magic_ok: false,
+        schema_version: 0,
+        block_count: 0,
+        entrypoint: 0,
+        total_file_len: 0,
+        flags: 0,
+        in_file_sha256: String::new(),
+        recomputed_in_file_sha256: String::new(),
+        in_file_sha_matches: false,
+    }
+}
+
+fn cmd_verify_sfc_modules_audible(
+    sfc_path: &Path,
+    frames: u32,
+    out_report: Option<&Path>,
+    min_max_abs: u32,
+    min_rms: f64,
+    oracle: Option<&Path>,
+) -> Result<(), CliError> {
+    let stem = sfc_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "sfc".to_string());
+    let out_report_owned = out_report.map(|p| p.to_path_buf()).unwrap_or_else(|| {
+        PathBuf::from("build/m1").join(format!("{stem}.modules-audible-report.json"))
+    });
+
+    let workspace_root = std::env::current_dir().map_err(CliError::Cwd)?;
+    let oracle_path = match resolve_oracle(oracle, &workspace_root) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "verify-sfc-modules-audible: oracle wrapper not resolved (set SFCWC_SNES_SPC_ORACLE)"
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let sfc_bytes = match std::fs::read(sfc_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "verify-sfc-modules-audible: read {}: {e}",
+                sfc_path.display()
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let work = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("verify-sfc-modules-audible: tempdir: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let module_a_audible = render_module_audible(
+        &sfc_bytes,
+        MODULE_A_FILE_OFFSET,
+        sfc_path,
+        "A",
+        frames,
+        min_max_abs,
+        min_rms,
+        &oracle_path,
+        work.path(),
+    );
+    let module_b_audible = render_module_audible(
+        &sfc_bytes,
+        MODULE_B_FILE_OFFSET,
+        sfc_path,
+        "B",
+        frames,
+        min_max_abs,
+        min_rms,
+        &oracle_path,
+        work.path(),
+    );
+
+    let modules_audio_identical = module_a_audible.spc_sha256 == module_b_audible.spc_sha256;
+    let any_silent = matches!(
+        module_a_audible.status,
+        AudibleStatus::SilentFail | AudibleStatus::OracleError
+    ) || matches!(
+        module_b_audible.status,
+        AudibleStatus::SilentFail | AudibleStatus::OracleError
+    );
+
+    let status = if matches!(module_a_audible.status, AudibleStatus::OracleError)
+        || matches!(module_b_audible.status, AudibleStatus::OracleError)
+    {
+        AudibleStatus::OracleError
+    } else if any_silent {
+        AudibleStatus::SilentFail
+    } else {
+        AudibleStatus::Ok
+    };
+
+    let report = SfcModulesAudibleReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: SfcModulesAudibleReport::REPORT_TYPE.to_string(),
+        sfc_path: sfc_path.display().to_string(),
+        status,
+        module_a_audible: module_a_audible.clone(),
+        module_b_audible: Some(module_b_audible.clone()),
+        modules_audio_identical,
+        error: None,
+    };
+    write_json(&out_report_owned, &report)?;
+
+    eprintln!(
+        "verify-sfc-modules-audible: A={{max_abs={}, rms={:.1}}}, B={{max_abs={}, rms={:.1}}}, identical={}, status={}; report -> {}",
+        module_a_audible.observed.max_abs,
+        module_a_audible.observed.rms,
+        module_b_audible.observed.max_abs,
+        module_b_audible.observed.rms,
+        modules_audio_identical,
+        match status {
+            AudibleStatus::Ok => "ok",
+            AudibleStatus::SilentFail => "silent_fail",
+            AudibleStatus::OracleError => "oracle_error",
+        },
+        out_report_owned.display(),
+    );
+
+    match status {
+        AudibleStatus::Ok => Ok(()),
+        AudibleStatus::SilentFail => std::process::exit(2),
+        AudibleStatus::OracleError => std::process::exit(1),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_module_audible(
+    sfc_bytes: &[u8],
+    embed_offset: usize,
+    sfc_path: &Path,
+    label: &str,
+    frames: u32,
+    min_max_abs: u32,
+    min_rms: f64,
+    oracle_path: &Path,
+    work_dir: &Path,
+) -> AudibleVerificationReport {
+    let mut report = AudibleVerificationReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: AudibleVerificationReport::REPORT_TYPE.to_string(),
+        spc_path: format!("{}#module_{label}", sfc_path.display()),
+        spc_sha256: String::new(),
+        frames_rendered: 0,
+        sample_rate_hz: 32_000,
+        observed: ObservedAudio {
+            max_abs: 0,
+            rms: 0.0,
+            bytes_zero: 0,
+            bytes_total: 0,
+            fraction_zero: 0.0,
+        },
+        thresholds: AudibleThresholds {
+            min_max_abs,
+            min_rms,
+        },
+        status: AudibleStatus::OracleError,
+        error: None,
+    };
+
+    if embed_offset + 64 > sfc_bytes.len() {
+        report.error = Some(format!("module {label} embed past file end"));
+        return report;
+    }
+    let mod_total_len = u32::from_le_bytes(
+        sfc_bytes[embed_offset + 0x18..embed_offset + 0x1C]
+            .try_into()
+            .unwrap_or([0; 4]),
+    );
+    let mod_end = embed_offset + mod_total_len as usize;
+    if mod_end > sfc_bytes.len() {
+        report.error = Some(format!("module {label} runs past file"));
+        return report;
+    }
+    let module_slice = &sfc_bytes[embed_offset..mod_end];
+    let header = match parse_module_header(module_slice) {
+        Ok(h) => h,
+        Err(e) => {
+            report.error = Some(format!("module {label} parse: {e}"));
+            return report;
+        }
+    };
+    let blocks = match parse_module_blocks(module_slice, &header) {
+        Ok(b) => b,
+        Err(e) => {
+            report.error = Some(format!("module {label} blocks: {e}"));
+            return report;
+        }
+    };
+    let aram = project_blocks_to_aram(module_slice, &header, &blocks);
+
+    // Wrap as M1 SPC and write to scratch.
+    let spc = match build_m1_image(aram.to_vec()) {
+        Ok(s) => s,
+        Err(e) => {
+            report.error = Some(format!("build_m1_image: {e:?}"));
+            return report;
+        }
+    };
+    let spc_bytes = match spc.to_bytes() {
+        Ok(b) => b,
+        Err(e) => {
+            report.error = Some(format!("spc.to_bytes: {e:?}"));
+            return report;
+        }
+    };
+    let spc_path = work_dir.join(format!("module_{label}.spc"));
+    if let Err(e) = std::fs::write(&spc_path, &spc_bytes) {
+        report.error = Some(format!("write spc: {e}"));
+        return report;
+    }
+    let pcm_path = work_dir.join(format!("module_{label}.pcm"));
+    let oracle_report = work_dir.join(format!("module_{label}.oracle.json"));
+
+    let output = std::process::Command::new(oracle_path)
+        .arg("render")
+        .arg("--input-spc")
+        .arg(&spc_path)
+        .arg("--frames")
+        .arg(frames.to_string())
+        .arg("--output-pcm")
+        .arg(&pcm_path)
+        .arg("--report")
+        .arg(&oracle_report)
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            report.error = Some(format!("spawn oracle: {e}"));
+            return report;
+        }
+    };
+    if !output.status.success() {
+        report.error = Some(format!(
+            "oracle exited {}",
+            output.status.code().unwrap_or(-1)
+        ));
+        return report;
+    }
+
+    let pcm = match std::fs::read(&pcm_path) {
+        Ok(b) => b,
+        Err(e) => {
+            report.error = Some(format!("read pcm: {e}"));
+            return report;
+        }
+    };
+    let (max_abs, rms) = pcm_stats_from_bytes(&pcm);
+    let bytes_zero = pcm.iter().filter(|&&b| b == 0).count() as u32;
+    let bytes_total = pcm.len() as u32;
+    let fraction_zero = bytes_zero as f64 / bytes_total as f64;
+
+    report.frames_rendered = frames;
+    report.observed = ObservedAudio {
+        max_abs: max_abs as u32,
+        rms,
+        bytes_zero,
+        bytes_total,
+        fraction_zero,
+    };
+    report.spc_sha256 = sfc_atomizer_core::asm::sha256_hex(&pcm);
+    report.status = if (max_abs as u32) < min_max_abs || rms < min_rms {
+        AudibleStatus::SilentFail
+    } else {
+        AudibleStatus::Ok
+    };
+    report
 }
 
 // =============================================================================
