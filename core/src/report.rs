@@ -819,6 +819,81 @@ pub enum AudibleStatus {
 }
 
 // =============================================================================
+// M1 manifest — `sfcwc m1-acceptance` (M1.7)
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct M1Manifest {
+    pub schema_version: u32,
+    pub report_type: String,
+    pub generated_at: String,
+    pub project_a: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_b: Option<String>,
+
+    pub doctor_report: String,
+    pub validate_a_report: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validate_b_report: Option<String>,
+    pub aram_map_report: String,
+    pub compile_spc_report: String,
+    pub audible_spc_report: String,
+    pub compile_sfc_report: String,
+    pub structure_sfc_report: String,
+    pub audible_sfc_report: String,
+
+    pub bundle: M1BundleSummary,
+}
+
+impl M1Manifest {
+    pub const REPORT_TYPE: &'static str = "m1_manifest";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct M1BundleSummary {
+    pub steps: M1BundleSteps,
+    pub status: BundleStatus,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aram_image_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spc_file_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sfc_file_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_a_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_b_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_code_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spc_audible_max_abs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sfc_audible_module_a_max_abs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sfc_audible_module_b_max_abs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modules_audio_identical: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct M1BundleSteps {
+    pub doctor: StepStatus,
+    pub validate_a: StepStatus,
+    /// `Skipped` when no project B was provided. Optional step;
+    /// does not downgrade the bundle status when skipped this way.
+    pub validate_b: StepStatus,
+    pub compile_spc: StepStatus,
+    pub audible_spc: StepStatus,
+    pub compile_sfc: StepStatus,
+    pub structure_sfc: StepStatus,
+    pub audible_sfc: StepStatus,
+}
+
+// =============================================================================
 // Compile-SFC report — `sfcwc compile-sfc` (M1.6)
 // =============================================================================
 
@@ -1329,6 +1404,74 @@ mod tests {
             !json.contains("searched"),
             "empty searched should be omitted: {json}"
         );
+    }
+
+    #[test]
+    fn m1_manifest_round_trip_minimal() {
+        let m = M1Manifest {
+            schema_version: SCHEMA_VERSION,
+            report_type: M1Manifest::REPORT_TYPE.to_string(),
+            generated_at: "2026-05-06T00:00:00Z".to_string(),
+            project_a: "demo.sfcproj.json".to_string(),
+            project_b: None,
+            doctor_report: "build/m1/doctor.json".to_string(),
+            validate_a_report: "build/m1/validate-a.json".to_string(),
+            validate_b_report: None,
+            aram_map_report: "build/m1/aram-map.json".to_string(),
+            compile_spc_report: "build/m1/compile-spc.json".to_string(),
+            audible_spc_report: "build/m1/audible-spc.json".to_string(),
+            compile_sfc_report: "build/m1/compile-sfc.json".to_string(),
+            structure_sfc_report: "build/m1/structure-sfc.json".to_string(),
+            audible_sfc_report: "build/m1/audible-sfc.json".to_string(),
+            bundle: M1BundleSummary::default(),
+        };
+        round_trip(&m);
+    }
+
+    #[test]
+    fn m1_manifest_round_trip_populated() {
+        let bundle = M1BundleSummary {
+            steps: M1BundleSteps {
+                doctor: StepStatus::Ok,
+                validate_a: StepStatus::Ok,
+                validate_b: StepStatus::Ok,
+                compile_spc: StepStatus::Ok,
+                audible_spc: StepStatus::Ok,
+                compile_sfc: StepStatus::Ok,
+                structure_sfc: StepStatus::Ok,
+                audible_sfc: StepStatus::Ok,
+            },
+            status: BundleStatus::Ok,
+            aram_image_sha256: Some("a".repeat(64)),
+            spc_file_sha256: Some("b".repeat(64)),
+            sfc_file_sha256: Some("c".repeat(64)),
+            module_a_sha256: Some("d".repeat(64)),
+            module_b_sha256: Some("e".repeat(64)),
+            driver_code_sha256: Some("f".repeat(64)),
+            spc_audible_max_abs: Some(11072),
+            sfc_audible_module_a_max_abs: Some(11072),
+            sfc_audible_module_b_max_abs: Some(11072),
+            modules_audio_identical: Some(false),
+            diagnostics: vec!["doctor: mesen2 missing (informational)".to_string()],
+        };
+        let m = M1Manifest {
+            schema_version: SCHEMA_VERSION,
+            report_type: M1Manifest::REPORT_TYPE.to_string(),
+            generated_at: "2026-05-06T00:00:00Z".to_string(),
+            project_a: "a.sfcproj.json".to_string(),
+            project_b: Some("b.sfcproj.json".to_string()),
+            doctor_report: "build/m1/doctor.json".to_string(),
+            validate_a_report: "build/m1/validate-a.json".to_string(),
+            validate_b_report: Some("build/m1/validate-b.json".to_string()),
+            aram_map_report: "build/m1/aram-map.json".to_string(),
+            compile_spc_report: "build/m1/compile-spc.json".to_string(),
+            audible_spc_report: "build/m1/audible-spc.json".to_string(),
+            compile_sfc_report: "build/m1/compile-sfc.json".to_string(),
+            structure_sfc_report: "build/m1/structure-sfc.json".to_string(),
+            audible_sfc_report: "build/m1/audible-sfc.json".to_string(),
+            bundle,
+        };
+        round_trip(&m);
     }
 
     #[test]
