@@ -177,6 +177,57 @@ The `measured` block is populated by the build process and consumed by UI displa
 
 `max_dsp_writes_per_tick` is a compiler scheduling policy, not a hardware maximum. One logical S-DSP write means one target register update via $F2/$F3. The default soft budget is 24 logical writes/tick for M0–M2 to preserve interpreter headroom and avoid bursty event schedules. Later calibration may raise this per profile after cycle measurement. Compile reports show both the soft budget and measured peak writes/tick.
 
+#### M2 profile: `multi_voice_atom`
+
+M2 introduces a second driver profile alongside `sample_basic`. Feature set:
+
+```
+core_tick_loop, core_dsp_write, core_sequence_wait, core_note_on_off,
+core_pitch_table=false, core_source_directory, core_key_on_delay_safety,
+sample_playback, sample_runtime_src_change, volume_set, volume_slide,
+pitch_set, adsr, gain, pan_set, echo_enable, echo_static_params,
+echo_per_voice_mask, synth_static_atom, synth_atom_sequence,
+synth_source_step, multi_voice_playback
+```
+
+Dependencies (a feature implies its prerequisites):
+
+```
+multi_voice_playback     -> core_note_on_off, core_dsp_write
+synth_static_atom        -> sample_playback, core_source_directory
+synth_atom_sequence      -> synth_static_atom, core_sequence_wait
+synth_source_step        -> synth_atom_sequence, sample_runtime_src_change,
+                              core_key_on_delay_safety
+volume_slide             -> volume_set, core_tick_loop
+sample_runtime_src_change -> core_source_directory, core_note_on_off
+```
+
+Limits:
+
+```json
+{
+  "max_music_voices": 2,
+  "reserved_sfx_voices": 0,
+  "max_sources": 128,
+  "max_dsp_writes_per_tick": 24,
+  "min_keyoff_to_keyon_ticks": 1,
+  "max_sequence_bytes": 1024,
+  "max_atom_sources": 32,
+  "max_simultaneous_volume_slides": 1
+}
+```
+
+UI gating: atom-pool / atom-sequence editors are hidden when `synth_static_atom = false`; volume-slide controls hidden when `volume_slide = false`; voice-1 controls hidden when `multi_voice_playback = false`.
+
+#### Manifest enforcement
+
+Every compiler and GUI path that emits atom data, sequence bytecode, or voice-1 data MUST consult the capability manifest, not just `driver.profile`. Enforcement points:
+
+- Entry of `compile-spc`, `compile-sfc`, `pack`, `validate-project`, `m1-acceptance`, `m2-acceptance` (when it lands).
+- Any GUI action that writes atom-pool, atom-sequence, or track data.
+
+A capability mismatch is a hard error naming the missing capability (e.g. `feature \`synth_atom_sequence\` required but not in driver_profile=\`sample_basic\``). UI gating is best-effort cosmetic; the compile-time check is the source of truth.
+
 ---
 
 ## 6. Live-compile model
@@ -514,6 +565,70 @@ invalid_command_behavior  driver halts the sequence and sets an error flag reada
 
 **Compatibility rule:** every compiled module pairs a `bytecode_version` with a `driver_hash`. The driver loader validates that `bytecode_version` is within its supported range; mismatch is a hard error at upload time, not at runtime. The capability manifest (§5.4) carries `bytecode_version` alongside `driver_hash`.
 
+### 14.3 Sequence bytecode v2 (`SEQ2` — M2 multi_voice_atom)
+
+Region header (placed in ARAM by the M2 packer between source directory and BRR pool):
+
+```
+u8[4]  magic = "SEQ2"
+u8     bytecode_version = 2
+u8     reserved = 0
+u16    bytecode_len_le        ; length of the following bytecode payload
+u8[]   bytecode               ; opcode stream
+```
+
+#### Opcodes (locked at M2.0)
+
+```
+$00  END
+       args: none
+$01  WAIT
+       args: u8 ticks (1..=255)
+       semantics: no further bytecode read until ticks elapsed
+$10  SET_SRC
+       args: u8 voice, u8 src_index
+       validation: voice <= 1 in M2; src_index < source_count
+$11  SET_VOL
+       args: u8 voice, u8 vol_l, u8 vol_r
+       validation: vol_l/vol_r 0..=127 in M2 (no phase inversion)
+$12  KON
+       args: u8 voice_mask
+       validation: voice_mask & !0b00000011 == 0 in M2
+$13  KOFF
+       args: u8 voice_mask
+       validation: voice_mask & !0b00000011 == 0 in M2
+$20  VOL_SLIDE
+       args: u8 voice, u8 target_l, u8 target_r, u8 ticks
+       validation: ticks 1..=255; no overlapping active slide
+$30  SET_PITCH
+       args: u8 voice, u16 pitch_le
+       validation: pitch <= $3FFF
+```
+
+#### WAIT counting semantics
+
+At each timer tick, if `wait_counter > 0` the driver decrements the counter, advances any active VOL_SLIDE, and returns. Otherwise it reads and executes commands until one of: WAIT sets `wait_counter`, END is reached, or the per-tick DSP write budget would be exceeded (excess writes deferred to the next tick).
+
+`WAIT 1` means "resume on the next tick," not "wait zero ticks."
+
+#### Source-step lowering
+
+Switching the source register on a sounding voice is forbidden — it produces a click. Compilers that need to swap atom A → atom B on voice 1 lower the step into the following bytecode pattern:
+
+```
+VOL_SLIDE   voice=1, target=(0,0),                 ticks=4
+WAIT        4
+KOFF        voice1
+WAIT        1
+SET_SRC     voice1, next_src
+SET_VOL     voice1, 0, 0
+KON         voice1
+VOL_SLIDE   voice=1, target=(target_l, target_r), ticks=4
+WAIT        4
+```
+
+The capability flag `synth_source_step` enables this lowering; without it, sequence steps that imply a source change are rejected at compile time.
+
 When `bytecode_version` is bumped, older modules either continue to work (if the new driver maintains backward compatibility) or require a recompile from the source project (§16). Modules are not migrated; projects are.
 
 ---
@@ -586,9 +701,37 @@ Echo can self-oscillate or clip unpleasantly, especially through headphones duri
 
 ### 15.4 Budget policy
 
-**Hard errors:** ARAM overflow; >8 simultaneous voices; unsupported bytecode; source directory overflow; BRR loop misalignment; echo buffer overlap; voice-pair allocation conflict.
+**Hard errors:** ARAM overflow; >8 simultaneous voices; unsupported bytecode; source directory overflow; BRR loop misalignment; echo buffer overlap; voice-pair allocation conflict; `module.bin` exceeds 32 KiB (one LoROM bank, see §15.5).
 
 **Warnings:** <2 KB free; S-DSP writes/tick near limit; one synth patch >2 voices; echo >16 KB; atom degraded post-decode; loop click risk high; sustain reaches `max_music_voices - 1`.
+
+### 15.5 Region-list policy
+
+The M1 packer (`core::packer`) uses a fixed sample-only region list: driver code → source directory → BRR sample pool → free → optional echo buffer → IPL pad → IPL ROM shadow. This shape is locked for M1.
+
+The M2 packer extends the region list per Appendix A.3 (driver evolution): driver code at `$0200` (4 KiB budget, unchanged) → source directory (page-aligned) → sequence data → sample BRR pool → synth atom pool → voice setup table → free → echo (top of usable, ending at `$FF00` per M1.4 layout). New region kinds are added through the M2 packer; M1 packer is not patched ad hoc.
+
+### 15.6 module.bin size cap
+
+`module.bin` (§19.4) is hard-capped at 32 KiB — one LoROM bank, the size embedded between banks 1 and 2 in the `.sfc` test ROM. The compiler emits `ModuleTooLarge` and exits with non-zero status when a project produces a module that exceeds this. M2 acceptance fixtures must fit within the cap.
+
+### 15.7 Voice setup table (M2)
+
+The M2 packer adds a small table the driver consults during init to seed each voice's DSP registers. One 11-byte entry per voice:
+
+```
+u8   voice              ; 0..=1 for M2 (sample voice / atom voice)
+u8   src_index          ; index into source directory
+u16  pitch_le           ; SNES pitch register, little-endian
+u8   vol_l              ; 0..=127
+u8   vol_r              ; 0..=127
+u8   adsr1
+u8   adsr2
+u8   gain
+u8   flags              ; reserved = 0 in M2
+```
+
+M2 has 2 entries → 22-byte table. The table lives in its own packer region between the synth atom pool and `free`; the driver init sequence reads each entry, programs the voice's S-DSP registers, and stops. M3+ profiles may extend `flags` with bits for runtime behaviour.
 
 ---
 
@@ -838,6 +981,8 @@ Validation runs at project load and at compile entry. Every failed rule produces
 
 - `m1.active_sample_id` must match exactly one `sample_pool[].id`.
 
+**M2 acceptance — fixture asset paths.** Every `sample_pool[].source.path` consumed by `m2-acceptance` must be relative to the project directory. Absolute paths emit a warning at import (existing M1 behaviour) AND fail validation when the project is used as the input to `m2-acceptance`. Rationale: M2 acceptance bundles must reproduce on a clean clone; absolute paths break reproducibility.
+
 ### 16.7 Pitch and MIDI convention
 
 **MIDI numbering** (locked):
@@ -893,6 +1038,147 @@ A 32 kHz sample at its root key yields `pitch_u16 = $1000`. A 22050 Hz source no
 
 **Acceptance.** Older schema fails safely or migrates explicitly, never silently. Compiled artifacts regenerate byte-identically from `project.json` plus referenced assets given the same compiler/encoder/assembler versions. Project files diff cleanly: stable key order, no embedded binary, no embedded compile timestamps.
 
+### 16.9 Project file format v2 (M2)
+
+V2 introduces synth atoms, atom sequences, multi-track playback, and the M2 driver profile. The v1 keys (`schema_version`, `project`, `driver`, `master_echo`, `sample_pool`) carry forward unchanged; `m1.active_sample_id` is removed.
+
+```json
+{
+  "schema_version": 2,
+  "project": { "name": "...", "tick_rate_hz": 60 },
+  "driver": { "profile": "multi_voice_atom", "bytecode_version": 2 },
+  "master_echo": { "...": "same as v1, see §16.3" },
+  "sample_pool": [],
+  "atom_pool": [],
+  "atom_sequences": [],
+  "tracks": [],
+  "m2": { "active_sequence_id": "seq_main" }
+}
+```
+
+**`atom_pool[]` — synth atom v0** (kind `additive_single_cycle_v0`):
+
+```json
+{
+  "id": "atom_0001",
+  "name": "sine_128",
+  "kind": "additive_single_cycle_v0",
+  "root_midi_note": 60,
+  "cycle_len_samples": 128,
+  "amplitude": 0.75,
+  "partials": [
+    { "harmonic": 1, "amplitude": 1.0, "phase_cycles": 0.0 }
+  ],
+  "render": {
+    "normalize": true,
+    "force_filter_0_first_block": true,
+    "force_filter_0_loop_entry": true
+  },
+  "playback": {
+    "volume": 0.8,
+    "pan": 1.0,
+    "echo": false,
+    "envelope": { "type": "gain_raw", "gain_byte": 127 }
+  }
+}
+```
+
+Validation:
+
+- `cycle_len_samples`: 64, 128, or 256; must be a multiple of 16 (BRR alignment).
+- `partials`: length 1..=8; each `harmonic` 1..=16; `amplitude` 0.0..=1.0; `phase_cycles` 0.0..1.0 (mod 1).
+- top-level `amplitude`: 0.0..=1.0.
+
+Render formula (compile-time PCM, then BRR-encoded through §10):
+
+```
+for n in 0..cycle_len_samples:
+  x[n] = Σ partial.amplitude
+         * sin(2π * (partial.harmonic * n / cycle_len_samples
+                     + partial.phase_cycles))
+if normalize:
+  x[n] /= max_abs(x)
+pcm_i16[n] = round_ties_away_from_zero(x[n] * amplitude * 32767)
+```
+
+Encode through the existing M1 BRR encoder. M2 atoms do not use phase rotation, spectral scoring, or pre-emphasis; those land at M3+ alongside Level-1 synth atom mode.
+
+**`atom_sequences[]`:**
+
+```json
+{
+  "id": "atomseq_0001",
+  "name": "two_step_atom_sequence",
+  "voice": 1,
+  "steps": [
+    {
+      "atom_id": "atom_0001",
+      "duration_ticks": 120,
+      "target_volume": 0.8,
+      "transition": { "type": "initial_kon" }
+    },
+    {
+      "atom_id": "atom_0002",
+      "duration_ticks": 120,
+      "target_volume": 0.8,
+      "transition": {
+        "type": "fade_to_zero_retrigger",
+        "fade_out_ticks": 4,
+        "fade_in_ticks": 4
+      }
+    }
+  ],
+  "loop": false
+}
+```
+
+**`tracks[]`:**
+
+```json
+[
+  { "id": "track_sample", "name": "sample voice", "voice": 0,
+    "kind": "sample_sustain", "sample_id": "sample_0001" },
+  { "id": "track_atom",   "name": "atom voice",   "voice": 1,
+    "kind": "atom_sequence", "atom_sequence_id": "atomseq_0001" }
+]
+```
+
+**Validation rules (v2 additions to §16.6):**
+
+- `schema_version`: 1 (load only — migrates) or 2.
+- `driver.profile`: allowed values `"sample_basic"` (carried-forward v1) or `"multi_voice_atom"`.
+- `driver.bytecode_version`: 1 (`sample_basic`) or 2 (`multi_voice_atom`).
+- `atom_pool[].id`: same regex as v1 sample id (`^[a-z0-9_]+$`).
+- `atom_pool[].cycle_len_samples`: 64, 128, or 256 (matches the atom v0 design).
+- `tracks[].voice`: 0..=1 in M2; unique across `tracks[]`.
+- `atom_sequences[].voice`: must equal the `voice` of the referencing `atom_sequence` track. M2 allowed value: `1`.
+- `atom_sequences[].steps`: length 1..=32; `duration_ticks` 1..=255 in M2.
+- `transition`: first step must be `initial_kon`; subsequent steps must be `fade_to_zero_retrigger` in M2.
+- Echo rules unchanged from v1: per-sample `playback.echo=true` requires `master_echo.enabled=true`.
+
+### 16.10 Migration v1 → v2
+
+```
+schema_version            : 1 → 2
+project                   : carry forward
+driver.profile            : carry forward (typically "sample_basic")
+driver.bytecode_version   : carry forward (typically 1)
+master_echo               : carry forward
+sample_pool               : carry forward
+atom_pool                 : added, value = []
+atom_sequences            : added, value = []
+tracks                    : added, value = [
+  { "id": "track_sample_0",
+    "voice": 0,
+    "kind": "sample_sustain",
+    "sample_id": "<old m1.active_sample_id>" }
+]
+m1                        : DROPPED
+m2                        : added, value = { "active_sequence_id": null }
+```
+
+Migrations are explicit named functions (`migrate_v1_to_v2`); load-time silent upgrades are forbidden. The tool emits a migration report listing every transformed field; the user accepts the migration before the project saves with `schema_version: 2`.
+
 ---
 
 ## 17. Preview and emulator strategy
@@ -918,6 +1204,13 @@ Host-side external tools are resolved via environment variables, with PATH as fa
 | Mesen2 (manual verification only) | `SFCWC_MESEN2`           | `Mesen.exe` / `Mesen` / `Mesen2.exe` on PATH; not auto-launched, user opens manually |
 
 The host app's `doctor` command reports which tools were resolved, their versions, and their resolution paths. Missing tools produce diagnostic warnings, not crashes; commands that strictly require a missing tool fail with a clear error pointing at the env var.
+
+**asar invocation split.** asar is invoked with two distinct flag sets depending on what's being built:
+
+- **SPC700 ARAM image build** (`m1_sample_basic.asm`, future driver assemblies): `asar --no-title-check --fix-checksum=off`. The output is a flat 64 KB ARAM image with no SNES ROM header; `--fix-checksum=off` prevents asar from injecting LoROM checksum bytes into the flat region.
+- **LoROM `.sfc` build** (`m1_loader_65816.asm`, future ROM assemblies): `asar --no-title-check --fix-checksum=on`. The output is a power-of-two LoROM ROM file; asar fills the header checksum and complement at `$7FDC..$7FDF`. After embedding the module(s) into the bank-1 / bank-2 regions, the host re-fixes the checksum (asar's pre-embed checksum goes stale once the module bytes land).
+
+**Process-boundary oracle rule.** snes_spc is invoked across a process boundary; the host application never links against it, and it is never embedded in any compiled output (`.spc` / `.sfc` / module blob / driver image). Live preview at M3+ uses the internal Rust BRR decoder, never the oracle. The oracle remains the validation second-source.
 
 ### 17.2 Audition path (M1.3)
 
@@ -1023,6 +1316,23 @@ Mid-load timing budget, port-handshake validation, and recovery on NAK are part 
 
 **Trap.** Multi-byte communication-register writes and read/write timing hazards are documented in SNESdev errata; final-byte acknowledgement is easy to miss. Use 8-bit writes only, and disable IRQ/NMI across the tight upload routine.
 
+**Spin count semantics.** The bounded-spin constants are semantic wait budgets, not exact iteration counts. Implementations may use any bounded loop yielding equivalent wall-clock duration (`WAIT_*_POLLS = 0x0020_0000` corresponds to roughly 50 ms at 21 MHz). The 65816 M1 loader uses 16-bit double loops with effective wait ≈ 50 ms — this satisfies the budget. Future loaders may switch to 32-bit multi-loops for tighter pacing without changing the contract.
+
+**Ack verification.** Command-ack wait loops MUST verify both the ack code on `$2141` AND the round-trip token on `$2140`. Verifying only the code allows a stale ack from a prior driver run to pass the gate. The M1.6 loader was tightened in M2.0 (consultant finding #10) to enforce this; later loaders inherit the rule.
+
+### 19.2.1 Loader fail-mode colour codes
+
+When the 65816 loader hits one of its bounded-spin timeouts, it sets the BG colour register (`$2132`) to a recognisable colour and unblanks the display so the user sees a one-glance fail signal in the emulator:
+
+| Colour | Cause                       |
+|--------|-----------------------------|
+| Red    | IPL-ready timeout           |
+| Green  | Driver-ready timeout        |
+| Blue   | Command-ack timeout         |
+| White  | IPL byte-ack timeout        |
+
+These are advisory; an emulator-side debugger gives a richer diagnostic. The colours are documented inline at the top of `m1_loader_65816.asm` so loader edits stay in sync with this section.
+
 ### 19.3 SPC smoke state contract (M0)
 
 The M0 smoke `.spc` boots the SPC700 into a state that is silent, deterministic, and obviously running. Concretely:
@@ -1043,6 +1353,8 @@ Result: the SPC700 executes the driver from `$0200` while the DSP produces no au
 ### 19.4 module.bin binary format (M1)
 
 The `.sfc` loader uploads only meaningful ARAM regions, not a contiguous 64 KB image. M1 uses a sparse-block module: never upload `$0000..$01FF` (zero page, I/O, stack — runtime territory). All multi-byte fields are little-endian. M1 schema version = 1.
+
+The magic `"SFCWCM1\0"` identifies the module-binary format v1, introduced in M1. M2 reuses this format unmodified — header layout, block-table layout, and self-zeroed-SHA workaround are stable across the M1→M2 boundary.
 
 **File layout.**
 
@@ -1186,6 +1498,70 @@ For invalid command:
 
 The bounded host-side spin counts in §19.2 govern how long the host waits for each ack before declaring failure.
 
+### 20.2 Driver: `multi_voice_atom` profile (M2)
+
+The M2 driver runs a SPC700 timer-driven polling loop, not an interrupt. The S-SMP has two 8 kHz timers and one 64 kHz timer. M2 uses **T0** with `T0TARGET ($FA) = 133 (= $85)`, yielding a tick rate of `8000 / 133 ≈ 60.150 Hz` ("60 Hz nominal" — precision is sufficient for sequencing; tighter labels are M3+ work).
+
+**Init sequence:**
+
+```
+1. Write FLG mute + echo-write-disable.
+2. Init DSP globals (master vol, DIR, echo regs).
+3. Init voice 0 from voice setup table entry 0 (sample voice).
+4. Init voice 1 from voice setup table entry 1 (default atom params).
+5. Init sequence pointer (seq_ptr_lo / seq_ptr_hi → SEQ2 region).
+6. T0TARGET = $85.
+7. Enable T0 via CONTROL register; clear T0OUT.
+8. KON voice 0 (the sample track).
+9. Enter main_loop.
+```
+
+**Main loop:**
+
+```
+main_loop:
+  poll host commands (same protocol as §20.1)
+  read T0OUT
+  if T0OUT != 0:
+    process min(T0OUT, 4) sequence ticks
+    if T0OUT > 4:
+      set status_flags timing_overrun bit
+  bra main_loop
+```
+
+The 4-tick cap on per-iteration tick processing keeps the worst-case host-command latency bounded; tick overruns are surfaced via a status-flag bit rather than dropped silently.
+
+**Driver state in zero page (M2):**
+
+```
+$00  seq_ptr_lo
+$01  seq_ptr_hi
+$02  wait_counter            ; remaining ticks before next bytecode read
+$03  active_voice_mask
+$04  status_flags
+$05  slide_voice              ; 0 or 1; $FF = no slide active
+$06  slide_ticks_remaining
+$07  slide_target_l
+$08  slide_target_r
+$09  slide_step_l_signed
+$0A  slide_step_r_signed
+$0B  current_vol_l[0]
+$0C  current_vol_l[1]
+$0D  current_vol_r[0]
+$0E  current_vol_r[1]
+```
+
+M2 supports one active VOL_SLIDE at a time. The bytecode compiler errors if a generated sequence overlaps slides; the driver does not attempt graceful handling of overlap.
+
+**Tick semantics (matches §14.3 WAIT counting):** if `wait_counter > 0`, decrement, advance any active slide, return. Otherwise read commands until WAIT sets `wait_counter`, END is reached, or the per-tick DSP write budget would be exceeded.
+
+**Status-flags reservation (M2):** the M2 driver introduces four new status bits — `voice1_active`, `timing_overrun`, `bytecode_error`, `write_budget_exceeded` — bringing the M1 byte close to its limit. Two surface-area extensions are reserved at M2.0; M2.5 (the multi-voice driver implementation pass) picks one and locks it:
+
+1. **Sibling status byte** — store an extended status byte at zero-page `$0F` (`status_flags_ext`) and surface it on host port `$F6`, replacing the M1 `driver_version` byte. Host treats the high bit of `driver_out_2` (`$F6`) as a "wide status" indicator.
+2. **`driver_version` bump** — set `driver_out_2 = $02` and reinterpret the existing `driver_out_3` status byte under v2 semantics, freeing legacy bits for new meanings.
+
+Either path keeps the v1 ready signature (`$A5 $5A`) on `driver_out_0..1`. M2.5 documents the chosen path here and updates the host parser.
+
 ---
 
 ## 21. Milestones
@@ -1229,8 +1605,9 @@ M0 is complete when the raw BRR decoder is byte-exact on fixtures, asar produces
 - `m1-acceptance` runs the M1 chain (doctor → validate-project for A and optional B → compile-spc → verify-spc-audible → compile-sfc → verify-sfc-structure → verify-sfc-modules-audible → manifest) and emits an `M1Manifest` carrying `M1BundleSummary` with the same `bundle.status` semantics as M0 (`ok` / `degraded` / `error`).
   - Required steps: `doctor` (asar must resolve), `validate_a`, `compile_spc`, `audible_spc`, `compile_sfc`, `structure_sfc`, `audible_sfc`. Optional: `validate_b` (skipped when no project B given — does not downgrade).
   - Doctor mapping: asar missing → step Error; oracle missing → step Warnings (audible steps then Skip); Mesen2 missing → step Ok (informational only).
-  - Audible verification thresholds frozen at M1.7: `min_max_abs = 1000`, `min_rms = 200`. Regressions become CI failures from M2 onward (parallel to the M0.6 → M1 calibration freeze).
+  - Audible verification thresholds frozen at M1.7: `min_max_abs = 1000`, `min_rms = 200`. These are non-silence gates, not quality gates. Regressions become CI failures from M2 onward. M2 adds per-channel checks, source-step observability, and combined-energy consistency (Appendix A.7 / §21 M2); the M1 thresholds remain in force as a floor.
   - Cross-reference invariants enforced by `verify_m1_bundle` (`m1-status` re-runs them against the on-disk bundle to catch post-generation drift): `compile_spc.spc_file_sha256 == audible_spc.spc_sha256`, `compile_sfc.module_a_in_file_sha256 == structure_sfc.module_a.in_file_sha256`, `compile_sfc.sfc_path` matches `structure_sfc.sfc_path` (filename-equivalent), and all reports share the same `schema_version`.
+  - **`verify-sfc-modules-audible` scope clarification.** This step is a module-content oracle check: it parses each embedded `module.bin`, reconstructs the 64 KB ARAM, wraps the result as an M1 SPC, and renders it through the snes_spc oracle. It does NOT execute the 65816 loader, the IPL upload handshake, or the `RESET_TO_IPL` flow. Loader execution remains a human/Mesen2 audition gate until automated emulator execution is available.
 - `.spc` and `.sfc` exports use the same canonical `aram_image` and the same driver entrypoint (`$0200`). Allocated regions — driver code, source directory, BRR sample pool, driver constants, and the optional zero-filled echo buffer — must match bit-for-bit between the two artifacts. Free / unallocated regions are not parity-significant in `.sfc`: `$00F0..$00FF` and `$0100..$01FF` are runtime territory, and free ARAM is not semantically part of the module.
 
 ### M1.5 — Pattern sequencer harness
@@ -1241,11 +1618,48 @@ M0 is complete when the raw BRR decoder is byte-exact on fixtures, asar produces
 
 **Acceptance:** multi-note pattern compiles to deterministic bytecode; voice overflow → hard error; pattern exports as `.spc` and previews correctly.
 
-### M2 — Driver capability system
+### M2 — Driver capability system + multi-voice atom playback
 
-**Deliverables:** granular feature flags; profile presets; dependency resolver; capability manifest; UI show/hide; assembler cache.
+**Deliverables:** granular feature flags; profile presets; dependency resolver; capability manifest; UI show/hide; assembler cache; project schema v2 with synth atoms / atom sequences / multi-track playback (§16.9, §16.10); `multi_voice_atom` driver profile (§20.2); sequence bytecode v2 (§14.3); voice setup table region (§15.7); `m2-acceptance` bundle command.
 
-**Acceptance:** vibrato toggle pulls/removes correct handler code and UI; sample edits do not rebuild driver; paired-crossfade enable does rebuild driver.
+**Acceptance.** Capability gating exercises:
+
+- Vibrato toggle pulls/removes correct handler code and UI.
+- Sample edits do not rebuild driver; paired-crossfade enable does rebuild driver.
+- Capability-manifest enforcement at every compile-spc / compile-sfc / pack / validate entry point: missing capability → hard error naming the feature.
+
+`m2-acceptance` runs the full M2 chain and produces four oracle renders (per Appendix A.7 / consultant-locked thresholds):
+
+```
+A. sample_only.spc                — voice 1 muted
+B. atom_only.spc                  — voice 0 muted
+C. combined.spc                   — both voices active
+D. combined.sfc                   — same project, .sfc path
+```
+
+The M2 fixture pans hard: voice 0 (sample) full left, voice 1 (atom) full right. The renders feed the following per-channel thresholds:
+
+```
+sample_only:  left.max_abs  >= 1000,  left.rms  >= 200,  right.rms <=  50
+atom_only:    right.max_abs >= 1000,  right.rms >= 200,  left.rms  <=  50
+combined:     left.max_abs  >= 1000,  left.rms  >= 200,
+              right.max_abs >= 1000,  right.rms >= 200,
+              combined.left.rms  within ±10% of sample_only.left.rms,
+              combined.right.rms within ±10% of atom_only.right.rms
+```
+
+The M1 thresholds (`min_max_abs = 1000`, `min_rms = 200`) remain as the floor — the M2 per-channel checks are stricter, never looser.
+
+**Source-step observability.** The M2 fixture sets atom A = 128-sample sine, atom B = 64-sample sine at the same pitch register. After the source-step lowering pattern (§14.3) lands the bytecode for the swap, the right-channel PCM is windowed (ticks 40..100 after each KON) and compared:
+
+```
+zero_crossing_rate(post_window) >= 1.5 * zero_crossing_rate(pre_window)
+normalized_correlation(pre_window, post_window) <= 0.95
+```
+
+The zero-crossing-rate ratio is the primary gate; the correlation check is informational and may be dropped from the bundle if its implementation cost outweighs the signal it provides.
+
+**Process boundary.** Loader execution remains a human/Mesen2 audition gate; the M2 oracle renders verify module-content audio, not 65816 loader behaviour (consistent with §21 M1 sfc verification scope).
 
 ### M3 — Static synth atom mode (Level 1)
 
