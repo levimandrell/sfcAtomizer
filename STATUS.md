@@ -2,12 +2,13 @@
 
 ## Current milestone
 
-**M0 complete; M1 contracts frozen.** All M1 technical contracts
-are now spec-locked (SPEC §16 v1 schema, §16.7 pitch + MIDI, §17.2
-audition, §19.2 loader protocol, §19.4 `module.bin` format, §20.1
-driver command protocol, §21 M1 acceptance with bundle.status
-semantics). Rust skeleton modules mirror the contracts shape-by-
-shape; M1.1 fills in `ProjectV1::validate` and the app shell.
+**M1 in progress — data model + minimal app shell complete.**
+`ProjectV1::validate` covers all 25 SPEC §16.6 rules; the project
+file v1 round-trips byte-stably through `load_from_path` /
+`save_to_path`; a read-only `sfcwc-app` GUI viewer renders the
+Sample Pool with validation overlays; the CLI gains
+`new-project` / `validate-project`. Next: M1.2 — WAV/AIFF/BRR
+import.
 
 **M0 artifacts are producer-side only.** M1 owns the first audible
 driver. The NOP+BRA M0 smoke driver (`core/fixtures/asm/m0_smoke.asm`)
@@ -15,6 +16,50 @@ is intentionally non-functional and will be replaced wholesale at
 M1.5 — do not reuse it as a base for M1.5 driver work.
 
 ## Last pass
+
+**Pass M1.1 — Project v1 + Sample Pool data model + minimal app shell.**
+
+- Phase A: `ProjectV1::validate` body lands. 25-rule SPEC §16.6
+  coverage; multi-error collection (no bail-on-first); errors
+  carry JSON-pointer paths. `ValidationError` redesigned from a
+  flat enum to `{path, kind: ValidationErrorKind}`. Echo rules
+  delegate to `core::echo_validation`. Convention: `name` allows
+  spaces and non-ASCII; `id` is `^[a-z0-9_]+$`.
+- Phase B: Project I/O. `load_from_path` / `save_to_path` /
+  `load_and_validate` / `migrate_from_value` / `new_template`.
+  `ProjectIoError` covers NotFound / Io / Parse / MalformedValue /
+  UnsupportedSchemaVersion / Validation. Stable byte-for-byte
+  round-trip verified by test (struct field declaration order
+  preserved through serde).
+- Phase C: New `core::report::ValidationReport` JSON envelope
+  (status: ok | invalid | io_error; flat `{path, message}`
+  errors). New `sfcwc new-project` and `sfcwc validate-project`
+  CLI subcommands. Exit 0 / 2 / 1 for ok / invalid / io_error
+  respectively. Project file extension chosen: `.sfcproj.json`
+  (JSON-honest, project-prefixed).
+- Phase D: New `sfcwc-app` GUI binary at `app/src/app_main.rs`.
+  ~560 lines eframe/egui. Read-only viewer: File menu, Sample Pool
+  list, sample/project detail panel, status bar with
+  validation rollup, "Show errors" modal. Empty-pool placeholder
+  ("No samples imported yet. (Import lands at M1.2.)"). Hand-
+  rolled text-input modal stands in for native file pickers
+  pending an authorized picker dep.
+- Phase E: 50 new unit tests in `core::project` (every rule
+  positive + negative; round-trip byte-stability; migration v1
+  vs unsupported; new_template field parity). 5 new CLI
+  integration tests. 183 tests total across the workspace.
+- Phase F: SPEC §16.4 documents the `id` regex `^[a-z0-9_]+$`,
+  the `name` UTF-8 + control-char + path-separator rules, and
+  the strict `sha256` shape. SPEC §16.6 replaced with the 25
+  rules grouped thematically (Root / project / driver /
+  master_echo / sample_pool / Envelope / m1). LICENSING.md
+  gains §4 covering eframe/egui (MIT-or-Apache, no obligations)
+  and symphonia (MPL-2.0 file-scope copyleft, used unmodified).
+
+`cargo check`, `cargo fmt --check`, `cargo clippy --all-targets
+-- -D warnings`, `cargo test` all clean.
+
+## Previous passes
 
 **Pass M1.0 — M1 contracts + cleanup.**
 
@@ -470,6 +515,49 @@ test` all green.
   bytes alongside max_abs/rms; the bundle pulls it from one place
   rather than parsing the wrapper's report.
 
+### M1 implementation decisions (M1.1)
+
+- **GUI binary `sfcwc-app` separate from CLI `sfcwc`** (M1.1):
+  one workspace, two `[[bin]]` targets in `app/Cargo.toml`. CI/
+  scripted workflows depend on `sfcwc` only and don't pay the
+  eframe build cost; interactive use takes `sfcwc-app`.
+- **Project file extension `.sfcproj.json`** (M1.1): JSON-honest
+  filename plus a `.sfcproj` prefix that flags the file as
+  project-shaped. Matches the brief's recommendation.
+- **`load_from_path` does not auto-validate** (M1.1): the
+  `(load, validate)` two-step lets the GUI render an invalid
+  project alongside its errors instead of refusing to load it.
+  CLI's `validate-project` and `load_and_validate()` chain the
+  two for the happy path.
+- **`ValidationError` shape: `{path, kind}`** (M1.1):
+  JSON-pointer paths (`/sample_pool/0/loop/end_sample`) so the
+  GUI can highlight the offending field. M1.0's flat enum
+  replaced.
+- **Validation collects every failed rule** (M1.1): no
+  bail-on-first. The UI surfaces all problems at once so the
+  user fixes everything in one editing pass.
+- **Name vs id conventions** (M1.1, locked in SPEC §16.4):
+  `name` allows spaces and non-ASCII letters but rejects
+  control characters and path separators (`/`, `\`, `:`); `id`
+  is `^[a-z0-9_]+$`. Justified in the spec's `id`/`name`
+  paragraphs.
+- **`ValidationReport` JSON shape** (M1.1, locked in
+  `core::report`): `{ schema_version, report_type:
+  "validation", project_path, status: ok|invalid|io_error,
+  errors: [{path, message}] }`. `errors[]` is a flat
+  `{path, message}` shape so JSON consumers don't need to know
+  the typed `ValidationErrorKind` enum.
+- **symphonia landed at M1.1, not M1.2** (M1.1): brief allowed
+  either; landing it now means M1.2 wires only the WAV/AIFF
+  probe modules without touching workspace deps. Currently
+  declared in `core/Cargo.toml` but unused; the
+  `unused_crate_dependencies` lint is allow-by-default so this
+  is harmless.
+- **Native file pickers deferred** (M1.1): no authorized
+  file-picker crate (`rfd` etc.) in the M1.1 dep set, so File →
+  Open / Save As / New use a hand-rolled single-line text-input
+  modal. M1.2+ revisit with PM authorization.
+
 ### M1 contract decisions (M1.0)
 
 These are the M1 contract surfaces frozen at M1.0. Implementation
@@ -548,7 +636,8 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M1.1 — Project v1 + Sample Pool data model + minimal app shell.**
-PM to brief. Fills in `ProjectV1::validate`, adds the project
-loader / saver, and stands up the M1 app shell skeleton against
-the contracts frozen here at M1.0.
+**M1.2 — WAV/AIFF/BRR import.** PM to brief. Wires the symphonia
+crate (declared at M1.1, unused) for WAV/AIFF probing, plus a
+direct BRR import path that consumes the §16.4 sample format. Adds
+the import UI to `sfcwc-app` (replacing M1.1's read-only-viewer
+mode) and a CLI `import` command.
