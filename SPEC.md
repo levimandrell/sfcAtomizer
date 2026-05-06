@@ -767,8 +767,10 @@ Later optimization candidates (not in scope now): shared kernel + optional handl
 - Oracle bridge can render a fixed fixture corpus through snes_spc and produce a calibration report.
 - The first calibration report records provisional tolerances for S-DSP voice render and full-module render. Provisional tolerances are not yet quality gates.
 - M1 freezes the first accepted tolerance table; regressions against it become CI failures from M1 onward.
+- `sfcwc m0-acceptance` runs the full chain (doctor → decode-fixtures → assemble-smoke → export-spc-smoke → aram map → calibrate-oracle → manifest) and emits a `BundleSummary` whose `status` is `ok` when every required step succeeded and the optional calibration step also succeeded; `degraded` when any required step warned or the calibration step is skipped/error/warnings; `error` when any required step is skipped or errored. Required steps: doctor, decode_fixtures, assemble, spc_export, aram_map. Optional: calibration. `bundle.status == "error"` means M0 acceptance has failed and the bundle is not shippable.
+- `sfcwc m0-status` re-runs the integrity check on an existing bundle without regenerating it, reporting per-step status, key cross-reference SHAs, and any drift findings. Exits 0 on `ok`/`degraded` + clean integrity, 1 on `error` or any integrity failure. Used in CI and by reviewers.
 
-M0 is complete when the raw BRR decoder is byte-exact on fixtures, asar produces a Mesen2-loadable `.spc`, the ARAM packer rejects overlap, and the calibration harness produces a structured report — even if the report's tolerance numbers are provisional. WLA-DX, embedded snes_spc preview, and final S-DSP render equivalence are out of scope until later milestones.
+M0 is complete when the raw BRR decoder is byte-exact on fixtures, asar produces a Mesen2-loadable `.spc`, the ARAM packer rejects overlap, the calibration harness produces a structured report (provisional tolerances allowed), and `sfcwc m0-acceptance` writes a manifest whose `bundle.status` is `ok` or `degraded` in a development environment with the wrapper built. WLA-DX, embedded snes_spc preview, and final S-DSP render equivalence are out of scope until later milestones.
 
 ### M1 — Sample mode
 
