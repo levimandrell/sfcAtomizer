@@ -2,13 +2,11 @@
 
 ## Current milestone
 
-**M1 in progress — data model + minimal app shell complete.**
-`ProjectV1::validate` covers all 25 SPEC §16.6 rules; the project
-file v1 round-trips byte-stably through `load_from_path` /
-`save_to_path`; a read-only `sfcwc-app` GUI viewer renders the
-Sample Pool with validation overlays; the CLI gains
-`new-project` / `validate-project`. Next: M1.2 — WAV/AIFF/BRR
-import.
+**M1 in progress — import wired.** `sfcwc import` and the GUI
+File → Import Audio menu both run probe → SHA → copy → validate →
+save end-to-end against synthesized WAV / AIFF / AIFC / BRR
+fixtures. The freshly-imported project validates per SPEC §16.6.
+Next: M1.3 — loop selection + BRR encoder + audition WAV.
 
 **M0 artifacts are producer-side only.** M1 owns the first audible
 driver. The NOP+BRA M0 smoke driver (`core/fixtures/asm/m0_smoke.asm`)
@@ -16,6 +14,50 @@ is intentionally non-functional and will be replaced wholesale at
 M1.5 — do not reuse it as a base for M1.5 driver work.
 
 ## Last pass
+
+**Pass M1.2 — WAV/AIFF/BRR import.**
+
+- Phase A: New `core::audio` module with hand-rolled probes for
+  WAV (RIFF/WAVE chunk walk), AIFF / AIFC (IFF FORM chunk walk
+  with NONE/sowt compression validation), and BRR (file-size /
+  9 = block count). 80-bit IEEE 754 extended-precision sample-
+  rate decoder cross-pinned against four pre-computed byte
+  tables (8000 / 22050 / 32000 / 44100 Hz). `sha256_of_file`
+  streams 64 KiB chunks.
+- Phase B: New `core::import` module wires the full pipeline:
+  load → probe → SHA → copy (with same-SHA dedup + collision
+  suffix) → derive id/name → default `SampleSlot` (root MIDI
+  60, loop off, GainRaw 127, vol 1.0, pan 0.0, echo off) →
+  append → seed `m1.active_sample_id` on first import →
+  validate → save. Path-traversal guard refuses targets that
+  resolve outside `<project_dir>/audio/`.
+- Phase C: New `sfcwc import` CLI subcommand. Exit codes 0 / 1
+  / 2 / 3 for ok / IO-or-project-error / audio-format-rejected
+  / resulting-project-invalid (defensive).
+- Phase D: New File → Import Audio… menu item in `sfcwc-app`.
+  Opens `rfd::FileDialog` with the wav/aif/aiff/aifc/brr
+  extension filter, reloads the project on success, surfaces
+  errors via the existing status bar.
+- Phase E: 12 audio probe tests (all 9 brief cases plus extras
+  for AIFC NONE/sowt and the SHA-256 streaming vector), 9
+  import pipeline tests (happy path, dedup-by-SHA, collision
+  suffix, --no-copy relative path, BRR sample-rate override,
+  messy-filename id derivation, fallback id, missing-file,
+  unsupported-extension), 3 CLI integration tests (exit 0 / 1
+  / 2). Synth helpers in `core/tests/common/mod.rs`; no
+  binary fixtures committed. 6 unit tests on the id-derivation
+  logic.
+- Phase F: LICENSING.md §4.2 documents `rfd` (dual MIT-OR-Apache,
+  no obligations).
+
+215 tests across the workspace — 157 core unit + 12 audio probe
+integration + 10 BRR fixture integration + 9 import pipeline
+integration + 27 app CLI integration. `cargo check`, `cargo fmt
+--check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test` all green. `rfd` compiled clean on Windows with the
+brief's feature set; no fallback to text-input modals required.
+
+## Previous passes
 
 **Pass M1.1 — Project v1 + Sample Pool data model + minimal app shell.**
 
@@ -515,6 +557,68 @@ test` all green.
   bytes alongside max_abs/rms; the bundle pulls it from one place
   rather than parsing the wrapper's report.
 
+### M1 import decisions (M1.2)
+
+- **Copy-into-project default ON** (M1.2): `sfcwc import` and
+  the GUI both default `copy_into_project = true`. CLI exposes
+  `--no-copy` for the opt-out. Rationale: a project is a
+  self-contained source-of-truth; relying on external paths is
+  fragile across machines.
+- **SHA-match dedup on re-import** (M1.2): if `<project_dir>/
+  audio/<filename>` already exists with the same SHA-256 as the
+  freshly-computed source, the existing file is reused — no `_2`
+  copy. Different SHA with the same filename suffixes `_2`, `_3`,
+  … on the file. Either way, the new sample slot gets a unique
+  `id` (also suffixed on collision).
+- **Path-traversal guard** (M1.2): the canonicalized `<project_dir>/
+  audio/` target must start with the canonicalized project
+  directory; anything else (symlink-out, absolute-path injection)
+  refuses with `ImportError::PathTraversal`. Honest about Windows
+  UNC paths: canonicalize handles `\\?\` prefixes uniformly on
+  both sides of the comparison.
+- **Default `SampleSlot` fields** (M1.2): root MIDI 60 (C4),
+  loop disabled with `start_sample` / `end_sample` / `snap` all
+  `None`, `playback.envelope = GainRaw { gain_byte: 127 }`,
+  volume 1.0, pan 0.0, echo off. ADSR is reserved for M1.3+ once
+  loop selection lands; M1.2 deliberately keeps the envelope the
+  raw-byte form to avoid premature commitment.
+- **First-sample auto-binds `m1.active_sample_id`** (M1.2): if
+  the pool was empty before the import, the new sample's id is
+  written into `m1.active_sample_id` so the project validates
+  immediately. Subsequent imports leave `active_sample_id`
+  alone.
+- **`id` derivation rule** (M1.2): filename stem → ASCII
+  lowercase → any non-`[a-z0-9]` codepoint folds to `_` (runs of
+  separators collapse) → leading/trailing `_` trimmed →
+  truncate to 64 chars → fall back to `sample_<N>` if empty →
+  uniquify with `_2`, `_3`, … on collision. Matches the SPEC
+  §16.4 `^[a-z0-9_]+$` constraint.
+- **WAV bit-depth: 8 / 16 / 24 int only** (M1.2): float WAV
+  (`WAVE_FORMAT_IEEE_FLOAT = 0x0003`) and 32-bit int rejected.
+  WAVE_FORMAT_EXTENSIBLE follows the SubFormat GUID's leading
+  two bytes back to a legacy tag.
+- **AIFF compression: NONE and sowt only** (M1.2): plain AIFF
+  (no compression field) accepted as uncompressed BE PCM.
+  AIFC accepted only when the 4-byte compression code is
+  `NONE` or `sowt`. ima4, ulaw, MAC3/MAC6, etc. rejected.
+- **BRR file-size invariant** (M1.2): file size must be a
+  positive multiple of 9 bytes. `sample_rate_hz` defaults to
+  32000 Hz (the canonical S-DSP rate); CLI exposes
+  `--brr-sample-rate <Hz>` and `ImportOptions::brr_sample_rate_hz`
+  to override.
+- **No binary audio fixtures committed** (M1.2): every test
+  synthesizes its WAV/AIFF/AIFC/BRR fixture in a `tempfile::
+  TempDir` at runtime via `core/tests/common/mod.rs`. The
+  AIFF synth uses the four pre-computed 80-bit IEEE 754
+  extended-precision byte tables for the rates the tests
+  exercise; runtime extended-80 encoding is deferred to M1.3+
+  if a future test needs it.
+- **`rfd` authorized** (M1.2): native file dialogs across
+  Windows/macOS/Linux with `xdg-portal + tokio` features; the
+  M1.1 hand-rolled text-input modals stay in place for File →
+  Open / Save As / New (those still need addressing) but
+  Import goes straight to the native picker.
+
 ### M1 implementation decisions (M1.1)
 
 - **GUI binary `sfcwc-app` separate from CLI `sfcwc`** (M1.1):
@@ -636,8 +740,9 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M1.2 — WAV/AIFF/BRR import.** PM to brief. Wires the symphonia
-crate (declared at M1.1, unused) for WAV/AIFF probing, plus a
-direct BRR import path that consumes the §16.4 sample format. Adds
-the import UI to `sfcwc-app` (replacing M1.1's read-only-viewer
-mode) and a CLI `import` command.
+**M1.3 — Loop selection + BRR encoder + audition WAV.** PM to
+brief. Adds the BRR encoder (the M0.2 decoder's other half), the
+loop-candidate finder + UI controls in `sfcwc-app`, and the
+audition path from SPEC §17.2 (decoded-BRR PCM16 mono WAV at
+`build/m1/previews/<sample_id>_decoded_brr.wav`). Symphonia
+finally gets used for actual PCM extraction.
