@@ -1296,6 +1296,145 @@ fn preview_brr_writes_wav_and_report() {
 }
 
 // =============================================================================
+// M2.0 — source SHA enforcement (--refresh-source-hash)
+// =============================================================================
+
+#[test]
+fn cli_compile_spc_with_intact_source_succeeds() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "intact");
+    let out = Command::new(bin())
+        .args(["compile-spc", "--project"])
+        .arg(&proj)
+        .args(["--out-spc"])
+        .arg(dir.path().join("a.spc"))
+        .args(["--out-image"])
+        .arg(dir.path().join("a.bin"))
+        .args(["--out-map"])
+        .arg(dir.path().join("a.map.json"))
+        .args(["--out-report"])
+        .arg(dir.path().join("a.compile.json"))
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn cli_compile_spc_with_drifted_source_errors() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "drift");
+    // Mutate the imported audio so its SHA differs from the
+    // recorded one. Append a single zero byte (stays a valid WAV
+    // at the file system level).
+    let audio = dir.path().join("audio").join("drift.wav");
+    let mut bytes = std::fs::read(&audio).expect("read audio");
+    // Modify a sample byte well into the data section (offset 60 is
+    // safely past the WAV header).
+    if bytes.len() > 60 {
+        bytes[60] ^= 0xFF;
+    }
+    std::fs::write(&audio, &bytes).unwrap();
+
+    let out = Command::new(bin())
+        .args(["compile-spc", "--project"])
+        .arg(&proj)
+        .args(["--out-spc"])
+        .arg(dir.path().join("a.spc"))
+        .args(["--out-image"])
+        .arg(dir.path().join("a.bin"))
+        .args(["--out-map"])
+        .arg(dir.path().join("a.map.json"))
+        .args(["--out-report"])
+        .arg(dir.path().join("a.compile.json"))
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(out.status.code(), Some(2), "expected exit 2 on SHA drift");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("source SHA-256 mismatch"),
+        "expected explicit SHA mismatch message; got: {stderr}"
+    );
+}
+
+#[test]
+fn cli_compile_spc_with_refresh_source_hash_succeeds() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "refresh");
+    // Mutate the audio (same as the drift test).
+    let audio = dir.path().join("audio").join("refresh.wav");
+    let mut bytes = std::fs::read(&audio).expect("read audio");
+    bytes[60] ^= 0xFF;
+    std::fs::write(&audio, &bytes).unwrap();
+
+    let out = Command::new(bin())
+        .args(["compile-spc", "--project"])
+        .arg(&proj)
+        .args(["--out-spc"])
+        .arg(dir.path().join("a.spc"))
+        .args(["--out-image"])
+        .arg(dir.path().join("a.bin"))
+        .args(["--out-map"])
+        .arg(dir.path().join("a.map.json"))
+        .args(["--out-report"])
+        .arg(dir.path().join("a.compile.json"))
+        .args(["--refresh-source-hash"])
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "expected exit 0 with --refresh-source-hash; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("refresh-source-hash:"),
+        "expected refresh-source-hash log line; got: {stderr}"
+    );
+
+    // Project should now have the new SHA persisted; running again
+    // without the flag should succeed.
+    let out2 = Command::new(bin())
+        .args(["compile-spc", "--project"])
+        .arg(&proj)
+        .args(["--out-spc"])
+        .arg(dir.path().join("a2.spc"))
+        .args(["--out-image"])
+        .arg(dir.path().join("a2.bin"))
+        .args(["--out-map"])
+        .arg(dir.path().join("a2.map.json"))
+        .args(["--out-report"])
+        .arg(dir.path().join("a2.compile.json"))
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out2.status.code(),
+        Some(0),
+        "second run without --refresh should succeed once project SHA is updated"
+    );
+}
+
+// =============================================================================
 // M1.7 — m1-acceptance / m1-status
 // =============================================================================
 
