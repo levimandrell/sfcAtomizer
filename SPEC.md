@@ -1226,7 +1226,11 @@ M0 is complete when the raw BRR decoder is byte-exact on fixtures, asar produces
 - Compiler refuses ARAM overflow.
 - Project file v1 round-trips: serialize → deserialize → re-serialize is byte-identical for the same compiler/encoder/assembler versions.
 - Internal Rust BRR preview and snes_spc oracle preview agree within frozen tolerances (§10.1, §18, §21 — tolerances frozen at M1).
-- `m1-acceptance` runs the M1 chain (project load → BRR encode → driver assemble → SPC export → SFC export → oracle calibration → manifest) and emits a `BundleSummary`-shaped manifest with the same `bundle.status` semantics as M0 (`ok` / `degraded` / `error` per the locked aggregation rules in §21 M0).
+- `m1-acceptance` runs the M1 chain (doctor → validate-project for A and optional B → compile-spc → verify-spc-audible → compile-sfc → verify-sfc-structure → verify-sfc-modules-audible → manifest) and emits an `M1Manifest` carrying `M1BundleSummary` with the same `bundle.status` semantics as M0 (`ok` / `degraded` / `error`).
+  - Required steps: `doctor` (asar must resolve), `validate_a`, `compile_spc`, `audible_spc`, `compile_sfc`, `structure_sfc`, `audible_sfc`. Optional: `validate_b` (skipped when no project B given — does not downgrade).
+  - Doctor mapping: asar missing → step Error; oracle missing → step Warnings (audible steps then Skip); Mesen2 missing → step Ok (informational only).
+  - Audible verification thresholds frozen at M1.7: `min_max_abs = 1000`, `min_rms = 200`. Regressions become CI failures from M2 onward (parallel to the M0.6 → M1 calibration freeze).
+  - Cross-reference invariants enforced by `verify_m1_bundle` (`m1-status` re-runs them against the on-disk bundle to catch post-generation drift): `compile_spc.spc_file_sha256 == audible_spc.spc_sha256`, `compile_sfc.module_a_in_file_sha256 == structure_sfc.module_a.in_file_sha256`, `compile_sfc.sfc_path` matches `structure_sfc.sfc_path` (filename-equivalent), and all reports share the same `schema_version`.
 - `.spc` and `.sfc` exports use the same canonical `aram_image` and the same driver entrypoint (`$0200`). Allocated regions — driver code, source directory, BRR sample pool, driver constants, and the optional zero-filled echo buffer — must match bit-for-bit between the two artifacts. Free / unallocated regions are not parity-significant in `.sfc`: `$00F0..$00FF` and `$0100..$01FF` are runtime territory, and free ARAM is not semantically part of the module.
 
 ### M1.5 — Pattern sequencer harness
@@ -1299,7 +1303,7 @@ M0 is complete when the raw BRR decoder is byte-exact on fixtures, asar produces
 
 These are empirical and resolved through use, not design:
 
-1. Final atom quality thresholds — to be tuned via the calibration harness through listening tests. Raw BRR decode is bit-identical at M0 (no tolerance); voice-render and full-module-render tolerances are provisional at M0 and frozen at M1 (§21).
+1. Final atom quality thresholds — to be tuned via the calibration harness through listening tests (M3+). Raw BRR decode is bit-identical at M0 (no tolerance); the audible-render thresholds for the M1 voice / module path are **frozen at M1.7**: `min_max_abs = 1000`, `min_rms = 200`. Atom-quality (post-decode) thresholds remain open and will be set when the M3 atom encoder lands.
 2. ~~Whether to embed snes_spc directly for live preview or keep it as a validation-only oracle.~~ **Resolved at M0.5/M0.6**: the host never links snes_spc; it is invoked across a process boundary (`LICENSING.md` §3, SPEC §17.1). Live preview at M3+ uses the internal Rust BRR decoder; the oracle remains the calibration second-source.
 3. Practical wavetable frame caps — the 32 / 64 / 96 / 128 numbers are provisional; empirical testing may move them.
 4. Whether a later version adds a free pre-emphasis EQ editor.
