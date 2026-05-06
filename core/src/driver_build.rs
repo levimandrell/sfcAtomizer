@@ -96,6 +96,15 @@ pub enum DriverBuildError {
     OverBudget(u32, u32),
     #[error("driver_end sentinel {0:02X?} not found in assembled image")]
     SentinelMissing([u8; 4]),
+    /// M2.0 (consultant #7): the sentinel pattern occurs inside the
+    /// driver code itself, before the canonical `driver_end:` marker.
+    /// Future M2 drivers are larger and increasingly likely to
+    /// produce a collision by chance; resolve by adjusting the
+    /// affected instruction sequence or rotating the sentinel in
+    /// `core::driver_build::DRIVER_END_SENTINEL` and the driver
+    /// `.asm`.
+    #[error("driver sentinel collision: pattern {0:02X?} occurs at offset {1} within driver code")]
+    SentinelCollision([u8; 4], usize),
     #[error("asar: {0}")]
     Assemble(#[from] AssembleError),
     #[error("io error at {path}: {source}")]
@@ -168,6 +177,24 @@ pub fn build(input: DriverBuildInput<'_>) -> Result<DriverBuildOutput, DriverBui
             driver_code.len() as u32,
             DRIVER_CODE_BUDGET_M1,
         ));
+    }
+    // M2.0 (consultant #7): if the driver code accidentally
+    // contains the sentinel pattern, the slicer above stops at the
+    // first occurrence and silently truncates the real driver.
+    // Detect this by scanning the image past what we treated as
+    // `driver_end` — asar zero-fills the rest of the 64 KB image,
+    // so any nonzero byte after the chosen sentinel + its 4 bytes
+    // means the actual driver continues. As M2 drivers grow the
+    // accidental-match probability goes up; this is the canary.
+    let after_sentinel = sentinel_offset + DRIVER_END_SENTINEL.len();
+    let scan_end = 0xFFC0; // skip IPL ROM shadow region
+    for (i, &b) in image[after_sentinel..scan_end].iter().enumerate() {
+        if b != 0 {
+            return Err(DriverBuildError::SentinelCollision(
+                DRIVER_END_SENTINEL,
+                after_sentinel + i,
+            ));
+        }
     }
 
     let driver_code_sha256 = sha256_hex(&driver_code);

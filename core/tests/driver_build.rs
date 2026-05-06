@@ -224,3 +224,91 @@ fn workspace_asm_path_exists() {
     let p: PathBuf = workspace_driver_asm_path();
     assert!(p.is_file(), "missing driver asm at {p:?}");
 }
+
+/// M2.0 (consultant #1) regression: the M1 driver must seed
+/// dp_last_token from `$F4` BEFORE writing the ready signature, so
+/// the IPL exec-residual byte isn't mistaken for a fresh command.
+/// Asar emits the dp form `mov a, $f4` (E4 F4) followed by
+/// `mov $00, a` (C4 00); we look for that 4-byte sequence in the
+/// driver bytes and assert it lands before the ready-signature
+/// writes.
+#[test]
+fn driver_seeds_dp_last_token_from_f4_before_ready_signature() {
+    if skip_if_no_asar() {
+        return;
+    }
+    let project = minimal_project();
+    let map = map_for(0x1200);
+    let dir = TempDir::new().unwrap();
+    let out = build(DriverBuildInput {
+        project: &project,
+        map_report: &map,
+        source_override: None,
+        working_dir: dir.path().to_path_buf(),
+    })
+    .expect("build ok");
+
+    // Expected encoded sequence: E4 F4 C4 00 (mov a,$f4 ; mov $00, a).
+    let bootstrap_seq: &[u8] = &[0xE4, 0xF4, 0xC4, 0x00];
+    let bootstrap_pos = out
+        .driver_code
+        .windows(bootstrap_seq.len())
+        .position(|w| w == bootstrap_seq)
+        .expect("bootstrap sequence E4 F4 C4 00 missing from driver");
+
+    // Ready signature begins with `mov $f4, #$a5` (8F A5 F4) — the
+    // first DP-store of the literal $A5 to driver_out_0. Confirm
+    // the bootstrap occurs before the ready signature.
+    let ready_seq: &[u8] = &[0x8F, 0xA5, 0xF4];
+    let ready_pos = out
+        .driver_code
+        .windows(ready_seq.len())
+        .position(|w| w == ready_seq)
+        .expect("ready signature 8F A5 F4 missing from driver");
+
+    assert!(
+        bootstrap_pos < ready_pos,
+        "bootstrap at {bootstrap_pos} must precede ready signature at {ready_pos}"
+    );
+}
+
+/// M2.0 (consultant #7) regression: an oversized injected sentinel
+/// inside the .asm body should trip `SentinelCollision`, not silent
+/// truncation. Constructs a synthetic .asm with the canonical
+/// sentinel pattern emitted before driver_end.
+#[test]
+fn driver_build_flags_sentinel_collision() {
+    if skip_if_no_asar() {
+        return;
+    }
+    // Inject the sentinel pattern into a near-empty driver source
+    // BEFORE the canonical driver_end marker. The build path should
+    // catch the collision rather than truncate at the inner
+    // sentinel and leave a tiny "driver".
+    let bad_src = "\
+incsrc \"m1_constants.inc\"
+lorom
+arch spc700
+org $008200
+base $0200
+driver_entry:
+    db $de, $ad, $be, $ef        ; intentional collision
+    nop
+driver_end:
+    db $de, $ad, $be, $ef        ; canonical sentinel
+";
+    let project = minimal_project();
+    let map = map_for(0x1200);
+    let dir = TempDir::new().unwrap();
+    let err = build(DriverBuildInput {
+        project: &project,
+        map_report: &map,
+        source_override: Some(bad_src),
+        working_dir: dir.path().to_path_buf(),
+    })
+    .unwrap_err();
+    assert!(
+        matches!(err, DriverBuildError::SentinelCollision(..)),
+        "expected SentinelCollision, got {err:?}"
+    );
+}
