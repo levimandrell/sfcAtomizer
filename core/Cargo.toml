@@ -11,6 +11,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
+# symphonia is wired here so M1.2 (audio import) doesn't have to
+# touch workspace deps. Not yet referenced from any module; the
+# unused_crate_dependencies lint is allow-by-default so this is
+# harmless at the lint level.
+symphonia = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
