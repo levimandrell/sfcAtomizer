@@ -1189,3 +1189,136 @@ fn import_unsupported_extension_exit_2() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+// =============================================================================
+// M1.3 — encode-brr / preview-brr / find-loop-candidates
+// =============================================================================
+
+fn write_pcm16_wav_with_samples(path: &Path, sample_rate: u32, channels: u16, samples: &[i16]) {
+    let bytes_per_sample = 2u32;
+    let block_align = u32::from(channels) * bytes_per_sample;
+    let byte_rate = sample_rate * block_align;
+    let data_size = (samples.len() as u32) * 2;
+    let fmt_size = 16u32;
+    let chunk_size = 4 + (8 + fmt_size) + (8 + data_size);
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&chunk_size.to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&fmt_size.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    buf.extend_from_slice(&channels.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&(block_align as u16).to_le_bytes());
+    buf.extend_from_slice(&16u16.to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_size.to_le_bytes());
+    for s in samples {
+        buf.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, buf).unwrap();
+}
+
+fn synth_sine_pcm(len: usize, period: f64, amp: f64) -> Vec<i16> {
+    (0..len)
+        .map(|i| {
+            let phase = (i as f64) * std::f64::consts::TAU / period;
+            (phase.sin() * amp).round() as i16
+        })
+        .collect()
+}
+
+#[test]
+fn encode_brr_writes_brr_and_report() {
+    let dir = TempDir::new().unwrap();
+    let wav = dir.path().join("sine.wav");
+    let brr = dir.path().join("sine.brr");
+    let report = dir.path().join("encode-report.json");
+    let pcm = synth_sine_pcm(256, 64.0, 8000.0);
+    write_pcm16_wav_with_samples(&wav, 32000, 1, &pcm);
+
+    let out = Command::new(bin())
+        .args(["encode-brr", "--audio"])
+        .arg(&wav)
+        .args(["--out-brr"])
+        .arg(&brr)
+        .args(["--out-report"])
+        .arg(&report)
+        .args(["--no-force-filter-0-first-block"])
+        .output()
+        .expect("run sfcwc");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brr_bytes = std::fs::read(&brr).unwrap();
+    assert_eq!(brr_bytes.len() % 9, 0);
+    assert_eq!(brr_bytes.len(), 256 / 16 * 9);
+    let v = read_json(&report);
+    assert_envelope(&v, "brr_encode");
+    assert_eq!(v["total_blocks"], 16);
+    assert_eq!(v["output_bytes"], 144);
+    let peak = v["overall_peak_error"].as_u64().unwrap();
+    assert!(peak < 256, "peak error {peak} >= 256");
+}
+
+#[test]
+fn preview_brr_writes_wav_and_report() {
+    let dir = TempDir::new().unwrap();
+    // Hand-roll a single all-zero BRR block — decodes to 16 zero
+    // samples, so the audition WAV PCM body is 32 zero bytes.
+    let brr = dir.path().join("z.brr");
+    std::fs::write(&brr, [0u8; 9]).unwrap();
+    let wav = dir.path().join("z.wav");
+    let report = dir.path().join("audition.json");
+
+    let out = Command::new(bin())
+        .args(["preview-brr", "--brr"])
+        .arg(&brr)
+        .args(["--out-wav"])
+        .arg(&wav)
+        .args(["--out-report"])
+        .arg(&report)
+        .output()
+        .expect("run sfcwc");
+    assert!(out.status.success(), "{:?}", out);
+    let wav_bytes = std::fs::read(&wav).unwrap();
+    assert_eq!(&wav_bytes[0..4], b"RIFF");
+    assert_eq!(wav_bytes.len(), 44 + 32);
+    let v = read_json(&report);
+    assert_envelope(&v, "audition");
+    assert_eq!(v["blocks_decoded"], 1);
+    assert_eq!(v["samples_written"], 16);
+    assert_eq!(v["sample_rate_hz"], 32000);
+}
+
+#[test]
+fn find_loop_candidates_writes_report() {
+    let dir = TempDir::new().unwrap();
+    let wav = dir.path().join("sine.wav");
+    let report = dir.path().join("loops.json");
+    let pcm = synth_sine_pcm(2048, 64.0, 8000.0);
+    write_pcm16_wav_with_samples(&wav, 32000, 1, &pcm);
+
+    let out = Command::new(bin())
+        .args(["find-loop-candidates", "--audio"])
+        .arg(&wav)
+        .args(["--out-report"])
+        .arg(&report)
+        .output()
+        .expect("run sfcwc");
+    assert!(out.status.success(), "{:?}", out);
+    let v = read_json(&report);
+    assert_envelope(&v, "loop_finder");
+    let cands = v["candidates"].as_array().expect("candidates array");
+    assert!(!cands.is_empty(), "expected ≥1 candidate for periodic sine");
+    for c in cands {
+        let start = c["start_sample"].as_u64().unwrap();
+        let end = c["end_sample"].as_u64().unwrap();
+        assert_eq!(start % 16, 0);
+        assert_eq!(end % 16, 0);
+    }
+}

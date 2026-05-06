@@ -2,11 +2,12 @@
 
 ## Current milestone
 
-**M1 in progress — import wired.** `sfcwc import` and the GUI
-File → Import Audio menu both run probe → SHA → copy → validate →
-save end-to-end against synthesized WAV / AIFF / AIFC / BRR
-fixtures. The freshly-imported project validates per SPEC §16.6.
-Next: M1.3 — loop selection + BRR encoder + audition WAV.
+**M1 in progress — encoder, loop finder, audition WAV all live.**
+`sfcwc encode-brr`, `sfcwc preview-brr`, `sfcwc find-loop-candidates`
+plus GUI loop-edit + Preview BRR + Find Loop Candidates modal all
+flow end-to-end. M1 BRR encoder round-trips through the M0.2 decoder
+with peak error 55 LSBs on an amplitude-8000 sine (well under the
+brief's <256 threshold).
 
 **M0 artifacts are producer-side only.** M1 owns the first audible
 driver. The NOP+BRA M0 smoke driver (`core/fixtures/asm/m0_smoke.asm`)
@@ -14,6 +15,58 @@ is intentionally non-functional and will be replaced wholesale at
 M1.5 — do not reuse it as a base for M1.5 driver work.
 
 ## Last pass
+
+**Pass M1.3 — Loop selection + BRR encoder + audition WAV.**
+
+- Phase A: `core::audio::decode_to_mono_pcm` wired through
+  symphonia for WAV / AIFF / AIFC; chains the existing M0.2
+  decoder for BRR. Symphonia stores every PCM sample
+  left-aligned in i32 (i16 → `<< 16`, i24 → `<< 8`); we always
+  recover i16 with `>> 16`. Stereo collapses to mono via
+  per-frame average. Frame count cross-checked against probe.
+- Phase B: New `core::brr_encoder` module — exhaustive per-block
+  `(filter, shift)` search over 0..=3 × 0..=12; greedy across
+  blocks; round-trip-correct by construction (the encoder's
+  analytic predictor walk mirrors `core::brr::decode_block`,
+  then re-decodes the produced block via the canonical decoder
+  to score). Scoring: peak first, sum-of-squares as tiebreak —
+  RMS-only scoring picks shifts that clip on signal peaks, and
+  clipping is what makes BRR samples sound distorted.
+  `force_filter_0_first_block` (default true) protects against
+  uninitialised predictor history at KON; `loop_entry_block_index`
+  forces filter 0 at the loop entry block where the predictor
+  history at iteration ≥ 2 has no fixed value. Sine-wave
+  round-trip peak < 256 LSBs (observed: 55).
+- Phase C: New `core::loop_finder` module — windowed RMS
+  difference + seam click magnitude, score = rms + 0.25 * click.
+  Search restricted to first 25% / last 25%; iteration on
+  multiples of 16 when `snap_to_brr_block` is on.
+- Phase D: New `core::audition` module — hand-rolled 44-byte
+  RIFF/WAVE writer for byte-stable output. Sample data is the
+  raw 15-bit decoder output stored in i16; no gain compensation
+  applied, so the audition reflects the S-DSP at unity voice gain.
+- Phase E: Three new CLI subcommands (`encode-brr`,
+  `preview-brr`, `find-loop-candidates`) plus three new report
+  types (`BrrEncodeReport`, `LoopFinderReport`, `AuditionReport`)
+  on the existing v1 envelope.
+- Phase F: GUI gains loop start/end DragValues (auto-snap to
+  multiples of 16), Find Loop Candidates button + modal with
+  per-row Apply, Preview BRR button (writes to
+  `<project_dir>/.sfcwc-preview/<sample_id>.audition.wav`).
+  Sample detail panel switched from `&SampleSlot` to
+  `&mut SampleSlot`; project re-validates after each edit.
+- Phase G: 25 new tests — 10 encoder unit (round-trip,
+  silence, force_filter_0, loop_entry, looped flags, alignment),
+  6 loop_finder unit (sortedness, range, snap, top-N), 5
+  audition unit (header layout, byte-stability, payload
+  matches decoder), 4 decode-to-PCM integration (mono, stereo
+  mix, zero-fill, BRR), 3 round-trip serde tests for the new
+  report types, 3 CLI integration tests for the new
+  subcommands. 246 tests across the workspace; `cargo check`,
+  `cargo fmt --check`, `cargo clippy --all-targets`, and
+  `cargo test` all green.
+
+## Previous passes
 
 **Pass M1.2 — WAV/AIFF/BRR import.**
 
@@ -557,6 +610,49 @@ test` all green.
   bytes alongside max_abs/rms; the bundle pulls it from one place
   rather than parsing the wrapper's report.
 
+### M1 encoder / loop / audition decisions (M1.3)
+
+- **Encoder scoring: peak-first, RMS-tiebreak** (M1.3): brief
+  said exhaustive `(filter, shift)` search; consultant didn't pin
+  the cost function. Pure RMS scoring picks shifts that
+  cleanly encode the bulk of the block but clip at signal peaks
+  (4-bit nibbles × shift step can't span large amplitudes), and
+  clipping at peaks is what makes BRR samples sound distorted.
+  Peak first, sum-of-squares as tiebreak, avoids that cleanly.
+  Empirical: amp-8000 sine round-trip peak drops from 793 to 55
+  LSBs.
+- **`force_filter_0_first_block` default true** (M1.3):
+  conservative safety against predictor-history glitches at
+  KON. The S-DSP documents prev1=prev2=0 reset on KON, so
+  filters 1..=3 on block 0 are normally safe; default-on is
+  the consultant's belt-and-suspenders advice. The `EncodeOptions`
+  toggle lets callers (round-trip tests, advanced users)
+  disable it when block-0 quality matters more than safety.
+- **Symphonia i32 path: always `>> 16`** (M1.3):
+  `SampleBuffer<i32>` left-aligns every PCM sample in i32
+  regardless of source bit depth (i16 → `<< 16`, i24 → `<< 8`,
+  i32 → identity per the symphonia-core::conv impl_convert
+  table). To recover an i16 sample, drop the low 16 bits — the
+  shift is fixed, not heuristic.
+- **Loop finder: first-25% / last-25% search ranges** (M1.3):
+  matches typical sustained-instrument loop shapes (attack →
+  loop region → release implicit). Score = rms_window_diff +
+  0.25 × seam_click — the click weight is intentionally below
+  the RMS so a high-RMS / zero-click pair never beats a
+  low-RMS / small-click pair.
+- **Audition WAV: raw 15-bit output, no gain compensation**
+  (M1.3): `core::audition` writes the S-DSP's natural 15-bit
+  output stored in i16 (range -16384..=16383), no scaling. The
+  audition reflects what playback would emit at unity voice
+  gain; user applies makeup gain in their DAW if needed.
+- **Encoder pads to multiples of 16 internally** (M1.3): brief
+  allowed either "encoder errors on unaligned input" or
+  "encoder pads with zeros." Pads internally so the CLI and
+  GUI don't have to repeat the rounding logic. `encode_looped`
+  still rejects unaligned `loop_start_sample` because that's a
+  meaningful contract (BRR loop alignment), unlike trailing-pad
+  which is just bookkeeping.
+
 ### M1 import decisions (M1.2)
 
 - **Copy-into-project default ON** (M1.2): `sfcwc import` and
@@ -740,9 +836,7 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M1.3 — Loop selection + BRR encoder + audition WAV.** PM to
-brief. Adds the BRR encoder (the M0.2 decoder's other half), the
-loop-candidate finder + UI controls in `sfcwc-app`, and the
-audition path from SPEC §17.2 (decoded-BRR PCM16 mono WAV at
-`build/m1/previews/<sample_id>_decoded_brr.wav`). Symphonia
-finally gets used for actual PCM extraction.
+**M1.4+ — TBD by PM.** With encoder, loop finder, audition WAV
+and the matching GUI surfaces in place, M1 can move on to driver
+runtime work, sequence bytecode, or SPC export from a real
+project rather than the muted M0 smoke. PM to brief.
