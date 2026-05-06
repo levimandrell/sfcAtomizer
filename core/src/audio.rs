@@ -3,8 +3,9 @@
 //! Hand-rolled WAV + AIFF/AIFC + BRR header parsers, sized to what
 //! `sfcwc import` and the GUI's File → Import Audio need: format,
 //! sample rate, channel count, bit depth, and total frame count.
-//! No PCM decoding — `symphonia` handles that at M1.3 when the BRR
-//! encoder needs the actual sample bytes.
+//! Header-only probing here; PCM decoding lives in
+//! [`decode_to_mono_pcm`] (also in this module) and goes through
+//! `symphonia` for WAV/AIFF and the existing BRR decoder for BRR.
 //!
 //! Supported inputs (SPEC §16.4):
 //!
@@ -65,6 +66,21 @@ pub enum AudioProbeError {
     BrrInvalidSize { size: u64 },
 }
 
+/// Failure modes for [`decode_to_mono_pcm`]. Includes everything
+/// [`AudioProbeError`] surfaces (probe runs first) plus codec /
+/// decode failures from `symphonia`.
+#[derive(Debug, Error)]
+pub enum AudioDecodeError {
+    #[error("probe: {0}")]
+    Probe(#[from] AudioProbeError),
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
+    #[error("symphonia: {0}")]
+    Symphonia(String),
+    #[error("decoded sample count {actual} != probed frames {expected}")]
+    FrameCountMismatch { expected: u64, actual: u64 },
+}
+
 const WAV_FORMAT_PCM_INT: u16 = 0x0001;
 const WAV_FORMAT_IEEE_FLOAT: u16 = 0x0003;
 const WAV_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
@@ -84,6 +100,128 @@ pub fn probe(audio_path: &Path) -> Result<AudioMetadata, AudioProbeError> {
         "brr" => probe_brr(bytes.len() as u64),
         other => Err(AudioProbeError::UnsupportedExtension(other.to_string())),
     }
+}
+
+/// Decode an audio file to mono `i16` PCM at the source's native
+/// sample rate. WAV / AIFF / AIFC go through `symphonia`; BRR
+/// chains [`crate::brr::decode_block`] block by block.
+///
+/// Stereo inputs are mixed to mono via `(L + R) / 2` in i32 then
+/// clamped to i16. 8-bit unsigned PCM is upscaled to signed i16 by
+/// `(s - 128) << 8`. 24-bit PCM gives up its low byte: i16 takes
+/// the upper 16 bits.
+///
+/// The returned vec length equals the probed `frames` count: one
+/// sample per frame after the mono mix. For BRR sources, this is
+/// `(file_size / 9) * 16`.
+pub fn decode_to_mono_pcm(audio_path: &Path) -> Result<Vec<i16>, AudioDecodeError> {
+    let metadata = probe(audio_path)?;
+    let pcm = match metadata.format {
+        AudioFormat::Wav | AudioFormat::Aiff => decode_via_symphonia(audio_path, &metadata)?,
+        AudioFormat::Brr => decode_brr_to_pcm(audio_path)?,
+    };
+    if pcm.len() as u64 != metadata.frames {
+        return Err(AudioDecodeError::FrameCountMismatch {
+            expected: metadata.frames,
+            actual: pcm.len() as u64,
+        });
+    }
+    Ok(pcm)
+}
+
+fn decode_brr_to_pcm(path: &Path) -> Result<Vec<i16>, AudioDecodeError> {
+    use crate::brr::{decode_blocks, BrrDecoderState};
+    let bytes = std::fs::read(path)?;
+    if bytes.len() % 9 != 0 || bytes.is_empty() {
+        return Err(AudioDecodeError::Probe(AudioProbeError::BrrInvalidSize {
+            size: bytes.len() as u64,
+        }));
+    }
+    let blocks: Vec<[u8; 9]> = bytes
+        .chunks_exact(9)
+        .map(|c| {
+            let mut b = [0u8; 9];
+            b.copy_from_slice(c);
+            b
+        })
+        .collect();
+    let mut state = BrrDecoderState::default();
+    Ok(decode_blocks(&blocks, &mut state))
+}
+
+fn decode_via_symphonia(
+    path: &Path,
+    metadata: &AudioMetadata,
+) -> Result<Vec<i16>, AudioDecodeError> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::errors::Error as SymError;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let file = File::open(path)?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+        hint.with_extension(&ext.to_ascii_lowercase());
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| AudioDecodeError::Symphonia(format!("probe: {e}")))?;
+    let mut format = probed.format;
+    let track = format
+        .default_track()
+        .ok_or_else(|| AudioDecodeError::Symphonia("no default track".into()))?;
+    let track_id = track.id;
+    let codec_params = track.codec_params.clone();
+    let channels = metadata.channels as usize;
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&codec_params, &DecoderOptions::default())
+        .map_err(|e| AudioDecodeError::Symphonia(format!("make decoder: {e}")))?;
+
+    let mut interleaved: Vec<i32> = Vec::with_capacity((metadata.frames as usize) * channels);
+    let mut sample_buf: Option<SampleBuffer<i32>> = None;
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(SymError::ResetRequired) => break,
+            Err(e) => return Err(AudioDecodeError::Symphonia(format!("packet: {e}"))),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded = decoder
+            .decode(&packet)
+            .map_err(|e| AudioDecodeError::Symphonia(format!("decode: {e}")))?;
+        let spec = *decoded.spec();
+        let buf = sample_buf
+            .get_or_insert_with(|| SampleBuffer::<i32>::new(decoded.capacity() as u64, spec));
+        buf.copy_interleaved_ref(decoded);
+        interleaved.extend_from_slice(buf.samples());
+    }
+
+    // symphonia's `SampleBuffer<i32>` stores every PCM sample
+    // left-aligned in i32 regardless of source bit depth (see
+    // `symphonia-core::conv` impl_convert! table: i16 → i32 is
+    // `<< 16`, i24 → i32 is `<< 8`, i32 → i32 is identity). To
+    // recover an i16 sample, drop the low 16 bits.
+    let mut mono: Vec<i16> = Vec::with_capacity(metadata.frames as usize);
+    for frame in interleaved.chunks_exact(channels) {
+        let sum: i64 = frame.iter().map(|&s| (s >> 16) as i64).sum();
+        let avg = sum / channels as i64;
+        mono.push(avg.clamp(i16::MIN as i64, i16::MAX as i64) as i16);
+    }
+    Ok(mono)
 }
 
 /// Streaming SHA-256 of `path`. 64 KiB chunks; lowercase hex output.

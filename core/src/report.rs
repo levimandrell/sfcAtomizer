@@ -576,6 +576,103 @@ pub enum BundleStatus {
 }
 
 // =============================================================================
+// BRR encode report — `sfcwc encode-brr`
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrrEncodeReport {
+    pub schema_version: u32,
+    pub report_type: String,
+    pub source_path: String,
+    pub source_sha256: String,
+    pub source_frames: u64,
+    pub source_sample_rate_hz: u32,
+    pub output_path: String,
+    pub output_sha256: String,
+    pub output_bytes: u64,
+    pub total_blocks: u32,
+    pub overall_rms_error: f64,
+    pub overall_peak_error: u32,
+    pub total_clamp_count: u32,
+    pub filter_distribution: [u32; 4],
+    pub force_filter_0_first_block: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_start_sample: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_entry_block_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_click_score: Option<f64>,
+    pub blocks: Vec<BrrEncodeBlock>,
+}
+
+impl BrrEncodeReport {
+    pub const REPORT_TYPE: &'static str = "brr_encode";
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct BrrEncodeBlock {
+    pub index: u32,
+    pub filter: u8,
+    pub shift: u8,
+    pub end_flag: bool,
+    pub loop_flag: bool,
+    pub block_rms_error: f64,
+    pub block_peak_error: u32,
+    pub block_clamp_count: u32,
+}
+
+// =============================================================================
+// Loop finder report — `sfcwc find-loop-candidates`
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LoopFinderReport {
+    pub schema_version: u32,
+    pub report_type: String,
+    pub source_path: String,
+    pub source_sha256: String,
+    pub source_frames: u64,
+    pub window_samples: u32,
+    pub snap_to_brr_block: bool,
+    pub candidates: Vec<LoopCandidateJson>,
+}
+
+impl LoopFinderReport {
+    pub const REPORT_TYPE: &'static str = "loop_finder";
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct LoopCandidateJson {
+    pub start_sample: u32,
+    pub end_sample: u32,
+    pub rms_window_difference: f64,
+    pub seam_click: u32,
+    pub score: f64,
+}
+
+// =============================================================================
+// Audition report — `sfcwc preview-brr`
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AuditionReport {
+    pub schema_version: u32,
+    pub report_type: String,
+    pub input_path: String,
+    pub input_sha256: String,
+    pub output_path: String,
+    pub output_sha256: String,
+    pub blocks_decoded: u32,
+    pub samples_written: u32,
+    pub bytes_written: u64,
+    pub sample_rate_hz: u32,
+}
+
+impl AuditionReport {
+    pub const REPORT_TYPE: &'static str = "audition";
+}
+
+// =============================================================================
 // Tests — round-trip every report through serde to catch field renames.
 // =============================================================================
 
@@ -968,6 +1065,79 @@ mod tests {
             !json.contains("searched"),
             "empty searched should be omitted: {json}"
         );
+    }
+
+    #[test]
+    fn brr_encode_round_trip() {
+        let r = BrrEncodeReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: BrrEncodeReport::REPORT_TYPE.to_string(),
+            source_path: "build/m1/sample.wav".to_string(),
+            source_sha256: "0".repeat(64),
+            source_frames: 4096,
+            source_sample_rate_hz: 32000,
+            output_path: "build/m1/sample.brr".to_string(),
+            output_sha256: "1".repeat(64),
+            output_bytes: 2304,
+            total_blocks: 256,
+            overall_rms_error: 12.34,
+            overall_peak_error: 55,
+            total_clamp_count: 0,
+            filter_distribution: [10, 50, 100, 96],
+            force_filter_0_first_block: true,
+            loop_start_sample: Some(1024),
+            loop_entry_block_index: Some(64),
+            loop_click_score: Some(7.0),
+            blocks: vec![BrrEncodeBlock {
+                index: 0,
+                filter: 0,
+                shift: 11,
+                end_flag: false,
+                loop_flag: false,
+                block_rms_error: 100.0,
+                block_peak_error: 255,
+                block_clamp_count: 0,
+            }],
+        };
+        round_trip(&r);
+    }
+
+    #[test]
+    fn loop_finder_round_trip() {
+        let r = LoopFinderReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: LoopFinderReport::REPORT_TYPE.to_string(),
+            source_path: "build/m1/sample.wav".to_string(),
+            source_sha256: "0".repeat(64),
+            source_frames: 4096,
+            window_samples: 32,
+            snap_to_brr_block: true,
+            candidates: vec![LoopCandidateJson {
+                start_sample: 64,
+                end_sample: 3072,
+                rms_window_difference: 12.5,
+                seam_click: 42,
+                score: 23.0,
+            }],
+        };
+        round_trip(&r);
+    }
+
+    #[test]
+    fn audition_round_trip() {
+        let r = AuditionReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: AuditionReport::REPORT_TYPE.to_string(),
+            input_path: "build/m1/sample.brr".to_string(),
+            input_sha256: "0".repeat(64),
+            output_path: "build/m1/sample.audition.wav".to_string(),
+            output_sha256: "1".repeat(64),
+            blocks_decoded: 256,
+            samples_written: 4096,
+            bytes_written: 8236,
+            sample_rate_hz: 32000,
+        };
+        round_trip(&r);
     }
 
     #[test]
