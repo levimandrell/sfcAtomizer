@@ -363,6 +363,11 @@ pub struct CalibrationReport {
     /// `SpcExportReport.error`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Hex SHA-256 of the oracle-rendered PCM. Added in M0.6 so the
+    /// `M0Manifest.bundle` can pick it up from one place rather than
+    /// reading the wrapper's sidecar JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_pcm_sha256: Option<String>,
 }
 
 impl CalibrationReport {
@@ -382,6 +387,7 @@ impl CalibrationReport {
             freeze_target: "M1".to_string(),
             diagnostics: Vec::new(),
             error: None,
+            oracle_pcm_sha256: None,
         }
     }
 }
@@ -443,7 +449,8 @@ pub struct ProvisionalTolerances {
 pub struct M0Manifest {
     pub schema_version: u32,
     pub report_type: String,
-    /// RFC3339 timestamp; left `None` in M0.1 (populated in M0.6).
+    /// RFC3339 timestamp; populated by `m0-acceptance` from M0.6 onward.
+    /// Pre-M0.6 manifests carry `null` here.
     pub generated_at: Option<String>,
     pub doctor_report: String,
     pub brr_fixture_report: String,
@@ -451,10 +458,77 @@ pub struct M0Manifest {
     pub assemble_report: String,
     pub spc_export_report: String,
     pub calibration_report: String,
+    /// Bundle-level summary added in M0.6. `#[serde(default)]` so
+    /// pre-M0.6 manifests still parse, deserializing to a sentinel
+    /// `BundleSummary` whose status is `Error` (forces re-run).
+    #[serde(default)]
+    pub bundle: BundleSummary,
 }
 
 impl M0Manifest {
     pub const REPORT_TYPE: &'static str = "m0_manifest";
+}
+
+// =============================================================================
+// Bundle summary (M0.6) — aggregate per-step status + cross-references.
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BundleSummary {
+    pub steps: BundleSteps,
+    pub status: BundleStatus,
+    /// SHA-256 of the assembled 64 KB ARAM image (from
+    /// `assemble.output_image_sha256`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aram_image_sha256: Option<String>,
+    /// SHA-256 of the produced `.spc` file (from
+    /// `spc_export.spc_file_sha256`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spc_file_sha256: Option<String>,
+    /// SHA-256 of the oracle-rendered PCM (from
+    /// `calibration.oracle_pcm_sha256`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_pcm_sha256: Option<String>,
+    /// Bundle-level diagnostics — each step's diagnostics flattened
+    /// and prefixed with the step name. Capped at 50 entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct BundleSteps {
+    pub doctor: StepStatus,
+    pub decode_fixtures: StepStatus,
+    pub assemble: StepStatus,
+    pub spc_export: StepStatus,
+    pub aram_map: StepStatus,
+    pub calibration: StepStatus,
+}
+
+/// Per-step rollup. The mapping rules are documented in
+/// `core::manifest` and exercised end-to-end by `m0-acceptance`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    Ok,
+    Warnings,
+    Error,
+    /// Step was not run because a prerequisite was missing
+    /// (e.g. asar not resolved → assemble skipped).
+    #[default]
+    Skipped,
+}
+
+/// Aggregate bundle status. Default is `Error` so a freshly-deserialized
+/// bundle-less manifest forces re-acceptance rather than silently
+/// passing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BundleStatus {
+    Ok,
+    Degraded,
+    #[default]
+    Error,
 }
 
 // =============================================================================
@@ -717,6 +791,7 @@ mod tests {
 
     #[test]
     fn m0_manifest_round_trip() {
+        // Bundle defaults (BundleStatus::Error, all StepStatus::Skipped).
         let m = M0Manifest {
             schema_version: SCHEMA_VERSION,
             report_type: M0Manifest::REPORT_TYPE.to_string(),
@@ -727,8 +802,76 @@ mod tests {
             assemble_report: "build/m0/assemble-report.json".to_string(),
             spc_export_report: "build/m0/spc-export-report.json".to_string(),
             calibration_report: "build/m0/calibration-report.json".to_string(),
+            bundle: BundleSummary::default(),
         };
         round_trip(&m);
+
+        // Fully populated bundle (M0 acceptance happy path).
+        let mut m = m.clone();
+        m.bundle = BundleSummary {
+            steps: BundleSteps {
+                doctor: StepStatus::Ok,
+                decode_fixtures: StepStatus::Ok,
+                assemble: StepStatus::Ok,
+                spc_export: StepStatus::Ok,
+                aram_map: StepStatus::Ok,
+                calibration: StepStatus::Ok,
+            },
+            status: BundleStatus::Ok,
+            aram_image_sha256: Some("a".repeat(64)),
+            spc_file_sha256: Some("b".repeat(64)),
+            oracle_pcm_sha256: Some("c".repeat(64)),
+            diagnostics: vec!["doctor: example diagnostic".to_string()],
+        };
+        round_trip(&m);
+    }
+
+    #[test]
+    fn m0_manifest_pre_m06_without_bundle_still_parses() {
+        // M0.4/M0.5 manifest shape — no `bundle` field.
+        let pre_m06 = r#"{
+            "schema_version": 1,
+            "report_type": "m0_manifest",
+            "generated_at": null,
+            "doctor_report": "build/m0/doctor.json",
+            "brr_fixture_report": "build/m0/brr-fixture-report.json",
+            "aram_map_report": "build/m0/aram-map.json",
+            "assemble_report": "build/m0/assemble-report.json",
+            "spc_export_report": "build/m0/spc-export-report.json",
+            "calibration_report": "build/m0/calibration-report.json"
+        }"#;
+        let m: M0Manifest = serde_json::from_str(pre_m06).unwrap();
+        assert_eq!(m.bundle.status, BundleStatus::Error);
+        assert_eq!(m.bundle.steps.doctor, StepStatus::Skipped);
+        assert!(m.bundle.diagnostics.is_empty());
+        assert!(m.bundle.aram_image_sha256.is_none());
+    }
+
+    #[test]
+    fn step_status_round_trip() {
+        for s in [
+            StepStatus::Ok,
+            StepStatus::Warnings,
+            StepStatus::Error,
+            StepStatus::Skipped,
+        ] {
+            let json = serde_json::to_string(&s).unwrap();
+            let back: StepStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, s);
+        }
+    }
+
+    #[test]
+    fn bundle_status_round_trip() {
+        for s in [
+            BundleStatus::Ok,
+            BundleStatus::Degraded,
+            BundleStatus::Error,
+        ] {
+            let json = serde_json::to_string(&s).unwrap();
+            let back: BundleStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, s);
+        }
     }
 
     #[test]
