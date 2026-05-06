@@ -203,7 +203,9 @@ idle_5sec:
 
 ; ============================================================
 ; command_reset_to_ipl: write packet (token=$42, code=$02) and
-; wait for ack ($82 in $2141).
+; wait for both ack code ($82 in $2141) AND ack token ($42 in
+; $2140). Verifying both fields prevents stale acks from a
+; prior driver run from passing this gate (M2.0 / consultant #10).
 ; ============================================================
 command_reset_to_ipl:
     php
@@ -215,14 +217,18 @@ command_reset_to_ipl:
     sta $2141
     lda #$42
     sta $2140
-    ; Wait for ack.
+    ; Wait for ack — code AND token must both match.
     ldx.w #$0000
 .o:
     ldy.w #$FFFF
 .i:
     lda $2141
-    cmp #$82
+    cmp #$82                           ; ack code: RESET_TO_IPL ack
+    bne .next
+    lda $2140
+    cmp #$42                           ; token we sent
     beq .done
+.next:
     dey
     bne .i
     inx
