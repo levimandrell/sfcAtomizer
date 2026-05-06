@@ -17,6 +17,7 @@ pub mod import;
 pub mod loop_finder;
 pub mod manifest;
 pub mod module_image;
+pub mod packer;
 pub mod pitch;
 pub mod project;
 pub mod report;
