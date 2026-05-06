@@ -592,58 +592,266 @@ Echo can self-oscillate or clip unpleasantly, especially through headphones duri
 
 ---
 
-## 16. Project file format
+## 16. Project file format (v1)
 
-The project file is the source of truth. Compiled artifacts are derived.
+The project file is the source of truth. Compiled artifacts are derived. M1 ships schema version 1; this section is the canonical contract.
+
+### 16.1 Format basics
 
 JSON, UTF-8, stable key ordering for Git diffs. Explicit top-level `schema_version`. Source data only — compiled BRR, atoms, and ARAM images live in a `build/` cache keyed by content hashes. Source audio referenced by path with recorded SHA-256.
+
+### 16.2 Root schema
 
 ```json
 {
   "schema_version": 1,
-  "project": {
-    "name": "example",
-    "tick_rate_hz": 60,
-    "tempo_bpm": 120,
-    "time_signature": [4, 4]
-  },
-  "driver": {
-    "profile": "synth_static",
-    "features": { "...": "..." }
-  },
-  "instruments": [
-    { "type": "sample", "name": "flute", "...": "..." },
-    { "type": "synth",  "name": "soft_saw", "...": "..." }
-  ],
-  "tracks": [
-    {
-      "name": "lead",
-      "instrument": "soft_saw",
-      "clips": [
-        { "start_bar": 1, "start_beat": 1, "start_tick": 0, "length_beats": 4, "...": "..." }
-      ]
-    }
-  ],
-  "echo": {
-    "scope": "project_global_static",
-    "edl": 4,
-    "params": { "...": "..." }
-  },
-  "compiler": {
-    "atom_quality_threshold": 0.92,
-    "pre_emphasis_default_sample": "off",
-    "pre_emphasis_default_synth": "gentle",
-    "frame_caps": { "level2": 32, "level3": 64, "level4": 64, "expert_override": false }
-  },
-  "asset_refs": [
-    { "path": "samples/flute_c4.wav", "sha256": "..." }
-  ]
+  "project": { "name": "m1_single_sample", "tick_rate_hz": 60 },
+  "driver": { "profile": "sample_basic", "bytecode_version": 1 },
+  "master_echo": { "...": "see §16.3" },
+  "sample_pool": [ { "...": "see §16.4" } ],
+  "m1": { "active_sample_id": "sample_0001" }
 }
 ```
 
-**Migration:** higher `schema_version` than the tool supports → refuse with clear error; lower → run an explicit named migration (`migrate_v1_to_v2`, etc.); no migration → refuse. Migrations are forward-only, may drop or refactor fields, and log every change in a migration report shown to the user.
+Required root fields:
 
-**Acceptance:** older schema fails safely or migrates explicitly, never silently. Compiled artifacts regenerate byte-identically from `project.json` plus referenced assets given the same compiler/encoder/assembler versions. Project files diff cleanly: stable key order, no embedded binary, no embedded compile timestamps.
+- `schema_version`: integer, allowed value `1`.
+- `project`: object, required.
+- `driver`: object, required.
+- `master_echo`: object, required.
+- `sample_pool`: array, required, length `1..=128` for M1.
+- `m1`: object, required.
+
+`project`:
+
+- `name`: string `1..=64`, no path separators, printable UTF-8.
+- `tick_rate_hz`: integer, allowed `60`.
+
+`driver`:
+
+- `profile`: string. M1 allowed value: `"sample_basic"`.
+- `bytecode_version`: integer. M1 allowed value: `1`.
+
+### 16.3 master_echo block
+
+```json
+"master_echo": {
+  "enabled": false,
+  "edl": 0,
+  "efb": 0,
+  "evol_l": 0,
+  "evol_r": 0,
+  "fir": [127, 0, 0, 0, 0, 0, 0, 0]
+}
+```
+
+- `enabled`: boolean.
+- `edl`: integer `0..=15`. If `enabled = false`, must be `0`. If `enabled = true`, must be `1..=15`.
+- `efb`: integer `-128..=127` (raw signed byte → DSP `EFB`).
+- `evol_l`, `evol_r`: integer `-128..=127` each (raw signed bytes → DSP `EVOLL` / `EVOLR`).
+- `fir`: array of 8 integers, each `-128..=127`.
+
+**Trap.** `EDL = 0` with echo writeback enabled corrupts 4 bytes at `ESA*0x100`. M1 forbids `enabled=true` with `edl=0`; cross-validation in §16.6.
+
+**Trap.** When `master_echo.enabled = false`, the driver must write FLG with the echo-write-disable bit set and `EON = $00`.
+
+### 16.4 sample_pool entries
+
+```json
+{
+  "id": "sample_0001",
+  "name": "lead_sample",
+  "source": {
+    "path": "audio/lead.wav",
+    "sha256": "hex...",
+    "format": "wav",
+    "sample_rate_hz": 32000,
+    "channels": 1,
+    "frames": 44100
+  },
+  "root_midi_note": 60,
+  "loop": {
+    "enabled": true,
+    "start_sample": 1024,
+    "end_sample": 32768,
+    "snap": "brr_block_16"
+  },
+  "playback": {
+    "volume": 1.0,
+    "pan": 0.0,
+    "echo": false,
+    "envelope": {
+      "type": "adsr",
+      "attack": 9,
+      "decay": 4,
+      "sustain_level": 5,
+      "sustain_rate": 12
+    }
+  }
+}
+```
+
+`source`:
+
+- `path`: string. Relative path preferred; absolute allowed only with warning.
+- `sha256`: lowercase hex string, length 64.
+- `format`: string. Allowed: `"wav" | "aiff" | "brr"`. M1 AIFF scope: PCM AIFF only — AIFF-C is rejected.
+- `sample_rate_hz`: integer `8000..=96000` for WAV/AIFF. For BRR import: `32000` default, or explicit user-provided.
+- `channels`: integer `1..=2` for M1.
+- `frames`: integer `>= 1`.
+
+`root_midi_note`: integer `0..=127`. C4 = 60 (see §16.7).
+
+`loop`:
+
+- `enabled`: boolean.
+- `start_sample`: integer `>= 0`. Must be a multiple of 16. Required if `enabled = true`. Domain: mono PCM sample index after import conversion.
+- `end_sample`: required if `enabled = true`. Constraints: `end_sample > start_sample`, `end_sample - start_sample >= 16`, `end_sample` multiple of 16, `end_sample <= source.frames`. End-exclusive: looped samples = `[start_sample, end_sample)`.
+- `snap`: string. M1 allowed value: `"brr_block_16"`.
+
+`playback`:
+
+- `volume`: number `0.0..=1.0`.
+- `pan`: number `-1.0..=1.0` (-1.0 = hard left, 0.0 = center, +1.0 = hard right).
+- `echo`: boolean → DSP `EON` bit. If `echo = true`, `master_echo.enabled` must be `true`.
+- `envelope`: tagged union, exactly one of ADSR or GAIN variant.
+
+**Pan mapping** — constant-power, no phase inversion in M1:
+
+```
+theta       = (pan + 1.0) * PI / 4.0
+vol_l_float = 127.0 * volume * cos(theta)
+vol_r_float = 127.0 * volume * sin(theta)
+VxVOLL      = clamp(round_half_up(vol_l_float), 0, 127)
+VxVOLR      = clamp(round_half_up(vol_r_float), 0, 127)
+```
+
+**Envelope — ADSR variant**:
+
+```json
+"envelope": {
+  "type": "adsr",
+  "attack": 9,
+  "decay": 4,
+  "sustain_level": 5,
+  "sustain_rate": 12
+}
+```
+
+- `type`: required `"adsr"`.
+- `attack`: integer `0..=15`.
+- `decay`: integer `0..=7`.
+- `sustain_level`: integer `0..=7`.
+- `sustain_rate`: integer `0..=31`.
+
+Register mapping:
+
+```
+ADSR1 = $80 | (decay << 4) | attack
+ADSR2 = (sustain_level << 5) | sustain_rate
+GAIN  = $00
+```
+
+**Trap.** Do not call the final field `release`. The S-DSP ADSR registers are `attack`, `decay`, `sustain_level`, `sustain_rate`. Key-off release is not a programmable ADSR field. Bit layout: `ADSR1 = E DDD AAAA`, `ADSR2 = SSS RRRRR`.
+
+**Envelope — GAIN variant**:
+
+```json
+"envelope": {
+  "type": "gain_raw",
+  "gain_byte": 127
+}
+```
+
+- `type`: required `"gain_raw"`.
+- `gain_byte`: integer `0..=255`.
+
+Register mapping:
+
+```
+ADSR1 = $00
+ADSR2 = $00
+GAIN  = gain_byte
+```
+
+`gain_raw` is the raw DSP byte. M1 deliberately does not expose a high-level GAIN envelope model; that lands in a later milestone after listening tests.
+
+### 16.5 m1 block
+
+```json
+"m1": { "active_sample_id": "sample_0001" }
+```
+
+- `active_sample_id`: string. Must match exactly one `sample_pool[].id`.
+
+### 16.6 Validation rules
+
+Cross-field constraints checked at project load (§16) and re-checked at compile:
+
+- `master_echo.enabled = true` ⇒ `master_echo.edl` ∈ `1..=15`. `master_echo.enabled = false` ⇒ `master_echo.edl = 0`.
+- Any `sample_pool[i].playback.echo = true` ⇒ `master_echo.enabled = true`.
+- `playback.envelope` must be exactly one of ADSR or GAIN; serde tagged union enforces this at the format level.
+- If `loop.enabled = true`: `start_sample` and `end_sample` both multiples of 16; `end_sample > start_sample`; `end_sample - start_sample >= 16`; `end_sample <= source.frames`.
+- `m1.active_sample_id` must match exactly one `sample_pool[].id`.
+- `sample_pool` length `1..=128`.
+- `sample_pool[].id` values must be globally unique within the project.
+
+Validation surfaces every failed rule, not just the first; the loader collects a list.
+
+### 16.7 Pitch and MIDI convention
+
+**MIDI numbering** (locked):
+
+```
+C4 = MIDI note 60
+A4 = MIDI note 69
+A4 tuning = 440.0 Hz
+valid root_midi_note range = 0..=127
+```
+
+Frequency helper:
+
+```
+frequency_hz(note) = 440.0 * 2^((note - 69) / 12.0)
+```
+
+Project files store integer MIDI note numbers, not note strings (`"root_midi_note": 60`, not `"C4"`). UI may display `C4`; serialized data must not.
+
+**Pitch register formula.** SNES voice pitch is a 14-bit value split across `VxPITCHL` (low byte) and the low 6 bits of `VxPITCHH`:
+
+```
+pitch_float =
+  4096.0
+  * (source_sample_rate_hz / 32000.0)
+  * 2^((desired_midi_note - root_midi_note + cents_offset / 100.0) / 12.0)
+
+pitch_u16 = clamp(round_half_up(pitch_float), 0x0000, 0x3FFF)
+```
+
+Rounding: `round_half_up(x) = floor(x + 0.5)`.
+
+Register split:
+
+```
+VxPITCHL = pitch_u16 & $FF
+VxPITCHH = (pitch_u16 >> 8) & $3F
+```
+
+**M1 collapse** — no transposition, no detune. `desired_midi_note = root_midi_note`, `cents_offset = 0`:
+
+```
+pitch_float = 4096.0 * source_sample_rate_hz / 32000.0
+```
+
+A 32 kHz sample at its root key yields `pitch_u16 = $1000`. A 22050 Hz source not resampled yields `pitch_u16 = round_half_up(4096 * 22050 / 32000) = 2822 = $0B06`.
+
+**Trap.** If the importer resamples audio to 32 kHz before BRR encoding, `source_sample_rate_hz` for pitch purposes becomes `32000`, not the original file's rate.
+
+### 16.8 Migration and acceptance
+
+**Migration.** Higher `schema_version` than the tool supports → refuse with clear error. Lower → run an explicit named migration (`migrate_v1_to_v2`, etc.). No migration available → refuse. Migrations are forward-only, may drop or refactor fields, and log every change in a migration report shown to the user.
+
+**Acceptance.** Older schema fails safely or migrates explicitly, never silently. Compiled artifacts regenerate byte-identically from `project.json` plus referenced assets given the same compiler/encoder/assembler versions. Project files diff cleanly: stable key order, no embedded binary, no embedded compile timestamps.
 
 ---
 
@@ -670,6 +878,22 @@ Host-side external tools are resolved via environment variables, with PATH as fa
 | Mesen2 (manual verification only) | `SFCWC_MESEN2`           | not auto-launched; user opens manually         |
 
 The host app's `doctor` command reports which tools were resolved, their versions, and their resolution paths. Missing tools produce diagnostic warnings, not crashes; commands that strictly require a missing tool fail with a clear error pointing at the env var.
+
+### 17.2 Audition path (M1.3)
+
+Sample audition at M1.3 lands as a side-effect-free file write, not an audio-device engine.
+
+```
+Command / UI action: Preview BRR
+Output:              build/m1/previews/<sample_id>_decoded_brr.wav
+Format:              WAV PCM16, mono, sample rate = imported source.sample_rate_hz
+                     unless explicitly resampled
+Samples:             decoded BRR PCM (post encode/decode), NOT the original WAV/AIFF
+```
+
+The user opens the resulting `.wav` in any media player or DAW. Reasons: cross-platform; auditionable without a host audio engine; no Mesen2 dependency for loop audition; UI playback stays out of the critical path.
+
+**Trap.** Preview must play **decoded BRR**, not the original source. Auditioning the source lets the user approve loops and quality the SNES will not actually play. The compiled BRR is the ground truth for what ships.
 
 ---
 
@@ -714,9 +938,50 @@ Debug output generation is fast and on by default; it can be disabled in `compil
 
 ### 19.2 .sfc test ROM loader contract
 
-The `.sfc` test ROM includes a 65816-side loader stub responsible for the SPC700 upload protocol via the IPL ROM ($FFC0–$FFFF). The loader uploads the driver, source directory, sequence bytecode, BRR pools, and any other non-zero ARAM regions to the APU using the standard APU port handshake, then transfers control to the SPC700 entry address.
+The `.sfc` test ROM includes a 65816-side loader stub responsible for the SPC700 upload protocol via the IPL ROM (`$FFC0–$FFFF`). The loader uploads the sparse blocks listed in `module.bin` (§19.4) using the standard APU port handshake, then transfers control to the SPC700 entry address (`$0200` for M1).
 
-The loader contract is exposed via `audio_symbols.inc` and `loader_stub_65816.asm` and is fully specified before M1 ships. Mid-load timing budget, port-handshake validation, and recovery on NAK are part of the contract; silent upload failure is forbidden.
+The loader contract is exposed via `audio_symbols.inc` and `loader_stub_65816.asm`.
+
+**APU port direction.** The 65c816-side APU communication ports are `$2140..$2143`; each side sees the value most recently written by the other side, and each direction has separate one-way storage that reuses the same numeric port names per direction. Logical convention:
+
+```
+Host → driver:
+  65c816 writes $2140–$2143
+  SPC700 reads  $F4–$F7
+Driver → host:
+  SPC700 writes $F4–$F7
+  65c816 reads  $2140–$2143
+```
+
+**Upload handshake.** All host-side communication is 8-bit-only writes to `$2140–$2143`. IRQ and NMI are disabled around the tight upload routine.
+
+```
+1. Host waits for IPL ready signature in $2140 = $BB.
+2. For each block in module.bin (sorted ascending by dest_addr):
+   a. Host writes destination port mapping to $2142/$2143 (block start address).
+   b. Host writes kickoff byte to $2141 = $CC and the byte counter / start byte
+      sequence per the IPL upload protocol.
+   c. Host writes block bytes one at a time, advancing the IPL ack counter on
+      each byte; final-byte acknowledgement is observed before moving on.
+3. After all blocks, host writes $2141 = $00 (jump-to-entrypoint marker) along
+   with the entrypoint address ($0200 for M1) on $2142/$2143, signalling the
+   IPL ROM to transfer control to the driver.
+```
+
+**Bounded host-side spin counts** (so a missed handshake fails fast rather than deadlocks the host):
+
+```
+WAIT_IPL_READY_POLLS        = 0x0020_0000
+WAIT_BLOCK_KICK_ACK_POLLS   = 0x0002_0000
+WAIT_BYTE_ACK_POLLS         = 0x0000_4000
+WAIT_DRIVER_READY_POLLS     = 0x0020_0000
+WAIT_COMMAND_ACK_POLLS      = 0x0002_0000
+WAIT_RESET_TO_IPL_POLLS     = 0x0020_0000
+```
+
+Mid-load timing budget, port-handshake validation, and recovery on NAK are part of the contract; silent upload failure is forbidden.
+
+**Trap.** Multi-byte communication-register writes and read/write timing hazards are documented in SNESdev errata; final-byte acknowledgement is easy to miss. Use 8-bit writes only, and disable IRQ/NMI across the tight upload routine.
 
 ### 19.3 SPC smoke state contract (M0)
 
@@ -735,6 +1000,55 @@ The M0 smoke `.spc` boots the SPC700 into a state that is silent, deterministic,
 
 Result: the SPC700 executes the driver from `$0200` while the DSP produces no audio output (mute amp). M0 smoke verification is "loads in Mesen2, no crash, no audible output." The smoke `.spc` writes ID666 indicator = absent (0x1B) and zero-fills the 210-byte ID666 region. M1+ smoke profiles will replace this with an audible-but-deterministic state.
 
+### 19.4 module.bin binary format (M1)
+
+The `.sfc` loader uploads only meaningful ARAM regions, not a contiguous 64 KB image. M1 uses a sparse-block module: never upload `$0000..$01FF` (zero page, I/O, stack — runtime territory). All multi-byte fields are little-endian. M1 schema version = 1.
+
+**File layout.**
+
+```
+module.bin
+Header: 64 bytes
+0x00  u8[8]   magic = "SFCWCM1\0"  (hex: 53 46 43 57 43 4D 31 00)
+0x08  u16     schema_version = 1
+0x0A  u16     header_len = 64
+0x0C  u16     block_count
+0x0E  u16     entrypoint = $0200 for M1
+0x10  u32     block_table_offset = 64
+0x14  u32     data_offset = 64 + block_count * 8
+0x18  u32     total_file_len
+0x1C  u16     flags
+              bit 0 = echo_enabled_for_module
+              bits 1–15 = reserved, must be 0
+0x1E  u16     reserved = 0
+0x20  u8[32]  content_sha256_zeroed
+              SHA-256 of the entire module.bin with bytes 0x20–0x3F
+              set to 0 (self-reference workaround)
+
+Block table entry: 8 bytes each
+u16 dest_addr      ARAM destination address
+u16 length         byte length; must be > 0
+u32 data_offset    file offset of this block's data
+
+Block data:
+u8[length] data    raw bytes uploaded to ARAM[dest_addr ..]
+```
+
+**Block rules** (M1):
+
+- Blocks are sparse.
+- Blocks are sorted by `dest_addr` ascending.
+- Blocks must not overlap.
+- Blocks must not target `$00F0..$00FF` (DSP / I/O ports).
+- M1 should avoid all blocks below `$0200`.
+- Driver code is one block if contiguous.
+- Source directory is one page-aligned block.
+- BRR sample pool is one block.
+- If echo is enabled, include a zero-filled echo-buffer block so echo memory is deterministic.
+- If echo is disabled, do not include echo-buffer bytes.
+
+**Self-reference trap.** The full-file SHA-256 cannot be stored inside the file (chicken-and-egg). The header carries `content_sha256_zeroed`: the SHA-256 of the file with the 32 SHA bytes themselves zeroed. The literal full-file SHA-256 lives in the M1 manifest as `module_file_sha256`.
+
 ---
 
 ## 20. Driver build strategy
@@ -742,6 +1056,95 @@ Result: the SPC700 executes the driver from `$0200` while the DSP produces no au
 Build complete driver images per feature set. No runtime overlays, compressed loaders, self-modifying bundles, or in-ARAM dynamic linking. Driver code is small enough to duplicate in ROM; ARAM is the binding constraint.
 
 Later optimization candidates (not in scope now): shared kernel + optional handler blocks; compressed ROM driver storage; overlay loader for rare commands.
+
+### 20.1 Driver command protocol (sample_basic profile, M1)
+
+The host issues commands to the driver via the four APU communication ports while the driver replies on the same numerical ports in the opposite direction (§19.2). All values are bytes.
+
+**Driver ready signature.** After init, the driver writes the following four bytes to `$F4..$F7` (host reads at `$2140..$2143`):
+
+```
+driver_out_0 = $A5
+driver_out_1 = $5A
+driver_out_2 = driver_version = $01    ; M1 = 1
+driver_out_3 = status_flags
+```
+
+The host treats the `$A5 $5A` pair on `driver_out_0..1` as the "driver ready" signature.
+
+**Status flags (`driver_out_3`).**
+
+```
+bit 0 = voice0_active
+bit 1 = echo_enabled
+bit 2 = stopped
+bit 3 = error
+bit 4 = reset_to_ipl_pending
+bits 5–7 = reserved, must be 0
+```
+
+**Host command packet.** The host writes a 4-byte command packet to `$2140..$2143` (driver reads at `$F4..$F7`):
+
+```
+host_in_0 = command_token
+host_in_1 = command_code
+host_in_2 = arg0
+host_in_3 = arg1
+```
+
+Rules:
+
+- `command_token` must be nonzero.
+- `command_token` must differ from the previous token (otherwise the driver may not observe the change).
+- The driver treats a `host_in_0` change as "new command available" and only then reads `host_in_1..3`.
+- For M1, `arg0` and `arg1` are `0`.
+
+**Commands.**
+
+| Code   | Name           | Notes                  |
+|--------|----------------|------------------------|
+| `$01`  | `STOP`         |                        |
+| `$02`  | `RESET_TO_IPL` |                        |
+| `$7F`  | `PING`         | diagnostic no-op       |
+
+**Acks** (driver writes after acting on the host packet):
+
+```
+For STOP:
+  driver_out_0 = command_token
+  driver_out_1 = $81
+  driver_out_2 = $01
+  driver_out_3 = status_flags with stopped=1, voice0_active=0
+
+For RESET_TO_IPL:
+  driver_out_0 = command_token
+  driver_out_1 = $82
+  driver_out_2 = $01
+  driver_out_3 = status_flags with reset_to_ipl_pending=1
+
+For PING:
+  driver_out_0 = command_token
+  driver_out_1 = $FF
+  driver_out_2 = $01
+  driver_out_3 = status_flags
+
+For invalid command:
+  driver_out_0 = command_token
+  driver_out_1 = $EE
+  driver_out_2 = $01
+  driver_out_3 = status_flags with error=1
+```
+
+**RESET_TO_IPL behaviour after ack.** The driver must:
+
+1. KOFF voice 0.
+2. Set FLG mute + echo-write-disable.
+3. Clear EON.
+4. Map IPL ROM by setting CONTROL bit 7.
+5. Jump `$FFC0`.
+6. Host then waits for IPL ready `$BB`.
+
+The bounded host-side spin counts in §19.2 govern how long the host waits for each ack before declaring failure.
 
 ---
 
@@ -774,9 +1177,17 @@ M0 is complete when the raw BRR decoder is byte-exact on fixtures, asar produces
 
 ### M1 — Sample mode
 
-**Deliverables:** sample slot UI; WAV/AIFF/BRR import; root key; ADSR/GAIN; pan; echo enable; loop candidate finder; BRR preview; ARAM meter with prominent echo cost; project file v1 with migration scaffolding; Sample Pool view.
+**Deliverables:** sample slot UI; WAV/AIFF/BRR import; root key; ADSR/GAIN; pan; echo enable; loop candidate finder; BRR preview (§17.2); ARAM meter with prominent echo cost; project file v1 with migration scaffolding (§16); Sample Pool view; `module.bin` sparse-block format (§19.4); driver command protocol (§20.1); pitch register encoding (§16.7).
 
-**Acceptance:** create a C700-lite sample instrument; export `.spc` and `.sfc`; loop points snapped to BRR boundaries; compiler refuses ARAM overflow; project file round-trips; internal preview and oracle preview agree.
+**Acceptance:**
+
+- Create a C700-lite sample instrument and export both `.spc` and `.sfc`.
+- Loop points snapped to BRR block boundaries (multiples of 16, §16.4).
+- Compiler refuses ARAM overflow.
+- Project file v1 round-trips: serialize → deserialize → re-serialize is byte-identical for the same compiler/encoder/assembler versions.
+- Internal Rust BRR preview and snes_spc oracle preview agree within frozen tolerances (§10.1, §18, §21 — tolerances frozen at M1).
+- `m1-acceptance` runs the M1 chain (project load → BRR encode → driver assemble → SPC export → SFC export → oracle calibration → manifest) and emits a `BundleSummary`-shaped manifest with the same `bundle.status` semantics as M0 (`ok` / `degraded` / `error` per the locked aggregation rules in §21 M0).
+- `.spc` and `.sfc` exports use the same canonical `aram_image` and the same driver entrypoint (`$0200`). Allocated regions — driver code, source directory, BRR sample pool, driver constants, and the optional zero-filled echo buffer — must match bit-for-bit between the two artifacts. Free / unallocated regions are not parity-significant in `.sfc`: `$00F0..$00FF` and `$0100..$01FF` are runtime territory, and free ARAM is not semantically part of the module.
 
 ### M1.5 — Pattern sequencer harness
 
@@ -849,7 +1260,7 @@ M0 is complete when the raw BRR decoder is byte-exact on fixtures, asar produces
 These are empirical and resolved through use, not design:
 
 1. Final atom quality thresholds — to be tuned via the calibration harness through listening tests. Raw BRR decode is bit-identical at M0 (no tolerance); voice-render and full-module-render tolerances are provisional at M0 and frozen at M1 (§21).
-2. Whether to embed snes_spc directly for live preview or keep it as a validation-only oracle — decided after M0.
+2. ~~Whether to embed snes_spc directly for live preview or keep it as a validation-only oracle.~~ **Resolved at M0.5/M0.6**: the host never links snes_spc; it is invoked across a process boundary (`LICENSING.md` §3, SPEC §17.1). Live preview at M3+ uses the internal Rust BRR decoder; the oracle remains the calibration second-source.
 3. Practical wavetable frame caps — the 32 / 64 / 96 / 128 numbers are provisional; empirical testing may move them.
 4. Whether a later version adds a free pre-emphasis EQ editor.
 
