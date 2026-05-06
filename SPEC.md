@@ -915,7 +915,7 @@ Host-side external tools are resolved via environment variables, with PATH as fa
 |-----------------------------------|--------------------------|------------------------------------------------|
 | asar (assembler)                  | `SFCWC_ASAR`             | `asar` / `asar.exe` on PATH                    |
 | snes_spc oracle wrapper           | `SFCWC_SNES_SPC_ORACLE`  | `tools/snes_spc_oracle` next to the workspace  |
-| Mesen2 (manual verification only) | `SFCWC_MESEN2`           | not auto-launched; user opens manually         |
+| Mesen2 (manual verification only) | `SFCWC_MESEN2`           | `Mesen.exe` / `Mesen` / `Mesen2.exe` on PATH; not auto-launched, user opens manually |
 
 The host app's `doctor` command reports which tools were resolved, their versions, and their resolution paths. Missing tools produce diagnostic warnings, not crashes; commands that strictly require a missing tool fail with a clear error pointing at the env var.
 

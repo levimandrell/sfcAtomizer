@@ -11,8 +11,11 @@
 //! Resolved tools are version-probed with `--version`; failures are
 //! non-fatal (the tool stays resolved, `version` stays `None`).
 //!
-//! Mesen2 is intentionally never PATH-resolved or version-probed —
-//! SPEC §17.1 specifies it is launched manually.
+//! Mesen2 is never version-probed (SPEC §17.1 — launched manually).
+//! M1.6 added a PATH fallback after PM confirmed Mesen2 ships as a
+//! single GUI binary `Mesen.exe` (no separate CLI); the resolver
+//! looks for `Mesen.exe` / `Mesen` / `Mesen2.exe` after the env-var
+//! check.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -167,7 +170,8 @@ pub fn resolve_snes_spc_oracle(workspace_root: &Path) -> ResolvedTool {
     }
 }
 
-/// Resolve Mesen2: env-only per SPEC §17.1, no version probe.
+/// Resolve Mesen2: env → PATH → missing. No version probe per
+/// SPEC §17.1 (Mesen2 is the manual-audition path only).
 pub fn resolve_mesen2() -> ResolvedTool {
     let mut searched = Vec::new();
     searched.push(format!("env:{MESEN2_ENV}"));
@@ -181,6 +185,30 @@ pub fn resolve_mesen2() -> ResolvedTool {
             source: ToolSource::Env,
             searched: Vec::new(),
         };
+    }
+
+    // PATH fallback (M1.6). Mesen2 ships as a single GUI binary.
+    // Engineer trial: user has `C:\tools\Mesen.exe`. Defensive list
+    // covers the canonical name plus the bare POSIX form and an
+    // explicit `Mesen2.exe` rename in case a user's binary follows
+    // that convention.
+    let names: &[&str] = if cfg!(windows) {
+        &["Mesen.exe", "Mesen2.exe", "Mesen"]
+    } else {
+        &["Mesen", "Mesen2", "mesen", "mesen2"]
+    };
+    for name in names {
+        searched.push((*name).to_string());
+        if let Some(p) = which_on_path(name) {
+            return ResolvedTool {
+                name: "mesen2".to_string(),
+                resolved: true,
+                path: Some(p),
+                version: None,
+                source: ToolSource::Path,
+                searched: Vec::new(),
+            };
+        }
     }
 
     ResolvedTool {
@@ -254,20 +282,88 @@ mod tests {
         }
     }
 
+    /// Sentinel-based PATH-fallback test: drop a fake `Mesen.exe`
+    /// (or `Mesen` on POSIX) into a tempdir, prepend that dir to PATH,
+    /// clear `SFCWC_MESEN2`, and confirm the resolver finds it. Using
+    /// process-wide env mutation here is racy in parallel tests; this
+    /// is the only test that touches PATH, so the parallel surface is
+    /// tiny — restore PATH at the end regardless of failure.
     #[test]
-    fn mesen2_no_path_fallback() {
-        // Without SFCWC_MESEN2 set to a real file, mesen2 must report
-        // missing — even if a binary called `mesen2` exists on PATH.
+    fn mesen2_path_fallback_finds_mesen_exe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exe_name = if cfg!(windows) { "Mesen.exe" } else { "Mesen" };
+        let sentinel = dir.path().join(exe_name);
+        std::fs::write(&sentinel, b"fake mesen").expect("write sentinel");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&sentinel).unwrap().permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&sentinel, perm).unwrap();
+        }
+
+        let saved_path = std::env::var_os("PATH");
+        let saved_env = std::env::var_os(MESEN2_ENV);
+
+        // Build a PATH with our tempdir at the front.
+        let new_path = {
+            let mut paths: Vec<PathBuf> = vec![dir.path().to_path_buf()];
+            if let Some(existing) = saved_path.as_ref() {
+                paths.extend(std::env::split_paths(existing));
+            }
+            std::env::join_paths(paths).expect("join_paths")
+        };
+        // SAFETY: tests in this module are the only callers; the
+        // restore-on-drop pattern below covers panic-paths via the
+        // explicit set_var calls at the end.
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+            std::env::remove_var(MESEN2_ENV);
+        }
+
+        let result = resolve_mesen2();
+
+        // Restore env regardless of assertion outcome.
+        unsafe {
+            match saved_path {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+            match saved_env {
+                Some(p) => std::env::set_var(MESEN2_ENV, p),
+                None => std::env::remove_var(MESEN2_ENV),
+            }
+        }
+
+        assert!(result.resolved, "expected mesen2 to resolve via PATH");
+        assert_eq!(result.source, ToolSource::Path);
+        let resolved_path = result.path.expect("resolved path");
+        // Compare canonical-ish: file_name should match.
+        assert_eq!(
+            resolved_path.file_name().and_then(|s| s.to_str()),
+            Some(exe_name)
+        );
+    }
+
+    #[test]
+    fn mesen2_resolution_is_env_or_path_or_missing() {
+        // With M1.6's PATH fallback, mesen2 may now resolve via PATH
+        // when `Mesen.exe` lives in a directory on PATH (e.g. user's
+        // `C:\tools` if that's listed). Either way, the call must
+        // return a structurally valid ResolvedTool.
         let r = resolve_mesen2();
-        match std::env::var("SFCWC_MESEN2") {
-            Ok(p) if std::path::Path::new(&p).is_file() => {
-                assert!(r.resolved);
-                assert_eq!(r.source, ToolSource::Env);
-            }
-            _ => {
-                assert!(!r.resolved);
-                assert_eq!(r.source, ToolSource::Missing);
-            }
+        if r.resolved {
+            assert!(matches!(r.source, ToolSource::Env | ToolSource::Path));
+            assert!(r.path.is_some());
+            assert!(r.path.as_ref().unwrap().is_file());
+        } else {
+            assert_eq!(r.source, ToolSource::Missing);
+            // searched list mentions both env and at least one PATH name.
+            assert!(r.searched.iter().any(|s| s.starts_with("env:")));
+            assert!(r
+                .searched
+                .iter()
+                .any(|s| s.contains("Mesen") || s.contains("mesen")));
         }
     }
 
