@@ -6,10 +6,12 @@
 
 pub mod aram;
 pub mod asm;
+pub mod audio;
 pub mod brr;
 pub mod brr_fixtures;
 pub mod driver_proto;
 pub mod echo_validation;
+pub mod import;
 pub mod manifest;
 pub mod module_image;
 pub mod pitch;
