@@ -347,12 +347,22 @@ pub struct CalibrationReport {
     pub report_type: String,
     pub status: CalibrationStatus,
     pub oracle: Option<OracleInfo>,
-    pub fixture_set: Option<String>,
+    pub fixture_set: Option<FixtureSetInfo>,
     pub render: Option<RenderInfo>,
     pub observed: Option<ObservedInfo>,
     pub provisional_tolerances: Option<ProvisionalTolerances>,
     pub ci_gate: bool,
     pub freeze_target: String,
+    /// Soft warnings that don't change `status` but flag unexpected
+    /// observations (e.g. non-zero PCM from a muted M0 smoke).
+    /// Added in M0.5.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+    /// Human-readable error string when `status == Error`. Added in
+    /// M0.5; same shape as `AssembleReport.error` and
+    /// `SpcExportReport.error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl CalibrationReport {
@@ -370,6 +380,8 @@ impl CalibrationReport {
             provisional_tolerances: None,
             ci_gate: false,
             freeze_target: "M1".to_string(),
+            diagnostics: Vec::new(),
+            error: None,
         }
     }
 }
@@ -397,22 +409,30 @@ pub struct RenderInfo {
     pub channels: u8,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ObservedInfo {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_abs_diff: Option<i32>,
-    /// Stored as a string to keep [`CalibrationReport`] `PartialEq`-friendly
-    /// before f64 fields land. M0.5 may widen to a typed numeric.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rms: Option<String>,
+/// Identifies which fixture corpus drove this calibration run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FixtureSetInfo {
+    pub name: String,
+    /// Hex SHA-256 of the input fixture (e.g. the `.spc` file).
+    pub sha256: String,
 }
 
+/// Numeric observations from one calibration render. Voice render is
+/// the per-voice S-DSP path; full-module render comes later. Values
+/// are computed from the oracle output PCM by the host (verified in
+/// Rust, not trusted from the wrapper).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ObservedInfo {
+    pub voice_render_max_abs_lsb: i32,
+    pub voice_render_rms_lsb: f64,
+}
+
+/// Hardcoded provisional tolerances for M0.5. These are not yet CI
+/// gates (`ci_gate: false`); M1 freezes them per SPEC §10.1, §21.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProvisionalTolerances {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub voice_render: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub full_module: Option<String>,
+    pub voice_render_max_abs_lsb: i32,
+    pub voice_render_rms_lsb: f64,
 }
 
 // =============================================================================
@@ -635,7 +655,64 @@ mod tests {
 
     #[test]
     fn calibration_round_trip() {
+        // Stub: every M0.5 optional field absent.
         round_trip(&CalibrationReport::stub());
+
+        // Provisional path with all M0.5 fields populated.
+        let mut r = CalibrationReport::stub();
+        r.status = CalibrationStatus::ProvisionalNotCiGate;
+        r.oracle = Some(OracleInfo {
+            backend: "snes_spc_wrapper".to_string(),
+            version: "snes_spc_oracle 0.1.0 (snes_spc abc...)".to_string(),
+            path: "/abs/path/to/snes_spc_oracle".to_string(),
+        });
+        r.fixture_set = Some(FixtureSetInfo {
+            name: "m0_smoke".to_string(),
+            sha256: "0".repeat(64),
+        });
+        r.render = Some(RenderInfo {
+            sample_rate_hz: 32000,
+            frames: 2048,
+            channels: 2,
+        });
+        r.observed = Some(ObservedInfo {
+            voice_render_max_abs_lsb: 0,
+            voice_render_rms_lsb: 0.0,
+        });
+        r.provisional_tolerances = Some(ProvisionalTolerances {
+            voice_render_max_abs_lsb: 1,
+            voice_render_rms_lsb: 0.25,
+        });
+        round_trip(&r);
+
+        // Diagnostics + error populated.
+        let mut r = CalibrationReport::stub();
+        r.status = CalibrationStatus::Error;
+        r.error = Some("oracle wrapper not resolved".to_string());
+        r.diagnostics = vec!["non-zero PCM from muted smoke".to_string()];
+        round_trip(&r);
+    }
+
+    #[test]
+    fn calibration_v1_without_new_fields_still_parses() {
+        // Pre-M0.5 stub JSON. Inner structs were placeholders; the
+        // outer envelope is what matters for non-breaking parsing.
+        let pre_m05 = r#"{
+            "schema_version": 1,
+            "report_type": "calibration",
+            "status": "not_run",
+            "oracle": null,
+            "fixture_set": null,
+            "render": null,
+            "observed": null,
+            "provisional_tolerances": null,
+            "ci_gate": false,
+            "freeze_target": "M1"
+        }"#;
+        let r: CalibrationReport = serde_json::from_str(pre_m05).unwrap();
+        assert!(r.diagnostics.is_empty());
+        assert_eq!(r.error, None);
+        assert_eq!(r.status, CalibrationStatus::NotRun);
     }
 
     #[test]

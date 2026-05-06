@@ -96,10 +96,22 @@ pub fn resolve_asar() -> ResolvedTool {
     }
 }
 
-/// Resolve the snes_spc oracle wrapper: env → `<workspace>/tools/snes_spc_oracle` → missing.
+/// Resolve the `snes_spc_oracle` wrapper.
+///
+/// Resolution order:
+/// 1. `SFCWC_SNES_SPC_ORACLE` env var (if set and points at a real file).
+/// 2. `<workspace>/tools/snes_spc_oracle/build/Release/snes_spc_oracle(.exe)`
+///    — the CMake/MSVC default location M0.5 added.
+/// 3. `<workspace>/tools/snes_spc_oracle/build/snes_spc_oracle(.exe)`
+///    — single-config generators (Ninja, Unix Makefiles, clang).
+/// 4. Missing.
 pub fn resolve_snes_spc_oracle(workspace_root: &Path) -> ResolvedTool {
-    let mut searched = Vec::new();
-    searched.push(format!("env:{ORACLE_ENV}"));
+    let exe = if cfg!(windows) {
+        "snes_spc_oracle.exe"
+    } else {
+        "snes_spc_oracle"
+    };
+    let mut searched = vec![format!("env:{ORACLE_ENV}")];
 
     if let Some(p) = env_path(ORACLE_ENV) {
         return ResolvedTool {
@@ -112,23 +124,37 @@ pub fn resolve_snes_spc_oracle(workspace_root: &Path) -> ResolvedTool {
         };
     }
 
-    let exe_name = if cfg!(windows) {
-        "snes_spc_oracle.exe"
-    } else {
-        "snes_spc_oracle"
-    };
-    let default = workspace_root.join("tools").join(exe_name);
-    let default_display = format!("tools/{exe_name}");
-    searched.push(default_display);
-    if default.is_file() {
-        return ResolvedTool {
-            name: "snes_spc_oracle".to_string(),
-            resolved: true,
-            version: probe_version(&default),
-            path: Some(default),
-            source: ToolSource::Default,
-            searched: Vec::new(),
-        };
+    let candidates: [(PathBuf, String); 2] = [
+        (
+            workspace_root
+                .join("tools")
+                .join("snes_spc_oracle")
+                .join("build")
+                .join("Release")
+                .join(exe),
+            format!("tools/snes_spc_oracle/build/Release/{exe}"),
+        ),
+        (
+            workspace_root
+                .join("tools")
+                .join("snes_spc_oracle")
+                .join("build")
+                .join(exe),
+            format!("tools/snes_spc_oracle/build/{exe}"),
+        ),
+    ];
+    for (cand, display) in &candidates {
+        searched.push(display.clone());
+        if cand.is_file() {
+            return ResolvedTool {
+                name: "snes_spc_oracle".to_string(),
+                resolved: true,
+                version: probe_version(cand),
+                path: Some(cand.clone()),
+                source: ToolSource::Default,
+                searched: Vec::new(),
+            };
+        }
     }
 
     ResolvedTool {
