@@ -2,12 +2,11 @@
 
 ## Current milestone
 
-**M1 in progress — encoder, loop finder, audition WAV all live.**
-`sfcwc encode-brr`, `sfcwc preview-brr`, `sfcwc find-loop-candidates`
-plus GUI loop-edit + Preview BRR + Find Loop Candidates modal all
-flow end-to-end. M1 BRR encoder round-trips through the M0.2 decoder
-with peak error 55 LSBs on an amplitude-8000 sine (well under the
-brief's <256 threshold).
+**M1 in progress — packer + ARAM meter live.** `sfcwc pack` runs
+project → encode-each → ARAM image + map. GUI shows the meter as a
+segmented bar with echo callout, numeric breakdown, and warnings;
+recomputes on edits. Driver code is a 4 KiB zero placeholder until
+M1.5 replaces it with the assembled `sample_basic` driver.
 
 **M0 artifacts are producer-side only.** M1 owns the first audible
 driver. The NOP+BRA M0 smoke driver (`core/fixtures/asm/m0_smoke.asm`)
@@ -15,6 +14,63 @@ is intentionally non-functional and will be replaced wholesale at
 M1.5 — do not reuse it as a base for M1.5 driver work.
 
 ## Last pass
+
+**Pass M1.4 — ARAM packer v1 + ARAM meter.**
+
+- Phase C: `AramMapReport` extended with four optional M1 meter
+  fields — `echo: AramEchoSummary`, `source_directory:
+  AramSourceDirSummary`, `samples: AramSamplesSummary`, `warnings`.
+  `#[serde(default, skip_serializing_if)]` on all four keeps M0.6
+  manifests parseable and round-tripping unchanged.
+- Phase A/B/D/E/F: New `core::packer` module — single source of
+  truth for M1 region layout. Per-sample BRR pool laid out in
+  declaration order at the page after the source directory; each
+  source-dir entry packs `(start_addr_le, loop_addr_le)` with
+  `loop_addr = start_addr + loop_block * 9` for looped, `=
+  start_addr` for one-shots. Returns a `PackOutput` carrying the
+  64 KB `aram_image` and the populated `AramMapReport`.
+- Phase G CLI: New `sfcwc pack` subcommand. Loads + validates the
+  project, decodes audio, encodes BRR via the M1.3 encoder, packs,
+  writes image + map. Exit codes 0 / 1 / 2 / 3 for ok / IO / project-
+  invalid / pack-error. Stderr summary line lists sample count,
+  total BRR bytes, echo state, free %, image SHA, map path.
+- Phase G GUI: New ARAM meter view in the project detail panel —
+  segmented horizontal bar with one color per region kind, echo
+  callout (large text + warning when `writeback_safe=false`),
+  numeric region breakdown, warnings list. Recomputes on project
+  load, sample edits, loop-candidate apply, and a manual Refresh
+  button. Encoder + packer run in-process for sub-second feedback;
+  failed recomputes leave the previous meter intact and surface
+  the error inline.
+- Phase H: 14 packer unit tests (round-trip layout, loop addresses,
+  echo math, overflow, alignment, bounds, fixed-region invariance,
+  map partition, no-collisions, echo summary consistent with image),
+  4 CLI integration tests (happy path, echo overflow → exit 3,
+  invalid project → exit 2, default paths), 5 round-trip tests for
+  the new report struct types + a pre-M1.4 backwards-parse test.
+  269 tests across the workspace.
+- Adjacent fix: `core::import` was treating bare-filename project
+  paths (no slash) as having parent `Some("")`, which then failed
+  to canonicalize and surfaced as a confusing "path traversal
+  refused: " message. Now folds empty-parent and `None`-parent both
+  to "." consistently.
+
+`cargo check`, `cargo fmt --check`, `cargo clippy --all-targets`,
+`cargo test` all green.
+
+### Spec ambiguity flagged
+
+The brief's "echo_end = 0xFFC0" math gives an ESA-misaligned
+`echo_start = 0xDFC0` for EDL=4: `ESA*0x100` would point at
+`0xDF00`, leaving 0xC0 bytes of the buffer unaddressable. The
+correct M1-conservative interpretation is `echo_end = 0xFF00`
+(largest page boundary at or below the IPL ROM shadow). The 192
+bytes between `0xFF00` and `0xFFC0` are reported as
+`ipl_rom_safe_pad`. ESA values in the brief's example (e.g.
+`ESA=$DF` for EDL=4) are correct; only the start-address arithmetic
+needed re-derivation.
+
+## Previous passes
 
 **Pass M1.3 — Loop selection + BRR encoder + audition WAV.**
 
@@ -610,6 +666,43 @@ test` all green.
   bytes alongside max_abs/rms; the bundle pulls it from one place
   rather than parsing the wrapper's report.
 
+### M1 packer / ARAM meter decisions (M1.4)
+
+- **Driver code budget M1.4: 4 KiB at $0200..$1200** (`DRIVER_CODE_BUDGET_M1`).
+  M1.4 fills with zeros (placeholder). M1.5 ships the real
+  assembled `sample_basic` driver in the same window. The budget
+  is round-aligned to the page boundary so the source directory
+  always lands at `$1200` (`DIR` register = `$12`) regardless of
+  the actual driver size.
+- **Source directory placement: page-aligned, padded to next page**
+  (M1.4): 4 bytes/entry (start_addr_le, loop_addr_le). The page-
+  pad rolls into the `source_directory` region in the map so the
+  BRR pool always starts on a clean page boundary.
+- **Echo placement: page-aligned, ends at `$FF00`** (M1.4): largest
+  page boundary at or below the `$FFC0` IPL ROM shadow. ESA =
+  `echo_start >> 8` is well-defined for any EDL ∈ 1..=15. The 192
+  bytes `[$FF00, $FFC0)` are reported as `ipl_rom_safe_pad`. The
+  brief's "echo_end = 0xFFC0" was ESA-misaligned and corrected
+  here.
+- **Multi-sample layout: single contiguous BRR pool** (M1.4). No
+  inter-sample gaps, no per-sample regions in the map (only one
+  `sample_brr_pool` region; per-sample bounds live in
+  `samples.per_sample`). M2+ may split when atom pools land.
+- **Loop addresses: `start_addr + loop_block * 9` for looped;
+  `loop_addr = start_addr` for one-shots** (M1.4). The S-DSP's
+  END flag in the last block handles non-loop termination; loop
+  flag handles wrap-back.
+- **Map report extensions are non-breaking** (M1.4): all four new
+  fields (`echo`, `source_directory`, `samples`, `warnings`) are
+  `Option`/`Vec` with `serde(default, skip_serializing_if)`.
+  M0.6 manifests still parse, M0 acceptance + `m0-status`
+  unaffected. `SCHEMA_VERSION` stays at 1.
+- **Meter recompute is synchronous, in-process** (M1.4): the GUI
+  re-runs decode + encode + pack on the UI thread when the project
+  changes. Sub-second for realistic projects; no `Command::new`
+  overhead. Failed recomputes leave the prior meter visible and
+  surface the error inline.
+
 ### M1 encoder / loop / audition decisions (M1.3)
 
 - **Encoder scoring: peak-first, RMS-tiebreak** (M1.3): brief
@@ -836,7 +929,8 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M1.4+ — TBD by PM.** With encoder, loop finder, audition WAV
-and the matching GUI surfaces in place, M1 can move on to driver
-runtime work, sequence bytecode, or SPC export from a real
-project rather than the muted M0 smoke. PM to brief.
+**M1.5 — first real SPC700 driver + `.spc` audible playback.**
+PM to brief. The packer reserves a 4 KiB driver region at `$0200`
+that M1.4 fills with zeros; M1.5 replaces with the assembled
+`sample_basic` driver and wires `.spc` export to consume the M1
+ARAM image rather than the muted M0 smoke contract.

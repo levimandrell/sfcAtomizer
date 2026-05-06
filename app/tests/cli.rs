@@ -1295,6 +1295,157 @@ fn preview_brr_writes_wav_and_report() {
     assert_eq!(v["sample_rate_hz"], 32000);
 }
 
+// =============================================================================
+// M1.4 — pack
+// =============================================================================
+
+fn make_project_with_one_imported_sample(dir: &Path, name: &str) -> PathBuf {
+    let proj = dir.join(format!("{name}.sfcproj.json"));
+    Command::new(bin())
+        .args(["new-project", "--out"])
+        .arg(&proj)
+        .args(["--name", name])
+        .output()
+        .unwrap();
+    let audio = dir.join(format!("{name}.wav"));
+    let pcm = synth_sine_pcm(256, 64.0, 8000.0);
+    write_pcm16_wav_with_samples(&audio, 32_000, 1, &pcm);
+    let imp = Command::new(bin())
+        .args(["import", "--project"])
+        .arg(&proj)
+        .args(["--audio"])
+        .arg(&audio)
+        .output()
+        .unwrap();
+    assert_eq!(imp.status.code(), Some(0), "{:?}", imp);
+    proj
+}
+
+#[test]
+fn cli_pack_happy_path_single_sample() {
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "single");
+    let image = dir.path().join("aram.bin");
+    let map = dir.path().join("aram-map.json");
+
+    let out = Command::new(bin())
+        .args(["pack", "--project"])
+        .arg(&proj)
+        .args(["--out-image"])
+        .arg(&image)
+        .args(["--out-map"])
+        .arg(&map)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let bytes = std::fs::read(&image).unwrap();
+    assert_eq!(bytes.len(), 65536);
+
+    let v = read_json(&map);
+    assert_envelope(&v, "aram_map");
+    let regions = v["regions"].as_array().unwrap();
+    let region_names: Vec<&str> = regions.iter().filter_map(|r| r["name"].as_str()).collect();
+    assert!(region_names.contains(&"driver_code"));
+    assert!(region_names.contains(&"source_directory"));
+    assert!(region_names.contains(&"sample_brr_pool"));
+    assert!(region_names.contains(&"ipl_rom_shadow"));
+    assert!(v["echo"]["enabled"] == false);
+    assert_eq!(v["samples"]["total_samples"], 1);
+    assert!(v["source_directory"]["start_addr"].as_u64().unwrap() == 0x1200);
+}
+
+#[test]
+fn cli_pack_with_echo_overflow_returns_3() {
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "overflow");
+    // Mutate the master_echo block to enabled=true / edl=15 via
+    // serde_json so we don't accidentally flip the sample's
+    // looped.enabled with a string replace.
+    let text = std::fs::read_to_string(&proj).unwrap();
+    let mut v: Value = serde_json::from_str(&text).unwrap();
+    v["master_echo"]["enabled"] = serde_json::json!(true);
+    v["master_echo"]["edl"] = serde_json::json!(15);
+    std::fs::write(&proj, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+    // EDL=15 echo eats 30 KB. Driver 4 KB + srcdir page = ~4.25 KB.
+    // Available pool ≈ 29.7 KB. Add a sample big enough to push past
+    // that on its own (65K frames → 4063 BRR blocks → 36567 B).
+    let big = dir.path().join("huge.wav");
+    let huge_pcm = synth_sine_pcm(65_000, 64.0, 8000.0);
+    write_pcm16_wav_with_samples(&big, 32_000, 1, &huge_pcm);
+    let imp = Command::new(bin())
+        .args(["import", "--project"])
+        .arg(&proj)
+        .args(["--audio"])
+        .arg(&big)
+        .output()
+        .unwrap();
+    assert_eq!(imp.status.code(), Some(0));
+
+    let out = Command::new(bin())
+        .args(["pack", "--project"])
+        .arg(&proj)
+        .args(["--out-image"])
+        .arg(dir.path().join("aram.bin"))
+        .args(["--out-map"])
+        .arg(dir.path().join("aram-map.json"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn cli_pack_invalid_project_returns_2() {
+    let dir = TempDir::new().unwrap();
+    let proj = dir.path().join("bad.sfcproj.json");
+    Command::new(bin())
+        .args(["new-project", "--out"])
+        .arg(&proj)
+        .args(["--name", "bad"])
+        .output()
+        .unwrap();
+    // Template has empty sample_pool → fails validation rule #9.
+    let out = Command::new(bin())
+        .args(["pack", "--project"])
+        .arg(&proj)
+        .args(["--out-image"])
+        .arg(dir.path().join("aram.bin"))
+        .args(["--out-map"])
+        .arg(dir.path().join("aram-map.json"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn cli_pack_writes_image_and_map_at_default_paths() {
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "defaults");
+
+    // Run pack with no --out-image / --out-map; defaults land under
+    // build/m1/. Override CWD so we don't pollute the workspace.
+    let out = Command::new(bin())
+        .args(["pack", "--project"])
+        .arg(&proj)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    assert!(dir.path().join("build/m1/aram-image.bin").exists());
+    assert!(dir.path().join("build/m1/aram-map.json").exists());
+}
+
 #[test]
 fn find_loop_candidates_writes_report() {
     let dir = TempDir::new().unwrap();
