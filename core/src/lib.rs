@@ -11,6 +11,7 @@ pub mod audition;
 pub mod brr;
 pub mod brr_encoder;
 pub mod brr_fixtures;
+pub mod driver_build;
 pub mod driver_proto;
 pub mod echo_validation;
 pub mod import;
