@@ -2,20 +2,133 @@
 
 ## Current milestone
 
-**M1 complete.** `sfcwc m1-acceptance` chains the full M1
-pipeline (doctor → validate → compile-spc → verify-spc-audible →
-compile-sfc → verify-sfc-structure → verify-sfc-modules-audible)
-into a single `M1Manifest` with aggregate `BundleStatus`
-semantics analogous to `m0-acceptance`. End-to-end run on this
-host: **bundle.status=ok**, all 9 step reports written, all
-SHA cross-references match, integrity verified. Audible
-thresholds (`min_max_abs=1000`, `min_rms=200`) are frozen here
-per SPEC §21; regressions become CI failures from M2 onward.
+**M2 contracts frozen; M1 baselines rebased.** M1 driver
+token-bootstrap and loader ack-verify hotfixes (consultant
+findings #1 and #10) shifted every M1 baseline SHA — driver
+324 → 325 bytes, loader 581 → 588 bytes; audible output
+unchanged (`max_abs=11072`, `rms=5519.6`). All 8 SPEC
+promotions from STATUS landed; 7 M2 architectural contract
+sections from Appendix A landed (capability manifest M2,
+sequence bytecode v2, schema v2, driver `multi_voice_atom`,
+voice setup table, ARAM region order, M2 acceptance
+thresholds). Cheap M2 type skeletons (`core::bytecode`,
+`core::atom`, `core::project_v2`) landed; validation +
+migration bodies are `todo!()` for M2.1.
 
-**M2 prep next.** PM-led consultant round to plan M2 sub-passes
-(driver capability system per SPEC §M2 / §3 capability manifest).
+**M2.1 next.** Project schema v2 implementation:
+`ProjectV2::validate` body, `migrate_from_v1` body, host
+load/save plumbing. PM to brief.
 
 ## Last pass
+
+**Pass M2.0 — Contracts freeze + M1 hotfix.**
+
+- **Phase A (consultant #1):** M1 driver
+  `core/fixtures/asm/m1_sample_basic.asm` now seeds
+  `dp_last_token` from `$F4` at init via `mov a, $f4 ; mov
+  $00, a` (encoded `E4 F4 C4 00`) before writing the
+  ready signature. Pre-fix, the driver wrote zero into the
+  token slot, then read `$F4` in main loop — the IPL exec
+  path leaves the kick byte on `$F4`, so the first poll
+  fired the invalid-command path and stomped the ready
+  signature with `$EE`, tripping the loader's
+  `wait_driver_ready` timeout. Driver size: 324 → 325 bytes.
+- **Phase B (consultant #10):** 65816 loader's
+  `command_reset_to_ipl` wait loop now verifies BOTH the
+  ack code (`$82` on `$2141`) AND the round-trip token
+  (`$42` on `$2140`). Stale acks from a prior driver run
+  no longer pass the gate. Loader size: 581 → 588 bytes.
+- **Phase C (consultant #3):** New
+  `core::audio::check_or_refresh_source_hash` enforces the
+  declared `source.sha256` on every compile path. New
+  `--refresh-source-hash` flag on `compile-spc`,
+  `compile-sfc`, `pack` updates the project in place when
+  the user explicitly asks. New
+  `AudioDecodeError::SourceHashMismatch` variant.
+- **Phase D:** Baseline rebase. New constants locked under
+  `M1 baseline locked SHAs (post-M2.0 rebase)`. M1
+  acceptance still passes end-to-end with
+  `bundle.status=ok`. All audible numbers unchanged
+  (max_abs=11072, rms=5519.6) — confirms the fixes only
+  changed the driver/loader instruction stream, not the
+  audio output.
+- **Phase E (consultant #7):** `core::driver_build` post-
+  slice scan catches the case where the chosen sentinel is
+  inside the driver and the real `driver_end` is later in
+  the image (the failure mode silently truncates the
+  driver). New `DriverBuildError::SentinelCollision`. The
+  current M1 driver does not collide.
+- **Phase F:** 8 STATUS items promoted into SPEC: asar
+  invocation split (§17), M2 packer policy (§15.5),
+  module.bin 32 KiB cap (§15.6), M2 fixture-asset path
+  rule (§16.6), loader fail-mode colour codes (§19.2.1),
+  module v1 magic stability (§19.4), spin-count semantics
+  + ack-verification rule (§19.2), audible threshold floor
+  + sfc verification scope clarification (§21), oracle
+  process-boundary rule (§17).
+- **Phase G:** 7 M2 architectural contract sections from
+  Appendix A added to SPEC: §5.4 capability manifest M2
+  extensions + enforcement rule, §14.3 sequence bytecode
+  v2 (`SEQ2`) opcodes/operand lengths/source-step
+  lowering, §15.7 voice setup table byte format, §16.9
+  project schema v2 + atom v0 design, §16.10 migration
+  v1→v2, §20.2 driver `multi_voice_atom` profile (T0
+  timer, init/main loop, zero-page state, status-flags
+  reservation), §21 M2 acceptance per-channel thresholds
+  + source-step observability.
+- **Phase I:** Cheap Rust type skeletons. `core::bytecode`
+  locks the SEQ2 opcode bytes + region header. `core::atom`
+  declares `AtomSlot` / `AtomKind::AdditiveSingleCycleV0` /
+  `AtomPartial` / `AtomRenderOptions`; `render` body is
+  `todo!()`. `core::project_v2` declares the full v2 type
+  tree (`ProjectV2`, `AtomSequence`, `AtomSequenceStep`,
+  `AtomTransition` tagged-union, `Track` /
+  `TrackKind` tagged-union, `M2Block`); `validate` and
+  `migrate_from_v1` are `todo!()`. All round-trip cleanly
+  through serde.
+- **Phase J:** Regression tests for each M2.0 fix. **347
+  tests across the workspace** (was 326; +21).
+  Token-bootstrap regression locks the new bytes order;
+  sentinel-collision regression confirms a synthetic
+  collision trips `SentinelCollision`; source-SHA tests
+  cover intact / drifted / refreshed paths.
+
+`cargo check`, `cargo fmt --check`, `cargo clippy
+--all-targets`, `cargo test` all green.
+
+### M1 baseline locked SHAs (post-M2.0 rebase)
+
+For the canonical one-sample reference project (8192-frame
+8000-amp sine, 32 kHz, echo off, GAIN=127, single-project
+clone mode for the `.sfc` swap):
+
+```
+M1_DRIVER_CODE_SHA256  = 671ee21ebb207302940075519e1ad0de557a97280038ab12aef7a22994b2bcfe
+M1_DRIVER_CODE_BYTES   = 325                                ; was 324 pre-rebase
+M1_ARAM_IMAGE_SHA256   = 336a6745d0930816ec59a18cd6b5c45ed2f1ed0cb3962621e56ebf8d142bfaff
+M1_SPC_FILE_SHA256     = 264b1eff2dc2fee7d4e36be6f5c3924123d3307eddb059dc04583bae871c4d8e
+M1_SFC_FILE_SHA256     = 263b230a652e0fe05157b0f6c89b1099ac2f8b413802b81ab2c3bba3b1a5610e
+M1_MODULE_A_SHA256     = 456b5f806af384efdc03f07274ce3c4b51cc6437933acd9af8552c2efb7f79cb
+M1_LOADER_SIZE_BYTES   = 588                                ; was 581 pre-rebase
+M1_AUDIBLE_MAX_ABS     = 11072                              ; unchanged from M1.7
+M1_AUDIBLE_RMS         = 5519.6                             ; unchanged from M1.7
+M1_AUDIBLE_THRESHOLDS  = min_max_abs=1000, min_rms=200      ; frozen at M1.7
+```
+
+Pre-rebase commit (M1.7 baseline): `4bf286f` (top of
+`docs: STATUS — M1 complete; lock baseline SHAs;
+consolidate audition queue`).
+
+### Awaiting user audible audition
+
+The M1.6 `.sfc` audition will now PASS on Mesen2 (the
+loader's stale-ack and the driver's bootstrap-token bugs
+are both fixed in this pass). The expected behaviour:
+load → ~5 s of sustained sine → brief gap → sustained
+sine again (clone) → repeats. Queued for user return; the
+M1.5 `.spc` audition was unaffected (unchanged output).
+
+## Previous passes
 
 **Pass M1.7 — M1 acceptance bundle.**
 
@@ -812,26 +925,33 @@ test` all green.
 
 ## Decisions log
 
-### M1 baseline locked SHAs
+### M1 baseline locked SHAs (post-M2.0 rebase)
 
 For the canonical one-sample reference project (8192-frame
 8000-amp sine, 32 kHz, echo off, GAIN=127, single-project
-clone mode for the `.sfc` swap):
+clone mode for the `.sfc` swap). M2.0 rebased every SHA after
+the M1 driver token-bootstrap and loader ack-verify hotfixes
+(consultant findings #1 and #10) altered the driver and
+loader instruction streams.
 
 ```
-M1_DRIVER_CODE_SHA256  = 52f9c26bad6df33875f16ae2ef4a6a4e0e5c265e29af74db103b393daef24955
-M1_DRIVER_CODE_BYTES   = 324
-M1_ARAM_IMAGE_SHA256   = b384617ff4d45c5da965d27bd74926070eb3b4985fb051bcda25165f7bfb54eb
-M1_SPC_FILE_SHA256     = edd02b030e1c0f574c4ff1f64dc80f1c643d2ba18628a6f67a35dc93b8759315
-M1_SFC_FILE_SHA256     = fca07fb5f505f1f6e74c4e37a89d576d81ab94a75878131b12406c1f38f1b2ce
-M1_MODULE_A_SHA256     = d138f81fe1c23f5340a426d3e08b3e79e365e7d787bc6cd522f1a3082dc0da86
-M1_LOADER_SIZE_BYTES   = 581
-M1_AUDIBLE_MAX_ABS     = 11072      ; oracle render of either .spc or
-                                    ; either reconstructed-from-.sfc
-                                    ; module identically
+M1_DRIVER_CODE_SHA256  = 671ee21ebb207302940075519e1ad0de557a97280038ab12aef7a22994b2bcfe
+M1_DRIVER_CODE_BYTES   = 325
+M1_ARAM_IMAGE_SHA256   = 336a6745d0930816ec59a18cd6b5c45ed2f1ed0cb3962621e56ebf8d142bfaff
+M1_SPC_FILE_SHA256     = 264b1eff2dc2fee7d4e36be6f5c3924123d3307eddb059dc04583bae871c4d8e
+M1_SFC_FILE_SHA256     = 263b230a652e0fe05157b0f6c89b1099ac2f8b413802b81ab2c3bba3b1a5610e
+M1_MODULE_A_SHA256     = 456b5f806af384efdc03f07274ce3c4b51cc6437933acd9af8552c2efb7f79cb
+M1_LOADER_SIZE_BYTES   = 588
+M1_AUDIBLE_MAX_ABS     = 11072      ; oracle render unchanged from M1.7 —
+                                    ; the hotfixes only changed the
+                                    ; driver/loader instruction stream,
+                                    ; not the audio output
 M1_AUDIBLE_RMS         = 5519.6
 M1_AUDIBLE_THRESHOLDS  = min_max_abs=1000, min_rms=200 (frozen at M1.7)
 ```
+
+Pre-rebase commit (M1.7 baseline): `4bf286f`. Old SHAs are
+preserved in commit history; do not pin against them.
 
 Locked by `m1-acceptance` and re-checked by `m1-status`. Any
 future change to the source `.asm`, the BRR encoder, the
@@ -955,6 +1075,58 @@ these SHAs is a producer-side regression and must be flagged.
   `cmd_calibrate_oracle` computes the SHA on the in-memory PCM
   bytes alongside max_abs/rms; the bundle pulls it from one place
   rather than parsing the wrapper's report.
+
+### M2.0 — Contracts freeze + M1 hotfix decisions
+
+- **M1 driver token-bootstrap fix** (consultant #1, M2.0).
+  Driver seeds `dp_last_token` from `$F4` at init via
+  `mov a, $f4 ; mov $00, a` (encoded `E4 F4 C4 00`) before
+  writing the ready signature. The `.spc` / oracle path was
+  unaffected because `spc_load_spc` initialises `$F4` from
+  the embedded ARAM image (zero); only the `.sfc` IPL exec
+  path tripped the bug.
+- **Loader ack token+code verify** (consultant #10, M2.0).
+  `command_reset_to_ipl` wait loop now checks both the ack
+  code on `$2141` AND the round-trip token on `$2140`. Stale
+  acks no longer pass.
+- **Compile-time source SHA enforcement** (consultant #3,
+  M2.0). Every compile path verifies `source.sha256` against
+  the live file before decode. `--refresh-source-hash` is the
+  opt-in escape hatch; default is hard error on mismatch.
+  Never auto-on during `m1-acceptance` — that would mask the
+  drift it's meant to detect.
+- **Driver size detection: sentinel post-scan collision check**
+  (consultant #7, M2.0). After slicing at the first
+  `$DE $AD $BE $EF` occurrence, the driver_build scans the
+  rest of the image (`$0204..$FFC0`) for nonzero bytes — any
+  trailing content means the slicer truncated mid-driver and
+  the real `driver_end` lies past an accidental sentinel. The
+  M1 driver does not collide; the check is a canary for M2+.
+- **Audible thresholds remain frozen at M1.7 floor** (M2.0).
+  The M1 thresholds (`min_max_abs=1000`, `min_rms=200`) are
+  non-silence gates, not quality gates. M2 adds per-channel
+  checks AND combined-energy consistency AND source-step
+  observability (Appendix A.7 / SPEC §21 M2); none relax the
+  M1 floor.
+- **M1 baselines rebased; pre-M2.0 SHAs not pinned** (M2.0).
+  The M1.7 baseline SHA block is replaced verbatim with the
+  post-rebase values. Pre-rebase commit `4bf286f` is the
+  canonical reference for the prior baselines; tests use
+  computed-not-asserted SHAs throughout, so no test code
+  hardcoded the old values.
+- **M2 architectural contracts frozen** (M2.0). Per Appendix
+  A: capability manifest M2 (§5.4), sequence bytecode v2
+  (§14.3), voice setup table (§15.7), project schema v2
+  (§16.9), migration v1→v2 (§16.10), driver
+  `multi_voice_atom` profile (§20.2), M2 oracle thresholds
+  + source-step observability (§21 M2). Implementation lands
+  M2.1+ — these are SPEC-canonical, types-follow.
+- **M2 status flags reservation deferred to M2.5** (M2.0).
+  Two surface options reserved: sibling status byte on `$F6`
+  (replacing `driver_version`) vs `driver_version` bump to
+  `$02` with reinterpreted `driver_out_3`. Either way the
+  ready signature on `driver_out_0..1` stays `$A5 $5A`. M2.5
+  picks one when shipping the multi-voice driver.
 
 ### M1 acceptance bundle decisions (M1.7)
 
@@ -1367,8 +1539,8 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M2 prep — PM-led consultant round.** With M1 closed
-(audible `.spc`, audible-on-paper `.sfc`, bundle acceptance
-gate, frozen thresholds), the next pass is consultant-led
-planning of the M2 sub-passes (driver capability system,
-SPEC §M2 / §3 capability manifest, feature flag wiring).
+**M2.1 — Project schema v2 + migration.**
+`ProjectV2::validate` body, `migrate_from_v1` body, host
+load/save plumbing. The type tree, validation rules, and
+migration table are all already locked in SPEC §16.9 / §16.10
+and the `core::project_v2` skeleton — M2.1 just fills bodies.
