@@ -221,6 +221,17 @@ pub struct AssembleReport {
     pub stdout_lines: u32,
     pub stderr_lines: u32,
     pub status: AssembleStatus,
+    /// Hex-encoded SHA-256 of the assembled 64 KB ARAM image. Added
+    /// in M0.3 alongside the asar wiring; older consumers that
+    /// don't know the field still parse the report (omitted from
+    /// JSON when `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_image_sha256: Option<String>,
+    /// Human-readable error message when `status == Error`. Added
+    /// in M0.3 so failure-as-data carries a diagnostic without
+    /// requiring a non-zero process exit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl AssembleReport {
@@ -240,6 +251,8 @@ impl AssembleReport {
             stdout_lines: 0,
             stderr_lines: 0,
             status: AssembleStatus::NotRun,
+            output_image_sha256: None,
+            error: None,
         }
     }
 }
@@ -490,7 +503,61 @@ mod tests {
 
     #[test]
     fn assemble_round_trip() {
+        // Stub: both new optional fields absent.
         round_trip(&AssembleReport::stub());
+
+        // Both new optional fields populated (success path).
+        let mut r = AssembleReport::stub();
+        r.status = AssembleStatus::Ok;
+        r.backend_version = "Asar 1.91, ...".to_string();
+        r.input_path = Some("core/fixtures/asm/m0_smoke.asm".to_string());
+        r.output_path = Some("build/m0/driver.bin".to_string());
+        r.output_bytes = 65536;
+        r.exit_code = Some(0);
+        r.output_image_sha256 = Some("abc123".repeat(10) + "abcd"); // 64 hex chars
+        round_trip(&r);
+
+        // error field populated (failure path).
+        let mut r = AssembleReport::stub();
+        r.status = AssembleStatus::Error;
+        r.error = Some("assembler not resolved: set SFCWC_ASAR".to_string());
+        round_trip(&r);
+    }
+
+    #[test]
+    fn assemble_stub_omits_new_optional_fields_in_json() {
+        let json = serde_json::to_string(&AssembleReport::stub()).unwrap();
+        assert!(
+            !json.contains("output_image_sha256"),
+            "stub should omit unset sha: {json}"
+        );
+        assert!(
+            !json.contains("\"error\""),
+            "stub should omit unset error: {json}"
+        );
+    }
+
+    #[test]
+    fn assemble_report_v1_without_new_fields_still_parses() {
+        // Older consumer wrote a report without the M0.3 fields.
+        let pre_m03 = r#"{
+            "schema_version": 1,
+            "report_type": "assemble",
+            "backend": "asar",
+            "backend_version": "unknown",
+            "input_path": null,
+            "input_sha256": null,
+            "output_path": null,
+            "output_bytes": 0,
+            "exit_code": null,
+            "stdout_lines": 0,
+            "stderr_lines": 0,
+            "status": "not_run"
+        }"#;
+        let r: AssembleReport = serde_json::from_str(pre_m03).unwrap();
+        assert_eq!(r.output_image_sha256, None);
+        assert_eq!(r.error, None);
+        assert_eq!(r.status, AssembleStatus::NotRun);
     }
 
     #[test]
