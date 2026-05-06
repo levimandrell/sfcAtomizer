@@ -67,7 +67,15 @@ Apache-2.0 licensing. Used as a normal crate dependency; no
 modifications to upstream source. No additional obligations beyond
 preserving copyright notices on redistribution.
 
-### 4.2 symphonia (M1.1 declared, M1.2 used)
+### 4.2 rfd (M1.2+)
+
+**Dual-licensed MIT OR Apache-2.0.** Compatible with the host's
+Apache-2.0 licensing. Used as a normal crate dependency for native
+file dialogs (File → Open / Save / Import in the `sfcwc-app` GUI);
+no source modifications. No additional obligations beyond preserving
+copyright notices on redistribution.
+
+### 4.3 symphonia (M1.1 declared, M1.2 used)
 
 **MPL-2.0**, file-scope copyleft. Only direct modifications to
 `symphonia` source files would inherit MPL — the licence does not
