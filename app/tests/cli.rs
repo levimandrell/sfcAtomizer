@@ -399,17 +399,211 @@ fn export_spc_smoke_when_aram_missing() {
     );
 }
 
+/// Path to the workspace's build directory of the oracle wrapper, if
+/// the C++ build has been run.
+fn oracle_wrapper_path() -> PathBuf {
+    let exe = if cfg!(windows) {
+        "snes_spc_oracle.exe"
+    } else {
+        "snes_spc_oracle"
+    };
+    workspace_root()
+        .join("tools")
+        .join("snes_spc_oracle")
+        .join("build")
+        .join("Release")
+        .join(exe)
+}
+
+fn oracle_resolved_for_test() -> bool {
+    if std::env::var_os("SFCWC_SNES_SPC_ORACLE").is_some() {
+        return true;
+    }
+    oracle_wrapper_path().is_file()
+        || workspace_root()
+            .join("tools")
+            .join("snes_spc_oracle")
+            .join("build")
+            .join(if cfg!(windows) {
+                "snes_spc_oracle.exe"
+            } else {
+                "snes_spc_oracle"
+            })
+            .is_file()
+}
+
 #[test]
-fn calibrate_oracle_writes_stub() {
+fn calibrate_oracle_when_oracle_resolved() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip calibrate_oracle_when_oracle_resolved: asar not resolved");
+        return;
+    }
+    if !oracle_resolved_for_test() {
+        eprintln!("skip calibrate_oracle_when_oracle_resolved: oracle wrapper not built");
+        return;
+    }
+
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("cal.json");
-    let out = run_with_arg_path(&["calibrate-oracle"], "--out", &path);
-    assert!(out.status.success(), "{:?}", out);
-    let v = read_json(&path);
+    // Step 1: produce a smoke.spc via assemble + export-spc-smoke.
+    let assemble_report = dir.path().join("a.json");
+    let driver_bin = dir.path().join("driver.bin");
+    let spc_report = dir.path().join("spc.json");
+    let smoke_spc = dir.path().join("smoke.spc");
+
+    let out = Command::new(bin())
+        .args(["assemble-smoke", "--source"])
+        .arg(smoke_asm_path())
+        .args(["--out"])
+        .arg(&assemble_report)
+        .args(["--out-image"])
+        .arg(&driver_bin)
+        .output()
+        .expect("run sfcwc");
+    assert!(out.status.success());
+
+    let out = Command::new(bin())
+        .args(["export-spc-smoke", "--aram"])
+        .arg(&driver_bin)
+        .args(["--out"])
+        .arg(&spc_report)
+        .args(["--out-spc"])
+        .arg(&smoke_spc)
+        .arg("--verify-structure")
+        .output()
+        .expect("run sfcwc");
+    assert!(out.status.success());
+
+    // Step 2: calibrate-oracle against the smoke .spc.
+    let cal_report = dir.path().join("cal.json");
+    let pcm_path = dir.path().join("oracle.pcm");
+    let out = Command::new(bin())
+        .args(["calibrate-oracle", "--input-spc"])
+        .arg(&smoke_spc)
+        .args(["--frames", "2048"])
+        .args(["--out"])
+        .arg(&cal_report)
+        .args(["--out-pcm"])
+        .arg(&pcm_path)
+        .current_dir(workspace_root()) // for default-oracle resolution
+        .output()
+        .expect("run sfcwc");
+    assert!(
+        out.status.success(),
+        "calibrate-oracle failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let v = read_json(&cal_report);
     assert_envelope(&v, "calibration");
-    assert_eq!(v["status"], "not_run");
+    assert_eq!(v["status"], "provisional_not_ci_gate");
+    assert_eq!(v["oracle"]["backend"], "snes_spc_wrapper");
+    assert_eq!(v["render"]["frames"], 2048);
+    assert_eq!(v["render"]["sample_rate_hz"], 32000);
+    assert_eq!(v["render"]["channels"], 2);
+    assert_eq!(v["observed"]["voice_render_max_abs_lsb"], 0);
+    assert!(
+        v["observed"]["voice_render_rms_lsb"]
+            .as_f64()
+            .map(|x| x == 0.0)
+            .unwrap_or(false),
+        "rms must be 0.0 for muted smoke: {v}"
+    );
     assert_eq!(v["ci_gate"], false);
     assert_eq!(v["freeze_target"], "M1");
+    assert!(
+        v["error"].is_null(),
+        "no error expected on resolved oracle: {v}"
+    );
+
+    // PCM file: exactly 2048 * 4 = 8192 bytes, all zero.
+    let pcm = std::fs::read(&pcm_path).expect("read pcm");
+    assert_eq!(pcm.len(), 8192);
+    assert!(pcm.iter().all(|&b| b == 0), "muted smoke must be all zeros");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("max_abs=0"),
+        "stderr should announce max_abs=0: {stderr}"
+    );
+}
+
+#[test]
+fn calibrate_oracle_when_oracle_missing() {
+    let dir = TempDir::new().unwrap();
+    let bogus_oracle = dir.path().join("not-an-oracle.exe");
+    let cal_report = dir.path().join("cal.json");
+    let pcm_path = dir.path().join("oracle.pcm");
+    let smoke_spc = dir.path().join("placeholder.spc");
+    // The oracle-missing branch fires before we open the SPC, so the
+    // file doesn't have to exist.
+
+    let out = Command::new(bin())
+        .env("SFCWC_SNES_SPC_ORACLE", &bogus_oracle)
+        .env("PATH", dir.path()) // isolated PATH with no asar/oracle
+        .args(["calibrate-oracle", "--input-spc"])
+        .arg(&smoke_spc)
+        .args(["--out"])
+        .arg(&cal_report)
+        .args(["--out-pcm"])
+        .arg(&pcm_path)
+        // Force the workspace-default branch to also miss by pointing
+        // cwd at an empty tempdir (no tools/snes_spc_oracle/build).
+        .current_dir(dir.path())
+        .output()
+        .expect("run sfcwc");
+    assert!(
+        out.status.success(),
+        "expected failure-as-data exit 0: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let v = read_json(&cal_report);
+    assert_envelope(&v, "calibration");
+    assert_eq!(v["status"], "error");
+    let err = v["error"].as_str().expect("error string");
+    assert!(
+        err.contains("oracle wrapper not resolved"),
+        "error should mention oracle: {err}"
+    );
+    assert!(
+        !pcm_path.exists(),
+        "oracle PCM must not be created when oracle is missing"
+    );
+}
+
+#[test]
+fn calibrate_oracle_when_input_spc_missing() {
+    if !oracle_resolved_for_test() {
+        eprintln!("skip calibrate_oracle_when_input_spc_missing: oracle wrapper not built");
+        return;
+    }
+
+    let dir = TempDir::new().unwrap();
+    let cal_report = dir.path().join("cal.json");
+    let pcm_path = dir.path().join("oracle.pcm");
+    let bogus_spc = dir.path().join("does-not-exist.spc");
+
+    let out = Command::new(bin())
+        .args(["calibrate-oracle", "--input-spc"])
+        .arg(&bogus_spc)
+        .args(["--out"])
+        .arg(&cal_report)
+        .args(["--out-pcm"])
+        .arg(&pcm_path)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run sfcwc");
+    assert!(out.status.success(), "{:?}", out);
+
+    let v = read_json(&cal_report);
+    assert_envelope(&v, "calibration");
+    assert_eq!(v["status"], "error");
+    let err = v["error"].as_str().expect("error string");
+    assert!(
+        err.to_lowercase().contains("input spc"),
+        "error should mention input SPC: {err}"
+    );
 }
 
 #[test]

@@ -14,7 +14,8 @@ use sfc_atomizer_core::asm::{
 use sfc_atomizer_core::brr_fixtures::{run_fixture, M0_RAW_DECODE_FIXTURES};
 use sfc_atomizer_core::report::{
     AramMapReport, AssembleReport, AssembleStatus, BrrFixtureReport, CalibrationReport,
-    DoctorReport, DoctorStatus, DoctorTools, M0Manifest, RustInfo, SpcExportReport,
+    CalibrationStatus, DoctorReport, DoctorStatus, DoctorTools, FixtureSetInfo, M0Manifest,
+    ObservedInfo, OracleInfo, ProvisionalTolerances, RenderInfo, RustInfo, SpcExportReport,
     SpcInitialState, SpcStatus, ToolStatus, SCHEMA_VERSION,
 };
 use sfc_atomizer_core::spc::{
@@ -70,12 +71,20 @@ enum Command {
         #[arg(long)]
         verify_structure: bool,
     },
-    /// Run the oracle calibration harness (M0.1: stub report).
+    /// Render the M0 smoke `.spc` through the snes_spc oracle wrapper
+    /// and emit a calibration report.
     CalibrateOracle {
+        /// Override `SFCWC_SNES_SPC_ORACLE` and the workspace defaults.
         #[arg(long)]
         oracle: Option<PathBuf>,
+        #[arg(long, default_value = "build/m0/smoke.spc")]
+        input_spc: PathBuf,
+        #[arg(long, default_value_t = 2048u32)]
+        frames: u32,
         #[arg(long, default_value = "build/m0/calibration-report.json")]
         out: PathBuf,
+        #[arg(long, default_value = "build/m0/oracle.pcm_s16le")]
+        out_pcm: PathBuf,
     },
     /// Run all M0 acceptance steps and write a manifest pointing at the reports.
     M0Acceptance {
@@ -124,7 +133,13 @@ fn run(cli: Cli) -> Result<(), CliError> {
             out_spc,
             verify_structure,
         } => cmd_export_spc_smoke(&aram, &out, &out_spc, verify_structure),
-        Command::CalibrateOracle { oracle, out } => cmd_calibrate_oracle(oracle.as_deref(), &out),
+        Command::CalibrateOracle {
+            oracle,
+            input_spc,
+            frames,
+            out,
+            out_pcm,
+        } => cmd_calibrate_oracle(oracle.as_deref(), &input_spc, frames, &out, &out_pcm),
         Command::M0Acceptance { out } => cmd_m0_acceptance(&out),
     }
 }
@@ -582,11 +597,237 @@ fn cpu_to_initial_state(cpu: &SpcCpuState) -> SpcInitialState {
     }
 }
 
-fn cmd_calibrate_oracle(_oracle: Option<&Path>, out: &Path) -> Result<(), CliError> {
-    let report = CalibrationReport::stub();
-    write_json(out, &report)?;
-    eprintln!("calibrate-oracle: wrote {}", out.display());
+fn cmd_calibrate_oracle(
+    explicit_oracle: Option<&Path>,
+    input_spc: &Path,
+    frames: u32,
+    report_out: &Path,
+    pcm_out: &Path,
+) -> Result<(), CliError> {
+    let workspace_root = std::env::current_dir().map_err(CliError::Cwd)?;
+
+    let mut report = CalibrationReport::stub();
+    report.fixture_set = Some(FixtureSetInfo {
+        name: "m0_smoke".to_string(),
+        sha256: sha256_hex_file(input_spc).unwrap_or_default(),
+    });
+    report.render = Some(RenderInfo {
+        sample_rate_hz: 32000,
+        frames,
+        channels: 2,
+    });
+    report.provisional_tolerances = Some(ProvisionalTolerances {
+        voice_render_max_abs_lsb: 1,
+        voice_render_rms_lsb: 0.25,
+    });
+
+    // Oracle resolution: explicit --oracle wins, then env / workspace
+    // defaults via core::tools.
+    let oracle_path = match resolve_oracle(explicit_oracle, &workspace_root) {
+        Some(p) => p,
+        None => {
+            report.status = CalibrationStatus::Error;
+            report.error = Some(
+                "oracle wrapper not resolved (set SFCWC_SNES_SPC_ORACLE or build it under tools/snes_spc_oracle/build/Release)".to_string(),
+            );
+            write_json(report_out, &report)?;
+            eprintln!(
+                "calibrate-oracle: oracle wrapper not resolved (set SFCWC_SNES_SPC_ORACLE); report -> {}",
+                report_out.display()
+            );
+            return Ok(());
+        }
+    };
+
+    let oracle_version = probe_oracle_version(&oracle_path);
+    report.oracle = Some(OracleInfo {
+        backend: "snes_spc_wrapper".to_string(),
+        version: oracle_version.clone(),
+        path: oracle_path.display().to_string(),
+    });
+
+    if !input_spc.is_file() {
+        report.status = CalibrationStatus::Error;
+        report.error = Some(format!(
+            "input SPC missing or not a file: {}",
+            input_spc.display()
+        ));
+        write_json(report_out, &report)?;
+        eprintln!(
+            "calibrate-oracle: input SPC missing at {}; report -> {}",
+            input_spc.display(),
+            report_out.display()
+        );
+        return Ok(());
+    }
+
+    // Wrapper writes its own report next to ours.
+    let mut wrapper_report_path = report_out.to_path_buf();
+    let wrapper_report_name = match wrapper_report_path.file_name() {
+        Some(n) => format!("{}.oracle-side.json", n.to_string_lossy()),
+        None => "oracle-side.json".to_string(),
+    };
+    wrapper_report_path.set_file_name(wrapper_report_name);
+
+    if let Some(parent) = pcm_out.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| CliError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+    }
+
+    let output = std::process::Command::new(&oracle_path)
+        .arg("render")
+        .arg("--input-spc")
+        .arg(input_spc)
+        .arg("--frames")
+        .arg(frames.to_string())
+        .arg("--output-pcm")
+        .arg(pcm_out)
+        .arg("--report")
+        .arg(&wrapper_report_path)
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            report.status = CalibrationStatus::Error;
+            report.error = Some(format!("spawn oracle: {e}"));
+            write_json(report_out, &report)?;
+            eprintln!(
+                "calibrate-oracle: cannot spawn oracle ({e}); report -> {}",
+                report_out.display()
+            );
+            return Ok(());
+        }
+    };
+
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let first = first_line(&stderr);
+        report.status = CalibrationStatus::Error;
+        report.error = Some(format!("oracle exited {code}: {first}"));
+        write_json(report_out, &report)?;
+        eprintln!(
+            "calibrate-oracle: oracle exited {code}: {first}; report -> {}",
+            report_out.display()
+        );
+        return Ok(());
+    }
+
+    // Verify PCM defensively in Rust — don't trust the wrapper's
+    // self-reported max_abs/rms without recomputing.
+    let pcm_bytes = match std::fs::read(pcm_out) {
+        Ok(b) => b,
+        Err(e) => {
+            report.status = CalibrationStatus::Error;
+            report.error = Some(format!("read oracle PCM: {e}"));
+            write_json(report_out, &report)?;
+            eprintln!(
+                "calibrate-oracle: cannot read oracle PCM at {}: {e}; report -> {}",
+                pcm_out.display(),
+                report_out.display()
+            );
+            return Ok(());
+        }
+    };
+    let expected_pcm_bytes = (frames as usize) * 4;
+    if pcm_bytes.len() != expected_pcm_bytes {
+        report.status = CalibrationStatus::Error;
+        report.error = Some(format!(
+            "oracle PCM wrong size: expected {} bytes ({} frames), got {}",
+            expected_pcm_bytes,
+            frames,
+            pcm_bytes.len()
+        ));
+        write_json(report_out, &report)?;
+        eprintln!(
+            "calibrate-oracle: oracle PCM wrong size ({} B, expected {}); report -> {}",
+            pcm_bytes.len(),
+            expected_pcm_bytes,
+            report_out.display()
+        );
+        return Ok(());
+    }
+
+    let (max_abs, rms) = pcm_stats_from_bytes(&pcm_bytes);
+    report.observed = Some(ObservedInfo {
+        voice_render_max_abs_lsb: max_abs,
+        voice_render_rms_lsb: rms,
+    });
+
+    if max_abs != 0 {
+        report.diagnostics.push(format!(
+            "M0 smoke is muted via DSP FLG=$60; oracle render produced max_abs={max_abs} (UNEXPECTED). \
+             Investigate: the smoke contract or the wrapper is wrong."
+        ));
+    }
+
+    report.status = CalibrationStatus::ProvisionalNotCiGate;
+    report.error = None;
+
+    write_json(report_out, &report)?;
+
+    if max_abs == 0 {
+        eprintln!(
+            "calibrate-oracle: snes_spc_wrapper rendered {frames} frames; max_abs=0; rms=0; report -> {}",
+            report_out.display()
+        );
+    } else {
+        eprintln!(
+            "calibrate-oracle: snes_spc_wrapper rendered {frames} frames; max_abs={max_abs} (UNEXPECTED for muted smoke); report -> {}",
+            report_out.display()
+        );
+    }
+
     Ok(())
+}
+
+fn resolve_oracle(explicit: Option<&Path>, workspace_root: &Path) -> Option<PathBuf> {
+    if let Some(p) = explicit {
+        if p.is_file() {
+            return Some(p.to_path_buf());
+        }
+        return None;
+    }
+    let r = tools::resolve_snes_spc_oracle(workspace_root);
+    if r.resolved {
+        r.path
+    } else {
+        None
+    }
+}
+
+fn probe_oracle_version(oracle: &Path) -> String {
+    match std::process::Command::new(oracle).arg("--version").output() {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn pcm_stats_from_bytes(pcm: &[u8]) -> (i32, f64) {
+    let n = pcm.len() / 2;
+    if n == 0 {
+        return (0, 0.0);
+    }
+    let mut max_abs: i32 = 0;
+    let mut sum_sq: f64 = 0.0;
+    for chunk in pcm.chunks_exact(2) {
+        let s = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+        let a = s.unsigned_abs() as i32;
+        if a > max_abs {
+            max_abs = a;
+        }
+        sum_sq += (s as f64) * (s as f64);
+    }
+    let rms = (sum_sq / (n as f64)).sqrt();
+    (max_abs, rms)
 }
 
 // =============================================================================
@@ -635,12 +876,10 @@ fn cmd_m0_acceptance(out_dir: &Path) -> Result<(), CliError> {
     write_json(&aram_map_path, &aram_report)?;
     eprintln!("m0-acceptance: aram-map -> {}", aram_map_path.display());
 
-    // 6. Calibrate-oracle (still stub at M0.4; lands in M0.5).
-    write_json(&calibration_path, &CalibrationReport::stub())?;
-    eprintln!(
-        "m0-acceptance: calibrate (stub) -> {}",
-        calibration_path.display()
-    );
+    // 6. Calibrate-oracle. Real if oracle wrapper resolves; failure-
+    // as-data otherwise. The chain continues regardless.
+    let oracle_pcm = out_dir.join("oracle.pcm_s16le");
+    cmd_calibrate_oracle(None, &smoke_spc, 2048, &calibration_path, &oracle_pcm)?;
 
     // 7. Manifest.
     let manifest = M0Manifest {
