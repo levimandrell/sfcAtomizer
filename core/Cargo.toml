@@ -5,3 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Core compiler library for the SFC Wave Compiler: BRR encoder/decoder, atom compiler, ARAM packer."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
