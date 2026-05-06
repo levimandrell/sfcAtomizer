@@ -924,3 +924,160 @@ fn missing_source_arg_fails_with_clap_usage() {
         "expected --source in stderr: {stderr}"
     );
 }
+
+// =============================================================================
+// M1.1 — new-project / validate-project
+// =============================================================================
+
+#[test]
+fn new_project_writes_minimal_valid_template() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("demo.sfcproj.json");
+    let out = Command::new(bin())
+        .args(["new-project", "--out"])
+        .arg(&path)
+        .args(["--name", "demo"])
+        .output()
+        .expect("run sfcwc");
+    assert!(out.status.success(), "{:?}", out);
+    let v = read_json(&path);
+    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["project"]["name"], "demo");
+    assert_eq!(v["project"]["tick_rate_hz"], 60);
+    assert_eq!(v["driver"]["profile"], "sample_basic");
+    assert_eq!(v["driver"]["bytecode_version"], 1);
+    assert_eq!(v["master_echo"]["enabled"], false);
+    assert!(v["sample_pool"].as_array().unwrap().is_empty());
+    assert_eq!(v["m1"]["active_sample_id"], "");
+}
+
+#[test]
+fn validate_project_with_template_reports_pre_import_errors() {
+    let dir = TempDir::new().unwrap();
+    let proj = dir.path().join("p.json");
+    let report = dir.path().join("v.json");
+    Command::new(bin())
+        .args(["new-project", "--out"])
+        .arg(&proj)
+        .args(["--name", "demo"])
+        .output()
+        .unwrap();
+
+    let out = Command::new(bin())
+        .args(["validate-project", "--project"])
+        .arg(&proj)
+        .arg("--json")
+        .args(["--out"])
+        .arg(&report)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(out.status.code(), Some(2), "expected exit 2: {:?}", out);
+
+    let v = read_json(&report);
+    assert_eq!(v["report_type"], "validation");
+    assert_eq!(v["status"], "invalid");
+    let errors = v["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|e| e["path"] == "/sample_pool"));
+    assert!(errors.iter().any(|e| e["path"] == "/m1/active_sample_id"));
+}
+
+#[test]
+fn validate_project_with_valid_input() {
+    let dir = TempDir::new().unwrap();
+    let proj = dir.path().join("p.json");
+    let json = r#"{
+        "schema_version": 1,
+        "project": { "name": "ok", "tick_rate_hz": 60 },
+        "driver": { "profile": "sample_basic", "bytecode_version": 1 },
+        "master_echo": { "enabled": false, "edl": 0, "efb": 0,
+                          "evol_l": 0, "evol_r": 0,
+                          "fir": [127, 0, 0, 0, 0, 0, 0, 0] },
+        "sample_pool": [
+            {
+                "id": "s1", "name": "lead",
+                "source": {
+                    "path": "audio/lead.wav",
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "format": "wav", "sample_rate_hz": 32000,
+                    "channels": 1, "frames": 65536
+                },
+                "root_midi_note": 60,
+                "loop": { "enabled": true, "start_sample": 1024,
+                           "end_sample": 32768, "snap": "brr_block_16" },
+                "playback": { "volume": 1.0, "pan": 0.0, "echo": false,
+                               "envelope": { "type": "adsr", "attack": 9,
+                                              "decay": 4, "sustain_level": 5,
+                                              "sustain_rate": 12 } }
+            }
+        ],
+        "m1": { "active_sample_id": "s1" }
+    }"#;
+    std::fs::write(&proj, json).unwrap();
+    let out = Command::new(bin())
+        .args(["validate-project", "--project"])
+        .arg(&proj)
+        .arg("--json")
+        .output()
+        .expect("run sfcwc");
+    assert!(out.status.success(), "{:?}", out);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["status"], "ok");
+    assert!(v["errors"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn validate_project_with_invalid_edl() {
+    let dir = TempDir::new().unwrap();
+    let proj = dir.path().join("p.json");
+    // master enabled with edl=0 — rule #8.
+    let json = r#"{
+        "schema_version": 1,
+        "project": { "name": "bad", "tick_rate_hz": 60 },
+        "driver": { "profile": "sample_basic", "bytecode_version": 1 },
+        "master_echo": { "enabled": true, "edl": 0, "efb": 0,
+                          "evol_l": 0, "evol_r": 0,
+                          "fir": [127, 0, 0, 0, 0, 0, 0, 0] },
+        "sample_pool": [
+            {
+                "id": "s1", "name": "lead",
+                "source": {
+                    "path": "x.wav",
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "format": "wav", "sample_rate_hz": 32000,
+                    "channels": 1, "frames": 1024
+                },
+                "root_midi_note": 60,
+                "loop": { "enabled": false },
+                "playback": { "volume": 1.0, "pan": 0.0, "echo": false,
+                               "envelope": { "type": "gain_raw", "gain_byte": 127 } }
+            }
+        ],
+        "m1": { "active_sample_id": "s1" }
+    }"#;
+    std::fs::write(&proj, json).unwrap();
+    let out = Command::new(bin())
+        .args(["validate-project", "--project"])
+        .arg(&proj)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let errors = v["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|e| e["path"] == "/master_echo/edl"));
+}
+
+#[test]
+fn validate_project_io_error_on_missing_file() {
+    let dir = TempDir::new().unwrap();
+    let bogus = dir.path().join("does-not-exist.json");
+    let out = Command::new(bin())
+        .args(["validate-project", "--project"])
+        .arg(&bogus)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["status"], "io_error");
+}

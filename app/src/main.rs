@@ -13,12 +13,13 @@ use sfc_atomizer_core::asm::{
 };
 use sfc_atomizer_core::brr_fixtures::{run_fixture, M0_RAW_DECODE_FIXTURES};
 use sfc_atomizer_core::manifest::verify_bundle;
+use sfc_atomizer_core::project::{ProjectIoError, ProjectV1, ValidationError};
 use sfc_atomizer_core::report::{
     AramKind, AramMapReport, AssembleReport, AssembleStatus, BrrFixtureReport, BundleStatus,
     BundleSteps, BundleSummary, CalibrationReport, CalibrationStatus, DoctorReport, DoctorStatus,
     DoctorTools, FixtureSetInfo, M0Manifest, ObservedInfo, OracleInfo, ProvisionalTolerances,
     RenderInfo, RustInfo, SpcExportReport, SpcInitialState, SpcStatus, StepStatus, ToolStatus,
-    SCHEMA_VERSION,
+    ValidationErrorJson, ValidationReport, ValidationStatus, SCHEMA_VERSION,
 };
 use sfc_atomizer_core::spc::{
     build_smoke_image, verify_structure, SpcCpuState, SpcImage, SMOKE_CPU_STATE, SPC_ARAM_SIZE,
@@ -106,6 +107,33 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Write a minimal pre-import M1 project template (SPEC §16 v1).
+    ///
+    /// The template fails validation by design: empty `sample_pool`
+    /// (rule #9 wants 1..=128) and empty `m1.active_sample_id`
+    /// (rule #25). The user runs `import` (M1.2) to add samples
+    /// before the project validates.
+    NewProject {
+        #[arg(long, default_value = "project.sfcproj.json")]
+        out: PathBuf,
+        /// Project name. Defaults to the `--out` filename stem.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Validate a project file (SPEC §16.6 rules).
+    ///
+    /// Exits 0 when valid, 2 when validation errors are present, 1
+    /// on IO/parse errors.
+    ValidateProject {
+        #[arg(long)]
+        project: PathBuf,
+        /// Print a structured `ValidationReport` to stdout.
+        #[arg(long)]
+        json: bool,
+        /// Also write the report JSON to a file.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -157,6 +185,10 @@ fn run(cli: Cli) -> Result<(), CliError> {
         } => cmd_calibrate_oracle(oracle.as_deref(), &input_spc, frames, &out, &out_pcm),
         Command::M0Acceptance { out } => cmd_m0_acceptance(&out),
         Command::M0Status { bundle, json } => cmd_m0_status(&bundle, json),
+        Command::NewProject { out, name } => cmd_new_project(&out, name.as_deref()),
+        Command::ValidateProject { project, json, out } => {
+            cmd_validate_project(&project, json, out.as_deref())
+        }
     }
 }
 
@@ -1349,4 +1381,124 @@ fn create_dir(dir: &Path) -> Result<(), CliError> {
         path: dir.to_path_buf(),
         source,
     })
+}
+
+// =============================================================================
+// new-project / validate-project (M1.1)
+// =============================================================================
+
+fn cmd_new_project(out: &Path, explicit_name: Option<&str>) -> Result<(), CliError> {
+    let name = explicit_name
+        .map(str::to_string)
+        .unwrap_or_else(|| derive_project_name_from_path(out));
+    let project = ProjectV1::new_template(&name);
+    project
+        .save_to_path(out)
+        .map_err(|e| project_io_to_cli(e, out))?;
+    eprintln!(
+        "new-project: wrote {} (template; pre-import — `validate-project` will report empty sample_pool until samples are added)",
+        out.display()
+    );
+    Ok(())
+}
+
+fn cmd_validate_project(
+    project: &Path,
+    emit_json: bool,
+    report_out: Option<&Path>,
+) -> Result<(), CliError> {
+    let project_path_s = project.display().to_string();
+    let mut report = ValidationReport {
+        project_path: project_path_s.clone(),
+        ..ValidationReport::stub()
+    };
+
+    let load_result = ProjectV1::load_from_path(project);
+    let (status, errors) = match load_result {
+        Ok(p) => match p.validate() {
+            Ok(()) => (ValidationStatus::Ok, Vec::new()),
+            Err(verrors) => (
+                ValidationStatus::Invalid,
+                verrors.into_iter().map(validation_error_to_json).collect(),
+            ),
+        },
+        Err(e) => (
+            ValidationStatus::IoError,
+            vec![ValidationErrorJson {
+                path: project_path_s.clone(),
+                message: format!("{e}"),
+            }],
+        ),
+    };
+    report.status = status;
+    report.errors = errors;
+
+    if emit_json {
+        let s = serde_json::to_string_pretty(&report)?;
+        println!("{s}");
+    }
+    if let Some(p) = report_out {
+        write_json(p, &report)?;
+    }
+
+    print_validate_summary(&report);
+
+    let exit = match report.status {
+        ValidationStatus::Ok => 0,
+        ValidationStatus::Invalid => 2,
+        ValidationStatus::IoError => 1,
+    };
+    if exit != 0 {
+        std::process::exit(exit);
+    }
+    Ok(())
+}
+
+fn derive_project_name_from_path(out: &Path) -> String {
+    let stem = out.file_stem().map(|s| s.to_string_lossy().into_owned());
+    let raw = stem.unwrap_or_else(|| "untitled".to_string());
+    // Drop a trailing ".sfcproj" if the user picked the recommended
+    // double extension.
+    raw.strip_suffix(".sfcproj")
+        .map(str::to_string)
+        .unwrap_or(raw)
+}
+
+fn validation_error_to_json(e: ValidationError) -> ValidationErrorJson {
+    ValidationErrorJson {
+        path: e.path.clone(),
+        message: format!("{}", e.kind),
+    }
+}
+
+fn project_io_to_cli(e: ProjectIoError, path: &Path) -> CliError {
+    CliError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::other(format!("{e}")),
+    }
+}
+
+fn print_validate_summary(report: &ValidationReport) {
+    match report.status {
+        ValidationStatus::Ok => {
+            eprintln!("validate-project: ok — {}", report.project_path);
+        }
+        ValidationStatus::Invalid => {
+            eprintln!(
+                "validate-project: invalid — {} ({} error{})",
+                report.project_path,
+                report.errors.len(),
+                if report.errors.len() == 1 { "" } else { "s" }
+            );
+            for err in &report.errors {
+                eprintln!("  {} : {}", err.path, err.message);
+            }
+        }
+        ValidationStatus::IoError => {
+            eprintln!("validate-project: io_error — {}", report.project_path);
+            for err in &report.errors {
+                eprintln!("  {}", err.message);
+            }
+        }
+    }
 }
