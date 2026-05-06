@@ -201,6 +201,35 @@ pub fn build_smoke_image(aram: Vec<u8>) -> Result<SpcImage, SpcBuildError> {
 }
 
 // =============================================================================
+// M1 contract — sample_basic driver expects to write the DSP itself
+// =============================================================================
+
+/// Initial CPU state for an M1 audible SPC. Same shape as
+/// [`SMOKE_CPU_STATE`] (PC=$0200, GPRs=0, SP=$EF, PSW=0) — only
+/// the DSP block differs. Locked at M1.5.
+pub const M1_CPU_STATE: SpcCpuState = SMOKE_CPU_STATE;
+
+/// Build an M1 audible `SpcImage` from a packed ARAM image. DSP
+/// registers are all zero; the driver's first instruction at
+/// `$0200` writes `FLG=$60` (mute amp + echo write disable)
+/// before unmuting later in init, so there's no audible glitch
+/// from the zero-filled boot state.
+pub fn build_m1_image(aram: Vec<u8>) -> Result<SpcImage, SpcBuildError> {
+    if aram.len() != SPC_ARAM_SIZE {
+        return Err(SpcBuildError::AramSize {
+            expected: SPC_ARAM_SIZE,
+            actual: aram.len(),
+        });
+    }
+    Ok(SpcImage {
+        cpu: M1_CPU_STATE,
+        aram,
+        dsp_regs: [0u8; SPC_DSP_SIZE],
+        extra_ram: [0u8; SPC_EXTRA_RAM_SIZE],
+    })
+}
+
+// =============================================================================
 // Structural verifier — observation only, never assertion
 // =============================================================================
 

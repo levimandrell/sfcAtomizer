@@ -750,6 +750,75 @@ impl AuditionReport {
 }
 
 // =============================================================================
+// Compile-SPC report — `sfcwc compile-spc` (M1.5)
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompileSpcReport {
+    pub schema_version: u32,
+    pub report_type: String,
+    pub project_name: String,
+    pub active_sample_id: String,
+    pub aram_image_sha256: String,
+    pub spc_file_sha256: String,
+    pub driver_code_sha256: String,
+    pub driver_code_bytes: u32,
+    pub map_report_path: String,
+    pub spc_path: String,
+    pub aram_image_path: String,
+}
+
+impl CompileSpcReport {
+    pub const REPORT_TYPE: &'static str = "compile_spc";
+}
+
+// =============================================================================
+// Audible-verification report — `sfcwc verify-spc-audible` (M1.5)
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AudibleVerificationReport {
+    pub schema_version: u32,
+    pub report_type: String,
+    pub spc_path: String,
+    pub spc_sha256: String,
+    pub frames_rendered: u32,
+    pub sample_rate_hz: u32,
+    pub observed: ObservedAudio,
+    pub thresholds: AudibleThresholds,
+    pub status: AudibleStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl AudibleVerificationReport {
+    pub const REPORT_TYPE: &'static str = "audible_verification";
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct ObservedAudio {
+    pub max_abs: u32,
+    pub rms: f64,
+    pub bytes_zero: u32,
+    pub bytes_total: u32,
+    pub fraction_zero: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct AudibleThresholds {
+    pub min_max_abs: u32,
+    pub min_rms: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AudibleStatus {
+    Ok,
+    SilentFail,
+    OracleError,
+}
+
+// =============================================================================
 // Tests — round-trip every report through serde to catch field renames.
 // =============================================================================
 
@@ -1142,6 +1211,54 @@ mod tests {
             !json.contains("searched"),
             "empty searched should be omitted: {json}"
         );
+    }
+
+    #[test]
+    fn compile_spc_report_round_trip() {
+        let r = CompileSpcReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: CompileSpcReport::REPORT_TYPE.to_string(),
+            project_name: "demo".to_string(),
+            active_sample_id: "lead".to_string(),
+            aram_image_sha256: "0".repeat(64),
+            spc_file_sha256: "1".repeat(64),
+            driver_code_sha256: "2".repeat(64),
+            driver_code_bytes: 324,
+            map_report_path: "build/m1/demo.aram-map.json".to_string(),
+            spc_path: "build/m1/demo.spc".to_string(),
+            aram_image_path: "build/m1/demo.aram.bin".to_string(),
+        };
+        round_trip(&r);
+    }
+
+    #[test]
+    fn audible_verification_report_round_trip() {
+        let r = AudibleVerificationReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: AudibleVerificationReport::REPORT_TYPE.to_string(),
+            spc_path: "build/m1/demo.spc".to_string(),
+            spc_sha256: "0".repeat(64),
+            frames_rendered: 16384,
+            sample_rate_hz: 32000,
+            observed: ObservedAudio {
+                max_abs: 8420,
+                rms: 2150.0,
+                bytes_zero: 0,
+                bytes_total: 65536,
+                fraction_zero: 0.0,
+            },
+            thresholds: AudibleThresholds {
+                min_max_abs: 1000,
+                min_rms: 200.0,
+            },
+            status: AudibleStatus::Ok,
+            error: None,
+        };
+        round_trip(&r);
+        let mut r2 = r.clone();
+        r2.status = AudibleStatus::SilentFail;
+        r2.error = Some("max_abs=0".to_string());
+        round_trip(&r2);
     }
 
     #[test]
