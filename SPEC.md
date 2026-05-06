@@ -691,10 +691,14 @@ Required root fields:
 }
 ```
 
+`id`: string, length `1..=64`, pattern `^[a-z0-9_]+$` (ASCII lowercase letters, digits, underscore). Globally unique within the project. The strict shape lets compiled artifacts treat ids as filename-safe identifiers without escaping.
+
+`name`: string, length `1..=64`, printable UTF-8, no control characters. Spaces, non-ASCII letters (e.g. `世界`), and slashes are allowed — sample names are display-only, not paths.
+
 `source`:
 
 - `path`: string. Relative path preferred; absolute allowed only with warning.
-- `sha256`: lowercase hex string, length 64.
+- `sha256`: lowercase hex string, length 64, characters `[0-9a-f]`.
 - `format`: string. Allowed: `"wav" | "aiff" | "brr"`. M1 AIFF scope: PCM AIFF only — AIFF-C is rejected.
 - `sample_rate_hz`: integer `8000..=96000` for WAV/AIFF. For BRR import: `32000` default, or explicit user-provided.
 - `channels`: integer `1..=2` for M1.
@@ -786,17 +790,53 @@ GAIN  = gain_byte
 
 ### 16.6 Validation rules
 
-Cross-field constraints checked at project load (§16) and re-checked at compile:
+Validation runs at project load and at compile entry. Every failed rule produces a `ValidationError { path, kind }` carrying a JSON-pointer path to the offending field (e.g. `/sample_pool/0/loop/end_sample`). The loader collects every failure rather than bailing on the first.
 
-- `master_echo.enabled = true` ⇒ `master_echo.edl` ∈ `1..=15`. `master_echo.enabled = false` ⇒ `master_echo.edl = 0`.
-- Any `sample_pool[i].playback.echo = true` ⇒ `master_echo.enabled = true`.
-- `playback.envelope` must be exactly one of ADSR or GAIN; serde tagged union enforces this at the format level.
-- If `loop.enabled = true`: `start_sample` and `end_sample` both multiples of 16; `end_sample > start_sample`; `end_sample - start_sample >= 16`; `end_sample <= source.frames`.
+**Root.**
+
+- `schema_version` must equal `1` (§16.2). Older schemas migrate via a named function (§16.8); other values reject.
+
+**`project`.**
+
+- `tick_rate_hz` must equal `60` (M1 only).
+- `name` length `1..=64` (counted in Unicode codepoints), no control characters, no path separators (`/`, `\`, `:`).
+
+**`driver`.**
+
+- `profile` must equal `"sample_basic"` (M1 only).
+- `bytecode_version` must equal `1` (M1 only).
+
+**`master_echo`.**
+
+- `edl` ∈ `0..=15`.
+- `enabled = false` ⇒ `edl = 0`.
+- `enabled = true` ⇒ `edl` ∈ `1..=15` (the §15.3 trap: `EDL = 0` with echo writeback enabled corrupts 4 bytes at `ESA*0x100`).
+
+**`sample_pool`.**
+
+- Length `1..=128`.
+- Each entry's `id` matches `^[a-z0-9_]+$`, length `1..=64`, globally unique within the pool.
+- Each entry's `name` length `1..=64`, no control characters. Path separators allowed (sample names are display-only).
+- `source.format` ∈ `{wav, aiff, brr}`.
+- `source.sample_rate_hz` ∈ `8000..=96000`.
+- `source.channels` ∈ `1..=2` (M1).
+- `source.frames` ≥ `1`.
+- `source.sha256`: lowercase hex, exactly 64 chars, characters `[0-9a-f]`.
+- `root_midi_note` ∈ `0..=127`.
+- If `loop.enabled = true`: `start_sample` and `end_sample` both multiples of 16; `end_sample > start_sample`; `end_sample - start_sample ≥ 16`; `end_sample ≤ source.frames`. `loop.snap` must equal `"brr_block_16"` (M1 only).
+- `playback.volume` ∈ `0.0..=1.0`; NaN rejected.
+- `playback.pan` ∈ `-1.0..=1.0`; NaN rejected.
+- `playback.echo = true` ⇒ `master_echo.enabled = true`.
+
+**Envelope.**
+
+- Exactly one of ADSR or GAIN variant (the serde tagged-union shape from §16.4 enforces this at the format level).
+- ADSR field ranges: `attack` ∈ `0..=15`, `decay` ∈ `0..=7`, `sustain_level` ∈ `0..=7`, `sustain_rate` ∈ `0..=31`.
+- GAIN: `gain_byte` ∈ `0..=255` (always satisfied by `u8`; documented for completeness).
+
+**`m1`.**
+
 - `m1.active_sample_id` must match exactly one `sample_pool[].id`.
-- `sample_pool` length `1..=128`.
-- `sample_pool[].id` values must be globally unique within the project.
-
-Validation surfaces every failed rule, not just the first; the loader collects a list.
 
 ### 16.7 Pitch and MIDI convention
 
