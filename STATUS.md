@@ -2,14 +2,69 @@
 
 ## Current milestone
 
-**M0 — Research harness** — in progress. The snes_spc oracle
-wrapper boundary is in (M0.5): a thin C++ wrapper renders the
-M0 smoke `.spc` to all-zero PCM (as the muted state contract
-predicts), and `sfcwc calibrate-oracle` populates a real
-calibration report. Next is M0.6 (the calibration report + M0
-acceptance bundle).
+**M0 — Research harness — complete.** The producer side is locked:
+the BRR decoder is bit-exact on a 9-fixture corpus, asar produces a
+Mesen2-loadable 64 KB ARAM image at the addresses the compiler
+specifies, the SPC v0.30 exporter wraps that image with the M0 smoke
+state contract, the snes_spc oracle wrapper renders the smoke `.spc`
+to deterministic all-zero PCM, and `sfcwc m0-acceptance` writes a
+manifest whose `bundle.status` is `ok` (with all three optional tools
+resolved) or `degraded` (with one or more optional tools missing) on
+this development environment. M1 begins with a fresh consultant-led
+plan.
 
 ## Last pass
+
+**Pass M0.6 — Calibration report + M0 acceptance bundle.**
+
+- Phase A: `core::report::M0Manifest` extended with a real
+  `BundleSummary` — per-step `BundleSteps` (`StepStatus =
+  ok|warnings|error|skipped`), aggregate `BundleStatus =
+  ok|degraded|error`, three cross-reference SHAs
+  (`aram_image_sha256`, `spc_file_sha256`, `oracle_pcm_sha256`),
+  and a flattened `diagnostics` vector capped at 50 entries.
+  `#[serde(default)]` on `bundle` keeps M0.4/M0.5 manifests
+  parseable with a sentinel `Error` bundle.
+- Phase B: New `core::manifest` module with `verify_bundle` that
+  re-reads the on-disk manifest + every report and reports
+  observed structure (file presence, parse, schema-version
+  consistency, ARAM-SHA cross-reference, SPC-SHA cross-reference).
+  Observation-only — never asserts.
+- Phase C: `cmd_m0_acceptance` rewritten to chain real steps,
+  read each report back, map to `StepStatus` per the documented
+  per-step rules, aggregate to `BundleStatus`, fold integrity
+  findings into bundle diagnostics, and stamp the manifest with
+  an RFC3339 `generated_at` (computed inline via Howard
+  Hinnant's civil-from-days, no chrono dep).
+- Phase D: New `sfcwc m0-status [--bundle <dir>] [--json]` —
+  read-only summary of an existing bundle. Re-runs `verify_bundle`
+  to catch on-disk drift, prints the per-step rollup, exits 0 on
+  `ok`/`degraded` + clean integrity, 1 otherwise.
+- Phase E: SPEC §21 acceptance bullets refined to reference
+  `bundle.status` and `m0-status`. M0-completion paragraph
+  updated.
+- Phase F: Six new CLI integration tests cover bundle
+  aggregation paths (all-tools, oracle-missing, asar-missing) and
+  m0-status (valid, missing, corrupted bundle), plus four
+  manifest unit tests for `verify_bundle`. Two new round-trip
+  tests for the manifest schema.
+
+91 tests across the workspace — 62 core unit + 10 BRR fixture
+integration + 19 app CLI integration. `cargo check`, `cargo fmt
+--check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test` all green.
+
+`sfcwc m0-acceptance` on this host produces:
+
+- `bundle.status = degraded` (Mesen2 missing — SFCWC_MESEN2 not
+  set; bundle is shippable but flagged for the optional manual
+  smoke tool).
+- `aram_image_sha256 = ba728e6f...37c910298` (locked since M0.3).
+- `spc_file_sha256   = 0caba4a3...3827eea6f51` (locked since M0.4).
+- `oracle_pcm_sha256 = 9f1dcbc3...88913d47` (locked since M0.5;
+  matches the SHA of 8,192 zero bytes).
+
+## Previous passes
 
 **Pass M0.5 — snes_spc oracle wrapper boundary.**
 
@@ -349,19 +404,53 @@ test` all green.
   (max_abs=0, rms=0). M0.5 provisional tolerances are `max_abs=1`,
   `rms=0.25`; both informational only (`ci_gate: false`). M1
   freezes the first accepted tolerance table per SPEC §10.1, §21.
+- **Bundle status aggregation** (M0.6): required steps are
+  doctor, decode_fixtures, assemble, spc_export, aram_map.
+  Optional: calibration. Bundle is `ok` iff every required step
+  is `ok` AND calibration is `ok`; `error` if any required step
+  is `error` or `skipped`; `degraded` otherwise (any required
+  step `warnings` OR calibration `warnings`/`error`/`skipped`).
+- **Bundle integrity cross-references** (M0.6):
+  `assemble.output_image_sha256 == spc_export.input_aram_sha256`
+  (driver image flowing into SPC export);
+  `spc_export.spc_file_sha256 == calibration.fixture_set.sha256`
+  (SPC flowing into oracle render). `verify_bundle` reports both;
+  `m0-status` exits 1 if either disagrees.
+- **`oracle_pcm_sha256` lives in `CalibrationReport`** (M0.6):
+  M0.5 left a "engineer's call" between embed-in-report vs
+  reading the wrapper's sidecar JSON. M0.6 chose embed —
+  `cmd_calibrate_oracle` computes the SHA on the in-memory PCM
+  bytes alongside max_abs/rms; the bundle pulls it from one place
+  rather than parsing the wrapper's report.
+
+## Open questions resolved at M0
+
+- **Embed snes_spc for live preview vs keep oracle-only** (SPEC
+  §23, question 2). **Resolved at M0.5/M0.6**: the wrapper is a
+  separate-process oracle invoked across a process boundary, per
+  `LICENSING.md` §3 and SPEC §17.1. The Apache-2.0 host never
+  links snes_spc; embedding for live preview is forbidden on
+  licensing grounds. Live preview at M3+ uses the internal Rust
+  BRR decoder (§10.1 internal renderer mode), with the oracle
+  remaining the calibration second-source.
 
 ## Open questions remaining
 
 Cross-reference SPEC §23. Of the four questions there:
 
 1. Final atom quality thresholds — empirical, deferred to calibration runs.
-2. Embed snes_spc for live preview vs keep oracle-only — decision target M0.
+2. ~~Embed snes_spc for live preview vs keep oracle-only — decision target M0.~~ Resolved at M0.5/M0.6: separate-process oracle, host never links it.
 3. Practical wavetable frame caps — empirical, may move from 32/64/96/128.
 4. Whether a future version adds a free pre-emphasis EQ editor.
 
 ## Next pass
 
-**M0.6 — Calibration report + M0 acceptance bundle.** PM to
-brief. Bundles the seven M0 reports into a frozen acceptance
-artifact, populates `M0Manifest.generated_at`, and pins the M0
-exit conditions to a reproducible build artifact set.
+**M1 — Single-sample basic playback** per SPEC §21. M1 deliverables
+include sample slot UI, WAV/AIFF/BRR import, root key, ADSR/GAIN,
+pan, echo enable, loop candidate finder, BRR preview, ARAM meter
+with prominent echo cost, project file v1 with migration
+scaffolding, and the Sample Pool view. M1 implementation passes
+will be re-briefed by PM under a fresh consultant-led plan; the M0
+producer-side foundations (BRR decoder, asar backend, SPC exporter,
+ARAM map, oracle wrapper boundary, bundle aggregation) are the
+locked input to that work.
