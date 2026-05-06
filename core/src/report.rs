@@ -279,6 +279,23 @@ pub struct SpcExportReport {
     pub initial_state: SpcInitialState,
     pub verified_structure: bool,
     pub status: SpcStatus,
+    /// Hex SHA-256 of the input ARAM image (64 KB, what
+    /// `assemble-smoke` produced). Added in M0.4; non-breaking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_aram_sha256: Option<String>,
+    /// Hex SHA-256 of the produced SPC's DSP register block (128 B
+    /// at file offset 0x10100). Added in M0.4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsp_state_sha256: Option<String>,
+    /// Hex SHA-256 of the full SPC file produced. Added in M0.4 so
+    /// downstream consumers can detect drift across runs without
+    /// diffing 66 KB of bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spc_file_sha256: Option<String>,
+    /// Human-readable error string when `status == Error`. Added
+    /// in M0.4, same shape as `AssembleReport.error` from M0.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl SpcExportReport {
@@ -294,6 +311,10 @@ impl SpcExportReport {
             initial_state: SpcInitialState::default(),
             verified_structure: false,
             status: SpcStatus::NotRun,
+            input_aram_sha256: None,
+            dsp_state_sha256: None,
+            spc_file_sha256: None,
+            error: None,
         }
     }
 }
@@ -562,7 +583,54 @@ mod tests {
 
     #[test]
     fn spc_export_round_trip() {
+        // Stub: every M0.4 optional field absent.
         round_trip(&SpcExportReport::stub());
+
+        // Success path with all M0.4 fields populated.
+        let mut r = SpcExportReport::stub();
+        r.status = SpcStatus::Ok;
+        r.output_path = Some("build/m0/smoke.spc".to_string());
+        r.file_size_bytes = 66048;
+        r.aram_image_sha256 = Some("a".repeat(64));
+        r.initial_state = SpcInitialState {
+            pc: 0x0200,
+            a: 0,
+            x: 0,
+            y: 0,
+            psw: 0,
+            sp: 0xEF,
+        };
+        r.verified_structure = true;
+        r.input_aram_sha256 = Some("b".repeat(64));
+        r.dsp_state_sha256 = Some("c".repeat(64));
+        r.spc_file_sha256 = Some("d".repeat(64));
+        round_trip(&r);
+
+        // Error path: only error populated.
+        let mut r = SpcExportReport::stub();
+        r.status = SpcStatus::Error;
+        r.error = Some("aram input missing at build/m0/driver.bin".to_string());
+        round_trip(&r);
+    }
+
+    #[test]
+    fn spc_export_v1_without_new_fields_still_parses() {
+        let pre_m04 = r#"{
+            "schema_version": 1,
+            "report_type": "spc_export",
+            "output_path": null,
+            "file_size_bytes": 0,
+            "aram_image_sha256": null,
+            "initial_state": { "pc": 0, "a": 0, "x": 0, "y": 0, "psw": 0, "sp": 0 },
+            "verified_structure": false,
+            "status": "not_run"
+        }"#;
+        let r: SpcExportReport = serde_json::from_str(pre_m04).unwrap();
+        assert_eq!(r.input_aram_sha256, None);
+        assert_eq!(r.dsp_state_sha256, None);
+        assert_eq!(r.spc_file_sha256, None);
+        assert_eq!(r.error, None);
+        assert_eq!(r.status, SpcStatus::NotRun);
     }
 
     #[test]
