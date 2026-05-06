@@ -10,8 +10,12 @@ state contract, the snes_spc oracle wrapper renders the smoke `.spc`
 to deterministic all-zero PCM, and `sfcwc m0-acceptance` writes a
 manifest whose `bundle.status` is `ok` (with all three optional tools
 resolved) or `degraded` (with one or more optional tools missing) on
-this development environment. M1 begins with a fresh consultant-led
-plan.
+this development environment.
+
+**M0 artifacts are producer-side only.** M1 owns the first audible
+driver. The NOP+BRA M0 smoke driver (`core/fixtures/asm/m0_smoke.asm`)
+is intentionally non-functional and will be replaced wholesale at
+M1.5 — do not reuse it as a base for M1.5 driver work.
 
 ## Last pass
 
@@ -54,15 +58,10 @@ integration + 19 app CLI integration. `cargo check`, `cargo fmt
 --check`, `cargo clippy --all-targets -- -D warnings`, and
 `cargo test` all green.
 
-`sfcwc m0-acceptance` on this host produces:
-
-- `bundle.status = degraded` (Mesen2 missing — SFCWC_MESEN2 not
-  set; bundle is shippable but flagged for the optional manual
-  smoke tool).
-- `aram_image_sha256 = ba728e6f...37c910298` (locked since M0.3).
-- `spc_file_sha256   = 0caba4a3...3827eea6f51` (locked since M0.4).
-- `oracle_pcm_sha256 = 9f1dcbc3...88913d47` (locked since M0.5;
-  matches the SHA of 8,192 zero bytes).
+`sfcwc m0-acceptance` on this host produces `bundle.status =
+degraded` (Mesen2 missing — `SFCWC_MESEN2` not set; bundle is
+shippable but flagged for the optional manual smoke tool). The full
+locked SHA constants live in the decisions log below.
 
 ## Previous passes
 
@@ -422,6 +421,21 @@ test` all green.
   `cmd_calibrate_oracle` computes the SHA on the in-memory PCM
   bytes alongside max_abs/rms; the bundle pulls it from one place
   rather than parsing the wrapper's report.
+
+### M0 frozen acceptance SHAs
+
+These three SHA-256s identify the M0 acceptance artifact set.
+Locked by `m0-acceptance` and re-checked by `m0-status`. Any future
+change to the source `.asm`, the SPC exporter state contract, or
+the oracle wrapper that alters these SHAs is a producer-side
+regression.
+
+```
+M0_ARAM_IMAGE_SHA256  = ba728e6fb836e5da4d4d1abec94956f8d92304ce0ac8b768b4103b237c910298
+M0_SPC_FILE_SHA256    = 0caba4a35c30c5cadce9585cea3140d17a048f4900721587457813827eea6f51
+M0_ORACLE_PCM_SHA256  = 9f1dcbc35c350d6027f98be0f5c8b43b42ca52b7604459c0c42be3aa88913d47
+                        (matches SHA-256 of 8,192 zero bytes)
+```
 
 ## Open questions resolved at M0
 
