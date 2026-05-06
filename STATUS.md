@@ -2,16 +2,112 @@
 
 ## Current milestone
 
-**M1 in progress — first audible `.spc` shipped.** `sfcwc
-compile-spc` produces a 66,048-byte SPC700 v0.30 file that the
-snes_spc oracle renders as audible PCM (max_abs=11072, rms=5520
-for a synthesized 8000-amp sine fixture, well above the
-min_max_abs=1000 / min_rms=200 thresholds). The
-`sample_basic` driver assembles to 324 bytes — well under the
-4 KiB budget. Real driver replaces the M1.4 zero placeholder
-in the packer's driver_code region.
+**M1 in progress — `.sfc` test ROM + module swap shipped.**
+`sfcwc compile-sfc` produces a 256 KB LoROM `.sfc` carrying a
+~580-byte 65816 loader + module A at bank 1 + module B at bank 2
+(clone of A in single-project mode). `verify-sfc-structure`
+checks the LoROM header, vectors, and embedded `module.bin`
+in-file SHAs. `verify-sfc-modules-audible` reconstructs each
+module's ARAM, wraps as M1 SPC, and runs through the snes_spc
+oracle — the audio cross-check that doesn't need an SNES emu.
 
 ## Last pass
+
+**Pass M1.6 — `.sfc` test ROM + module swap.**
+
+- Phase 0: `core::tools::resolve_mesen2` gains a PATH fallback
+  per PM authorization. Order: `SFCWC_MESEN2` env → PATH lookup
+  for `Mesen.exe` / `Mesen2.exe` / `Mesen` (POSIX: `Mesen` /
+  `Mesen2` / lowercase) → missing. SPEC §17.1 table updated.
+  New sentinel-based unit test exercises the PATH branch.
+- Phase A: New `core::module_writer` — converts a packed ARAM
+  image + map into a `module.bin` per SPEC §19.4. Sparse-block
+  format, header bytes `$00..$40`, self-zeroed SHA-256 in
+  `$20..$40`, block table starts at `$40`. Skips runtime/
+  free/IPL-pad regions; emits zero-filled echo buffer block
+  only when echo is enabled. Round-trip helpers
+  `parse_module_header` / `parse_module_blocks` /
+  `project_blocks_to_aram` for verifiers.
+- Phase B: New `core/fixtures/asm/m1_loader_65816.asm` — 65816
+  loader. Native mode setup, force-blank, IPL upload protocol
+  (canonical fullsnes interpretation), driver-ready wait,
+  ~5-second idle, RESET_TO_IPL (SPEC §20.1) command, second
+  upload, infinite spin. Fail-mode background colors: red =
+  IPL timeout, green = driver-ready timeout, blue = command
+  ack timeout, white = IPL byte-ack timeout. Assembles to
+  ~580 bytes; pads ROM to 256 KB to match the LoROM header
+  size byte.
+- Phase C: New `core::sfc_export`. Compiles project A (and
+  optional project B) through the encode → driver_build →
+  packer → module_writer pipeline; assembles the embedded
+  loader source via the existing `AsarBackend`; embeds modules
+  at fixed bank offsets ($01:8000, $02:8000); re-fixes the
+  LoROM checksum after embedding (asar's pre-embed checksum
+  goes stale once the module bytes land). When only project A
+  is provided, module B is a clone of A so the swap mechanism
+  still gets exercised. `AsarBackend::AssembleInput` now
+  carries `expected_output_size` + `extra_args` so the SFC
+  path can request 256 KB output and `--fix-checksum=on`
+  (opposite of the SPC700 `--fix-checksum=off`).
+- Phase D: `sfcwc compile-sfc` CLI — load+validate, encode,
+  driver-build, pack, write modules, assemble loader,
+  embed, re-checksum. Exit 0/1/2/3/4/5 across the failure
+  modes. `CompileSfcReport` carries SFC SHA + per-module SHAs
+  + loader size + clone flag.
+- Phase E: `sfcwc verify-sfc-structure` — power-of-two file
+  size, mode byte = `$20`, country = `$01`, ASCII title,
+  checksum + complement = `$FFFF`, reset vector ≥ `$8000`,
+  embedded `module.bin` parses, blocks sorted ascending,
+  in-file SHA matches recomputed. Exit 0 on ok, 2 on any
+  finding.
+- Phase F: `sfcwc verify-sfc-modules-audible` — for each
+  module, parse blocks → project to 64 KB ARAM → wrap as M1
+  SPC → render via snes_spc oracle → compute max_abs/rms.
+  Reports `modules_audio_identical` (SHA on rendered PCM) so
+  single-project clone runs are explicitly recognized.
+- Phase G: GUI Compile SFC + Verify SFC buttons in the
+  project detail panel; both run in-process. Status badge
+  (green/red/gray) reflects last verify outcome.
+- Phase H: 3 round-trip tests for the new report types, 7
+  module_writer unit tests, 6 CLI integration tests
+  (compile-sfc happy path, two-projects, invalid project,
+  verify-sfc-structure pass/corruption, verify-sfc-modules-
+  audible distinct/silent). 1 new tools-resolve unit test
+  for the Mesen2 PATH fallback. **314 tests across the
+  workspace; all green.**
+
+### M1.6 baseline-locked SHAs
+
+For a one-sample project (8192-frame 8000-amp sine, 32 kHz,
+echo off, single-project clone mode):
+
+```
+M1_6_SFC_FILE_SHA256        = fca07fb5f505f1f6e74c4e37a89d576d81ab94a75878131b12406c1f38f1b2ce
+M1_6_MODULE_A_SHA256        = d138f81fe1c23f5340a426d3e08b3e79e365e7d787bc6cd522f1a3082dc0da86
+M1_6_MODULE_B_SHA256        = (= M1_6_MODULE_A_SHA256, single-project clone)
+M1_6_LOADER_SIZE_BYTES      = 581
+M1_6_SFC_SIZE_BYTES         = 262144
+```
+
+Audible cross-check via oracle: both modules render to
+`max_abs=11072, rms=5519.6` (matching M1.5 baseline exactly,
+since the same project's ARAM round-trips through module.bin
+unchanged), `status=ok`, `modules_audio_identical=true`.
+
+### Mesen2 self-check (engineer)
+
+Mesen2 PATH fallback works as designed. On this host the user
+has `C:\tools\Mesen2\` containing `MesenCore.dll` (and other
+files) but **no `Mesen.exe`** in the directory. The directory
+is also not on PATH for the engineer process. Doctor reports
+mesen2 missing, which is accurate. **User audible audition is
+queued for return** — load `build/m1/<name>.sfc` (or
+`<project_dir>/.sfcwc-build/<name>.sfc` from the GUI) into a
+proper Mesen2 install and listen for: sustained sine ~5
+seconds, brief gap (RESET_TO_IPL), sustained sine again
+(module B = clone of A), repeats.
+
+## Previous passes
 
 **Pass M1.5 — First real SPC700 driver + audible `.spc`.**
 
@@ -755,6 +851,61 @@ test` all green.
   bytes alongside max_abs/rms; the bundle pulls it from one place
   rather than parsing the wrapper's report.
 
+### M1 .sfc / module.bin / Mesen2 decisions (M1.6)
+
+- **LoROM minimum size 256 KB** (M1.6). The loader pads to
+  bank 7 end (file offset `$3FFFF`) so the file matches the
+  header ROM-size byte `$08`. Smaller sizes (`$07` = 128 KB)
+  also valid LoROM but the brief mandates 256 KB.
+- **65816 code at $00:8000..$00:7FBF; module A at $01:8000;
+  module B at $02:8000** (M1.6). LoROM bank → file offset
+  mapping puts loader code in file `$0..$7FBF`, module A at
+  `$8000`, module B at `$10000`. Banks 3..7 are pad.
+- **asar invocation differs between SPC700 and 65816** (M1.6).
+  SPC700 driver build uses `--fix-checksum=off` (flat ARAM,
+  no SNES checksum). 65816 ROM build uses `--fix-checksum=on`
+  so asar fills LoROM checksum + complement at `$7FDC..$7FDF`.
+  `AssembleInput::extra_args` now lets each backend caller
+  set this independently.
+- **Single-project compile-sfc emits module B as a duplicate
+  of module A** (M1.6). The loader still exercises the swap
+  flow; user hears the same audio twice with a brief gap, which
+  positively confirms RESET_TO_IPL + re-upload worked. The
+  CLI report's `module_b_is_clone_of_a` flag and the audible
+  report's `modules_audio_identical` make the clone explicit.
+- **65816 loader spin counts use 16-bit double-loops** (M1.6).
+  SPEC §19.2 specifies 32-bit values like `WAIT_IPL_READY_POLLS
+  = 0x0020_0000`; the loader uses `outer × inner = 0x10 × 0xFFFF`
+  ≈ 1M iterations, ~50 ms at 21 MHz — ample for ~2 ms IPL ready.
+  Multi-loop upgrades reserved for a future tighter spec.
+- **Module swap timing: ~5 sec module A, RESET_TO_IPL,
+  module B forever** (M1.6). Configurable via spin-count
+  constants in `m1_loader_65816.asm` (`idle_5sec`).
+- **Loader fail-mode background colours**: red = IPL-ready
+  timeout, green = driver-ready timeout, blue = command-ack
+  timeout, white = IPL byte-ack timeout. Documented inline
+  at the top of `m1_loader_65816.asm`.
+- **Sentinel byte sequence locks emulator vector layout**:
+  RESET vector at `$00:FFFC` (NOT `$00:FFFA`) — caught during
+  Phase B development. SPEC §19 didn't expand the LoROM vector
+  table, so this is the empirical layout per fullsnes.
+- **Re-fix LoROM checksum after embedding modules** (M1.6).
+  asar fixes the checksum during initial assemble; embedding
+  module bytes after that invalidates it. `core::sfc_export`
+  recomputes by zeroing the four checksum bytes, summing all
+  bytes mod `$10000`, and writing complement + sum.
+- **module.bin self-zeroed SHA workaround** (M1.6, SPEC §19.4
+  reaffirmation). The full-file SHA can't live inside the file,
+  so `$20..$40` carries SHA-of-file-with-those-32-bytes-zeroed.
+  The literal full-file SHA lives only in the M1 manifest.
+  `parse_module_header::content_sha256_in_file` round-trips
+  cleanly through `recompute_in_file_sha`.
+- **Mesen2 PATH fallback** (M1.6, Phase 0). `resolve_mesen2`
+  now tries env → PATH → missing, mirroring the asar pattern.
+  Locked binary names: `Mesen.exe` / `Mesen2.exe` / `Mesen` on
+  Windows; `Mesen` / `Mesen2` (and lowercase) on POSIX. SPEC
+  §17.1 table updated.
+
 ### M1 driver / compile-spc / audible-verify decisions (M1.5)
 
 - **Driver constants format: asar `name = $XX` (label assignment)**
@@ -1068,7 +1219,8 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M1.6 — `.sfc` test ROM + module swap.** PM to brief.
-With audible `.spc` shipped, the next surface is the 65816 IPL
-upload contract (SPEC §19.2) so the same compiled ARAM image
-boots through a real `.sfc` cartridge container.
+**M1.7 — M1 acceptance bundle.** PM to brief.
+With `.spc` and `.sfc` paths both shipped, M1 acceptance ties
+together a single bundle (analogous to the M0 `m0-acceptance`
+manifest) covering: doctor, project compile, audible `.spc`,
+audible-on-paper `.sfc` modules, structural `.sfc` integrity.

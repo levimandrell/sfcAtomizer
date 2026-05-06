@@ -1296,6 +1296,342 @@ fn preview_brr_writes_wav_and_report() {
 }
 
 // =============================================================================
+// M1.6 — compile-sfc / verify-sfc-structure / verify-sfc-modules-audible
+// =============================================================================
+
+#[test]
+fn cli_compile_sfc_one_project_happy_path() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip cli_compile_sfc_one_project_happy_path: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "sfc_demo");
+    let sfc = dir.path().join("demo.sfc");
+    let report = dir.path().join("compile.json");
+
+    let out = Command::new(bin())
+        .args(["compile-sfc", "--project-a"])
+        .arg(&proj)
+        .args(["--out-sfc"])
+        .arg(&sfc)
+        .args(["--out-report"])
+        .arg(&report)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let bytes = std::fs::read(&sfc).unwrap();
+    assert_eq!(bytes.len(), 262_144, "256 KB minimum");
+    let v = read_json(&report);
+    assert_envelope(&v, "compile_sfc");
+    assert_eq!(v["module_b_is_clone_of_a"], true);
+    assert!(v["sfc_sha256"].as_str().unwrap().len() == 64);
+}
+
+#[test]
+fn cli_compile_sfc_two_projects_happy_path() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj_a = make_project_with_one_imported_sample(dir.path(), "demo_a");
+    let proj_b = dir.path().join("demo_b.sfcproj.json");
+    Command::new(bin())
+        .args(["new-project", "--out"])
+        .arg(&proj_b)
+        .args(["--name", "demo_b"])
+        .output()
+        .unwrap();
+    // Synthesise a different sample (lower-pitched sine) for B.
+    let audio_b = dir.path().join("lead_b.wav");
+    let pcm_b = synth_sine_pcm(2048, 32.0, 6000.0);
+    write_pcm16_wav_with_samples(&audio_b, 22050, 1, &pcm_b);
+    Command::new(bin())
+        .args(["import", "--project"])
+        .arg(&proj_b)
+        .args(["--audio"])
+        .arg(&audio_b)
+        .output()
+        .unwrap();
+
+    let sfc = dir.path().join("two.sfc");
+    let report = dir.path().join("two.compile.json");
+    let out = Command::new(bin())
+        .args(["compile-sfc", "--project-a"])
+        .arg(&proj_a)
+        .args(["--project-b"])
+        .arg(&proj_b)
+        .args(["--out-sfc"])
+        .arg(&sfc)
+        .args(["--out-report"])
+        .arg(&report)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = read_json(&report);
+    assert_envelope(&v, "compile_sfc");
+    assert_eq!(v["module_b_is_clone_of_a"], false);
+    assert_ne!(v["module_a_sha256"], v["module_b_sha256"]);
+}
+
+#[test]
+fn cli_compile_sfc_invalid_project_a() {
+    if !sfc_atomizer_core::tools::resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = dir.path().join("bad.sfcproj.json");
+    Command::new(bin())
+        .args(["new-project", "--out"])
+        .arg(&proj)
+        .args(["--name", "bad"])
+        .output()
+        .unwrap();
+    let out = Command::new(bin())
+        .args(["compile-sfc", "--project-a"])
+        .arg(&proj)
+        .args(["--out-sfc"])
+        .arg(dir.path().join("x.sfc"))
+        .args(["--out-report"])
+        .arg(dir.path().join("x.json"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn cli_verify_sfc_structure_on_compiled_sfc_passes() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "structure_demo");
+    let sfc = dir.path().join("s.sfc");
+    Command::new(bin())
+        .args(["compile-sfc", "--project-a"])
+        .arg(&proj)
+        .args(["--out-sfc"])
+        .arg(&sfc)
+        .args(["--out-report"])
+        .arg(dir.path().join("c.json"))
+        .output()
+        .unwrap();
+
+    let report = dir.path().join("struct.json");
+    let out = Command::new(bin())
+        .args(["verify-sfc-structure", "--sfc"])
+        .arg(&sfc)
+        .args(["--out-report"])
+        .arg(&report)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let v = read_json(&report);
+    assert_envelope(&v, "sfc_structure");
+    assert_eq!(v["status"], "ok");
+}
+
+#[test]
+fn cli_verify_sfc_structure_on_corrupted_sfc_fails() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "corrupt_demo");
+    let sfc = dir.path().join("c.sfc");
+    Command::new(bin())
+        .args(["compile-sfc", "--project-a"])
+        .arg(&proj)
+        .args(["--out-sfc"])
+        .arg(&sfc)
+        .args(["--out-report"])
+        .arg(dir.path().join("c.json"))
+        .output()
+        .unwrap();
+
+    // Corrupt the LoROM mode byte at $7FD5.
+    let mut bytes = std::fs::read(&sfc).unwrap();
+    bytes[0x7FD5] = 0x00;
+    std::fs::write(&sfc, &bytes).unwrap();
+
+    let report = dir.path().join("struct.json");
+    let out = Command::new(bin())
+        .args(["verify-sfc-structure", "--sfc"])
+        .arg(&sfc)
+        .args(["--out-report"])
+        .arg(&report)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let v = read_json(&report);
+    assert_eq!(v["status"], "fail");
+}
+
+#[test]
+fn cli_verify_sfc_modules_audible_two_distinct_modules() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved || !oracle_resolved_for_test() {
+        eprintln!("skip: asar / oracle not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj_a = make_project_with_one_imported_sample(dir.path(), "audible_a");
+
+    // Project B with a lower-frequency sine for distinct rendering.
+    let proj_b = dir.path().join("audible_b.sfcproj.json");
+    Command::new(bin())
+        .args(["new-project", "--out"])
+        .arg(&proj_b)
+        .args(["--name", "audible_b"])
+        .output()
+        .unwrap();
+    let audio_b = dir.path().join("low.wav");
+    let pcm_b = synth_sine_pcm(4096, 128.0, 6000.0);
+    write_pcm16_wav_with_samples(&audio_b, 22050, 1, &pcm_b);
+    Command::new(bin())
+        .args(["import", "--project"])
+        .arg(&proj_b)
+        .args(["--audio"])
+        .arg(&audio_b)
+        .output()
+        .unwrap();
+
+    let sfc = dir.path().join("two.sfc");
+    Command::new(bin())
+        .args(["compile-sfc", "--project-a"])
+        .arg(&proj_a)
+        .args(["--project-b"])
+        .arg(&proj_b)
+        .args(["--out-sfc"])
+        .arg(&sfc)
+        .args(["--out-report"])
+        .arg(dir.path().join("c.json"))
+        .output()
+        .unwrap();
+
+    let oracle = oracle_wrapper_path();
+    let report = dir.path().join("audible.json");
+    let out = Command::new(bin())
+        .args(["verify-sfc-modules-audible", "--sfc"])
+        .arg(&sfc)
+        .args(["--frames", "8192"])
+        .args(["--out-report"])
+        .arg(&report)
+        .args(["--oracle"])
+        .arg(&oracle)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = read_json(&report);
+    assert_envelope(&v, "sfc_modules_audible");
+    assert_eq!(v["status"], "ok");
+    assert_eq!(v["modules_audio_identical"], false);
+    assert_ne!(
+        v["module_a_audible"]["spc_sha256"],
+        v["module_b_audible"]["spc_sha256"]
+    );
+}
+
+#[test]
+fn cli_verify_sfc_modules_audible_silent_module_fails() {
+    if !oracle_resolved_for_test() {
+        eprintln!("skip: oracle not resolved");
+        return;
+    }
+    // Hand-build a minimal SFC: 256 KB of zeros with a fake module
+    // header at MODULE_A_FILE_OFFSET that has no blocks (so the
+    // projected ARAM is empty, the SPC is muted by default, and
+    // the oracle renders silence).
+    let dir = TempDir::new().unwrap();
+    let mut bytes = vec![0u8; 256 * 1024];
+    // Title + mode + checksum so verify-sfc-structure would mostly
+    // pass — but we're testing modules_audible not structure.
+    let title = b"MUTED FIXTURE        ";
+    bytes[0x7FC0..0x7FC0 + 21].copy_from_slice(title);
+    bytes[0x7FD5] = 0x20;
+    bytes[0x7FD9] = 0x01;
+    // Reset vector pointing somewhere reasonable.
+    bytes[0x7FFC..0x7FFE].copy_from_slice(&0x8000u16.to_le_bytes());
+
+    // Embed a zero-block module at $8000.
+    let module = sfc_atomizer_core::module_writer::write_module(
+        sfc_atomizer_core::module_writer::ModuleWriteInput {
+            aram_image: &[0u8; 0x10000],
+            map_report: &{
+                use sfc_atomizer_core::report::*;
+                AramMapReport {
+                    schema_version: SCHEMA_VERSION,
+                    report_type: AramMapReport::REPORT_TYPE.to_string(),
+                    total_aram: 0x10000,
+                    regions: vec![AramRegion {
+                        name: "driver_code".to_string(),
+                        start: "0x0200".to_string(),
+                        end: "0x020F".to_string(),
+                        bytes: 16,
+                        kind: AramKind::DriverCode,
+                    }],
+                    free_bytes: 0,
+                    collisions: Vec::new(),
+                    echo: None,
+                    source_directory: None,
+                    samples: None,
+                    warnings: Vec::new(),
+                }
+            },
+            echo_enabled: false,
+        },
+    )
+    .unwrap();
+    bytes[0x8000..0x8000 + module.bytes.len()].copy_from_slice(&module.bytes);
+    // Embed the same muted module at $10000 so module B parses
+    // correctly; otherwise the verify path returns oracle_error.
+    bytes[0x10000..0x10000 + module.bytes.len()].copy_from_slice(&module.bytes);
+
+    let sfc = dir.path().join("muted.sfc");
+    std::fs::write(&sfc, &bytes).unwrap();
+
+    let oracle = oracle_wrapper_path();
+    let report = dir.path().join("audible.json");
+    let out = Command::new(bin())
+        .args(["verify-sfc-modules-audible", "--sfc"])
+        .arg(&sfc)
+        .args(["--frames", "4096"])
+        .args(["--out-report"])
+        .arg(&report)
+        .args(["--oracle"])
+        .arg(&oracle)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "expected silent_fail exit 2");
+    let v = read_json(&report);
+    assert_eq!(v["status"], "silent_fail");
+}
+
+// =============================================================================
 // M1.5 — compile-spc / verify-spc-audible
 // =============================================================================
 
