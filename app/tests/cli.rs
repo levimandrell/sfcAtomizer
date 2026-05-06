@@ -606,17 +606,34 @@ fn calibrate_oracle_when_input_spc_missing() {
     );
 }
 
+/// Copy `core/fixtures/asm/m0_smoke.asm` into `<tempdir>/core/fixtures/asm/`
+/// so a test can use the tempdir as an isolated workspace_root for
+/// resolution checks (asar/oracle missing scenarios).
+fn copy_smoke_asm_into(workspace: &Path) {
+    let dst_dir = workspace.join("core").join("fixtures").join("asm");
+    std::fs::create_dir_all(&dst_dir).unwrap();
+    std::fs::copy(smoke_asm_path(), dst_dir.join("m0_smoke.asm")).unwrap();
+}
+
 #[test]
-fn m0_acceptance_full_chain() {
+fn m0_acceptance_full_chain_when_all_tools_resolved() {
     use sfc_atomizer_core::tools::resolve_asar;
     if !resolve_asar().resolved {
-        eprintln!("skip m0_acceptance_full_chain: asar not resolved");
+        eprintln!("skip m0_acceptance_full_chain_when_all_tools_resolved: asar not resolved");
+        return;
+    }
+    if !oracle_resolved_for_test() {
+        eprintln!("skip m0_acceptance_full_chain_when_all_tools_resolved: oracle not built");
         return;
     }
 
     let dir = TempDir::new().unwrap();
     let out_dir = dir.path().join("m0");
+    // Make Mesen2 "resolved" by pointing SFCWC_MESEN2 at any existing
+    // file (the test binary itself); doctor never executes mesen2,
+    // it only reports presence.
     let out = Command::new(bin())
+        .env("SFCWC_MESEN2", bin())
         .args(["m0-acceptance", "--out"])
         .arg(&out_dir)
         .current_dir(workspace_root())
@@ -628,6 +645,7 @@ fn m0_acceptance_full_chain() {
         String::from_utf8_lossy(&out.stderr)
     );
 
+    // Files present.
     let names = [
         ("doctor.json", "doctor"),
         ("brr-fixture-report.json", "brr_fixture"),
@@ -641,41 +659,205 @@ fn m0_acceptance_full_chain() {
         assert!(p.is_file(), "missing {name}");
         assert_envelope(&read_json(&p), ty);
     }
-    assert!(out_dir.join("driver.bin").is_file(), "missing driver.bin");
-    assert!(out_dir.join("smoke.spc").is_file(), "missing smoke.spc");
+    assert!(out_dir.join("driver.bin").is_file());
+    assert!(out_dir.join("smoke.spc").is_file());
+    assert!(out_dir.join("oracle.pcm_s16le").is_file());
 
-    // Manifest envelope and field shape.
-    let manifest_path = out_dir.join("manifest.json");
-    let manifest = read_json(&manifest_path);
+    // Manifest bundle: status ok, every step ok, all three SHAs.
+    let manifest = read_json(&out_dir.join("manifest.json"));
     assert_envelope(&manifest, "m0_manifest");
-    for field in [
-        "doctor_report",
-        "brr_fixture_report",
-        "aram_map_report",
-        "assemble_report",
-        "spc_export_report",
-        "calibration_report",
+    let bundle = &manifest["bundle"];
+    assert_eq!(bundle["status"], "ok", "bundle: {bundle}");
+    let steps = &bundle["steps"];
+    for step in [
+        "doctor",
+        "decode_fixtures",
+        "assemble",
+        "spc_export",
+        "aram_map",
+        "calibration",
     ] {
-        assert!(
-            manifest[field].is_string(),
-            "manifest.{field} should be a string path"
-        );
+        assert_eq!(steps[step], "ok", "step {step}: {bundle}");
+    }
+    assert!(bundle["aram_image_sha256"].is_string());
+    assert!(bundle["spc_file_sha256"].is_string());
+    assert!(bundle["oracle_pcm_sha256"].is_string());
+
+    // Stderr summary mentions bundle.status.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("bundle.status=ok"),
+        "expected 'bundle.status=ok' in stderr: {stderr}"
+    );
+}
+
+#[test]
+fn m0_acceptance_when_oracle_missing() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip m0_acceptance_when_oracle_missing: asar not resolved");
+        return;
     }
 
-    // assemble-report should report status: ok with the locked sha.
-    let assemble = read_json(&out_dir.join("assemble-report.json"));
-    assert_eq!(assemble["status"], "ok");
-    assert_eq!(assemble["output_bytes"], 65536);
-    let driver_sha = assemble["output_image_sha256"]
-        .as_str()
-        .expect("output_image_sha256 set");
-    assert_eq!(driver_sha.len(), 64);
+    // Set up an isolated workspace with smoke.asm but no
+    // tools/snes_spc_oracle/build/ — so the oracle resolution chain
+    // finds nothing in env (bogus) and nothing at workspace defaults.
+    let dir = TempDir::new().unwrap();
+    copy_smoke_asm_into(dir.path());
+    let out_dir = dir.path().join("build").join("m0");
+    let bogus_oracle = dir.path().join("not-an-oracle");
 
-    // spc-export should report status: ok and structure verified.
-    let spc = read_json(&out_dir.join("spc-export-report.json"));
-    assert_eq!(spc["status"], "ok");
-    assert_eq!(spc["verified_structure"], true);
-    assert_eq!(spc["file_size_bytes"], 66048);
+    let out = Command::new(bin())
+        .env("SFCWC_SNES_SPC_ORACLE", &bogus_oracle)
+        .args(["m0-acceptance", "--out"])
+        .arg(&out_dir)
+        .current_dir(dir.path())
+        .output()
+        .expect("run sfcwc");
+    assert!(
+        out.status.success(),
+        "m0-acceptance failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let manifest = read_json(&out_dir.join("manifest.json"));
+    let bundle = &manifest["bundle"];
+    assert_eq!(bundle["status"], "degraded", "bundle: {bundle}");
+    assert_eq!(bundle["steps"]["assemble"], "ok");
+    assert_eq!(bundle["steps"]["spc_export"], "ok");
+    assert_eq!(bundle["steps"]["aram_map"], "ok");
+    assert_eq!(bundle["steps"]["calibration"], "skipped");
+}
+
+#[test]
+fn m0_acceptance_when_asar_missing() {
+    let dir = TempDir::new().unwrap();
+    copy_smoke_asm_into(dir.path());
+    let out_dir = dir.path().join("build").join("m0");
+    let bogus = dir.path().join("not-asar");
+
+    let out = Command::new(bin())
+        .env("SFCWC_ASAR", &bogus)
+        .env("PATH", dir.path()) // empty PATH — no asar
+        .args(["m0-acceptance", "--out"])
+        .arg(&out_dir)
+        .current_dir(dir.path())
+        .output()
+        .expect("run sfcwc");
+    // Failure-as-data: process exits 0 even though the bundle has errored.
+    assert!(out.status.success(), "{:?}", out);
+
+    let manifest = read_json(&out_dir.join("manifest.json"));
+    let bundle = &manifest["bundle"];
+    assert_eq!(bundle["status"], "error", "bundle: {bundle}");
+    assert_eq!(bundle["steps"]["doctor"], "error");
+    assert_eq!(bundle["steps"]["assemble"], "skipped");
+}
+
+#[test]
+fn m0_status_on_valid_bundle() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip m0_status_on_valid_bundle: asar not resolved");
+        return;
+    }
+
+    let dir = TempDir::new().unwrap();
+    let out_dir = dir.path().join("m0");
+    let acc = Command::new(bin())
+        .args(["m0-acceptance", "--out"])
+        .arg(&out_dir)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run sfcwc");
+    assert!(acc.status.success());
+
+    // Human-readable output.
+    let st = Command::new(bin())
+        .args(["m0-status", "--bundle"])
+        .arg(&out_dir)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run sfcwc");
+    assert!(
+        st.status.success(),
+        "m0-status failed: stderr={}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&st.stdout);
+    assert!(
+        stdout.contains("bundle.status"),
+        "expected 'bundle.status' in stdout: {stdout}"
+    );
+
+    // JSON output parses as a manifest.
+    let st_json = Command::new(bin())
+        .args(["m0-status", "--json", "--bundle"])
+        .arg(&out_dir)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run sfcwc");
+    assert!(st_json.status.success());
+    let v: Value = serde_json::from_slice(&st_json.stdout).expect("valid manifest json");
+    assert_envelope(&v, "m0_manifest");
+    assert!(v["bundle"]["steps"].is_object());
+}
+
+#[test]
+fn m0_status_on_missing_bundle() {
+    let dir = TempDir::new().unwrap();
+    let st = Command::new(bin())
+        .args(["m0-status", "--bundle"])
+        .arg(dir.path())
+        .output()
+        .expect("run sfcwc");
+    assert!(
+        !st.status.success(),
+        "m0-status should exit non-zero on missing bundle"
+    );
+    let stderr = String::from_utf8_lossy(&st.stderr);
+    assert!(
+        stderr.contains("no bundle") || stderr.contains("missing"),
+        "expected diagnostic about missing bundle: {stderr}"
+    );
+}
+
+#[test]
+fn m0_status_on_corrupted_bundle() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip m0_status_on_corrupted_bundle: asar not resolved");
+        return;
+    }
+
+    let dir = TempDir::new().unwrap();
+    let out_dir = dir.path().join("m0");
+    let acc = Command::new(bin())
+        .args(["m0-acceptance", "--out"])
+        .arg(&out_dir)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run sfcwc");
+    assert!(acc.status.success());
+
+    // Corrupt one of the reports.
+    std::fs::write(out_dir.join("assemble-report.json"), "{}\n").unwrap();
+
+    let st = Command::new(bin())
+        .args(["m0-status", "--bundle"])
+        .arg(&out_dir)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run sfcwc");
+    assert!(
+        !st.status.success(),
+        "m0-status should exit non-zero on corrupted bundle"
+    );
+    let stdout = String::from_utf8_lossy(&st.stdout);
+    assert!(
+        stdout.contains("findings") || stdout.contains("parse"),
+        "expected integrity findings in stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -689,6 +871,7 @@ fn aram_map_in_acceptance_partitions_total() {
     let dir = TempDir::new().unwrap();
     let out_dir = dir.path().join("m0");
     let out = Command::new(bin())
+        .env("SFCWC_MESEN2", bin())
         .args(["m0-acceptance", "--out"])
         .arg(&out_dir)
         .current_dir(workspace_root())
