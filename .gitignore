@@ -5,6 +5,9 @@
 # Build output for compiled SNES artifacts (.spc, .sfc, BRR pools, etc.)
 /build/
 
+# Oracle wrapper build artifacts (the C++ binary is built out-of-band).
+/tools/snes_spc_oracle/build/
+
 # Windows
 Thumbs.db
 ehthumbs.db
