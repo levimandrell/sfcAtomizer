@@ -2,18 +2,107 @@
 
 ## Current milestone
 
-**M1 in progress — packer + ARAM meter live.** `sfcwc pack` runs
-project → encode-each → ARAM image + map. GUI shows the meter as a
-segmented bar with echo callout, numeric breakdown, and warnings;
-recomputes on edits. Driver code is a 4 KiB zero placeholder until
-M1.5 replaces it with the assembled `sample_basic` driver.
-
-**M0 artifacts are producer-side only.** M1 owns the first audible
-driver. The NOP+BRA M0 smoke driver (`core/fixtures/asm/m0_smoke.asm`)
-is intentionally non-functional and will be replaced wholesale at
-M1.5 — do not reuse it as a base for M1.5 driver work.
+**M1 in progress — first audible `.spc` shipped.** `sfcwc
+compile-spc` produces a 66,048-byte SPC700 v0.30 file that the
+snes_spc oracle renders as audible PCM (max_abs=11072, rms=5520
+for a synthesized 8000-amp sine fixture, well above the
+min_max_abs=1000 / min_rms=200 thresholds). The
+`sample_basic` driver assembles to 324 bytes — well under the
+4 KiB budget. Real driver replaces the M1.4 zero placeholder
+in the packer's driver_code region.
 
 ## Last pass
+
+**Pass M1.5 — First real SPC700 driver + audible `.spc`.**
+
+- Phase A: `core/fixtures/asm/m1_sample_basic.asm` — sample_basic
+  driver per SPEC §20.1. Init writes FLG mute first, configures
+  master vol, DIR, all echo regs (FIR + ESA + EDL before EON),
+  then voice 0 (vol/pan/pitch/SRCN/ADSR/GAIN), then unmutes,
+  sets dp state, KONs voice 0, writes the `$A5 $5A $01
+  status_flags` ready signature. Polling main loop dispatches
+  STOP / RESET_TO_IPL / PING / invalid commands. Sentinel
+  `$DE $AD $BE $EF` after `driver_end` for length detection.
+  Same asar mapper trick as M0.3 (`lorom + arch spc700 + org
+  $008200 + base $0200`).
+- Phase B: New `core::driver_build` module — generates
+  `m1_constants.inc` from project + map, writes scratch
+  `.asm` + `.inc` to a tempdir, invokes asar via the existing
+  `AsarBackend`, locates the sentinel pattern in the 64 KB
+  output, slices driver bytes, bound-checks against
+  `DRIVER_CODE_BUDGET_M1` (4 KiB), SHA-256s the result. Driver
+  source `include_str!`'d into the core crate so the host has
+  no runtime workspace-layout dependency. Per-project constants
+  cover voice 0 (constant-power pan formula, M1.0 pitch register,
+  ADSR/GAIN tagged-union register mapping), master volume
+  (hard-pinned to `$7F` for M1 — schema doesn't expose a
+  master-vol field yet), source-directory page (from map),
+  echo (FLG ECEN bit, ESA from map, EDL/FIR/EFB/EVOL from
+  master_echo, EON gated by per-voice + master).
+- Phase C: `compile_aram_image` orchestrates encode → shadow
+  pack → driver_build → real pack. Both `sfcwc pack` and the
+  new `sfcwc compile-spc` consume it. `--driver` flag on `pack`
+  remains as an optional override for testing; default is the
+  real driver.
+- Phase D: New `sfcwc compile-spc` CLI subcommand. Loads +
+  validates project, runs the full pipeline, builds an SPC v0.30
+  via the new `core::spc::build_m1_image` (M1 contract: PC=$0200,
+  GPRs=0, SP=$EF, DSP regs all zero — driver writes FLG=$60 mute
+  on its first instruction). Writes image, map, SPC, and a
+  `CompileSpcReport` carrying every SHA. Exit codes 0/1/2/3/4.
+- Phase E: New `sfcwc verify-spc-audible` CLI subcommand. Renders
+  the SPC through the snes_spc oracle, recomputes max_abs/rms in
+  Rust (defensive, mirrors M0.5 calibrate-oracle pattern), writes
+  an `AudibleVerificationReport` with `status: ok | silent_fail
+  | oracle_error`. Exit 0 ok, 1 IO/oracle error, 2 silent_fail.
+- Phase F: GUI "Compile SPC" + "Verify Audible" buttons in the
+  project detail panel. Both run in-process. Compile-SPC writes
+  to `<project_dir>/.sfcwc-build/<name>.spc`; Verify-Audible
+  spawns the oracle and shows max_abs/rms inline.
+- Phase G: 14 driver_build unit tests (pan formula, envelope
+  mapping, FLG bits, status-flag bits, pitch, src-dir page,
+  active-sample resolution, missing-source error, .inc text
+  shape) + 5 integration tests (real asar invocation,
+  determinism, sample-index encoding, asm-path existence) +
+  5 CLI tests (compile-spc happy path, invalid-project,
+  verify-audible-ok / silent_fail / oracle-missing) + 2
+  round-trip tests for the new report types. **295 tests
+  across the workspace; all green.**
+
+### Audible verification result (M1.5 acceptance gate)
+
+```
+verify-spc-audible: 16384 frames, max_abs=11072, rms=5519.6,
+status=ok; report -> build/m1/<...>.audible-report.json
+```
+
+The same project's M0 smoke `.spc` (FLG=$60 mute) correctly
+trips `silent_fail` (max_abs=0, rms=0, exit=2).
+
+### M1.5 baseline-locked SHAs
+
+For a one-sample project (8192-frame 8000-amp sine, 32 kHz,
+echo off, GAIN=127):
+
+```
+M1_5_DRIVER_CODE_SHA256 = 52f9c26bad6df33875f16ae2ef4a6a4e0e5c265e29af74db103b393daef24955
+M1_5_ARAM_IMAGE_SHA256  = b384617ff4d45c5da965d27bd74926070eb3b4985fb051bcda25165f7bfb54eb
+M1_5_SPC_FILE_SHA256    = edd02b030e1c0f574c4ff1f64dc80f1c643d2ba18628a6f67a35dc93b8759315
+```
+
+Driver assembled size: **324 bytes** (out of 4 KiB budget).
+
+### Mesen2 smoke (engineer self-check)
+
+Mesen2 is **not installed on this host** (`SFCWC_MESEN2` unset,
+no Mesen executable located). The oracle render is the formal
+M1.5 acceptance gate per SPEC §17 / §18 — it confirms the SPC
+plays audibly. **User audible audition is queued for return**;
+when the user is back at their desktop, opening
+`build/m1/<name>.spc` in Mesen2 should produce a sustained
+sine tone matching the source (32 kHz at root pitch).
+
+## Previous passes
 
 **Pass M1.4 — ARAM packer v1 + ARAM meter.**
 
@@ -666,6 +755,56 @@ test` all green.
   bytes alongside max_abs/rms; the bundle pulls it from one place
   rather than parsing the wrapper's report.
 
+### M1 driver / compile-spc / audible-verify decisions (M1.5)
+
+- **Driver constants format: asar `name = $XX` (label assignment)**
+  (M1.5). The `m1_constants.inc` file uses asar's `name = value`
+  syntax (label numeric assignment); `mov $f3, #voice0_voll`
+  resolves to `mov $f3, #$XX` at assemble time. Cleaner than
+  `!define`, no usage-site `!` prefix.
+- **Driver end marker: 4-byte sentinel `$DE $AD $BE $EF`**
+  (M1.5). Single-byte sentinels collide with legitimate
+  instruction bytes (the driver contains `$EE` and `$FF` in
+  immediate fields). The 4-byte pattern is distinctive enough
+  to find unambiguously by linear scan from offset $0200, and
+  lets driver_build avoid teaching itself the SPC700 instruction
+  encoding.
+- **Master volume hard-pinned to `$7F`** (M1.5). The §16.4
+  schema doesn't expose a project-level master_voll/master_volr
+  field. M1 ships max-loud and documents the deviation; if a
+  future pass adds project master volume, that's a non-breaking
+  schema extension with default = $7F.
+- **SPC initial DSP state: all zero, driver writes FLG=$60 first**
+  (M1.5). Matches what happens on real hardware after IPL upload
+  — the SPC starts with whatever DSP state the BIOS left, the
+  driver mutes immediately on its first instruction, and unmutes
+  later in init after voices/echo/source-dir are programmed.
+  Simpler than computing DSP regs at compile time + identical
+  observable behavior after the first ~4 instructions.
+- **Audible verification thresholds: `min_max_abs=1000`,
+  `min_rms=200`** (M1.5). For a unity-gain sine sample at MID
+  amplitude these are easily exceeded (observed 11072 / 5520).
+  `silent_fail` correctly catches the M0 muted smoke (0 / 0).
+  Tunable via CLI flags. M1.6+ may tighten or add per-genre
+  thresholds.
+- **Driver-source embedding via `include_str!`** (M1.5). The
+  canonical `m1_sample_basic.asm` is built into the host crate
+  at compile time; runtime invocation writes it to a tempdir
+  alongside the generated `m1_constants.inc` for asar. Means
+  the host has zero filesystem-layout assumptions and the
+  driver source ships in every binary.
+- **`tempfile` promoted from dev-dep to regular dep** (M1.5).
+  Host orchestration (CLI + GUI compile-spc paths) needs a
+  scratch directory for asar; tempfile was already in the
+  workspace, so this is a re-classification not a new crate.
+- **Empirical DSP register write order** (M1.5): mute (FLG=$60)
+  → clear KON/KOFF → master vol → DIR → echo params (FIR / ESA /
+  EDL) → EON last → voice 0 regs → unmute (FLG=running) → DP
+  state → KON → ready signature. Echo params before EON so the
+  buffer pointer is set before any echo write can reach RAM.
+  Mute around the whole init so DAC stays silent through the
+  ~50 µs setup.
+
 ### M1 packer / ARAM meter decisions (M1.4)
 
 - **Driver code budget M1.4: 4 KiB at $0200..$1200** (`DRIVER_CODE_BUDGET_M1`).
@@ -929,8 +1068,7 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M1.5 — first real SPC700 driver + `.spc` audible playback.**
-PM to brief. The packer reserves a 4 KiB driver region at `$0200`
-that M1.4 fills with zeros; M1.5 replaces with the assembled
-`sample_basic` driver and wires `.spc` export to consume the M1
-ARAM image rather than the muted M0 smoke contract.
+**M1.6 — `.sfc` test ROM + module swap.** PM to brief.
+With audible `.spc` shipped, the next surface is the 65816 IPL
+upload contract (SPEC §19.2) so the same compiled ARAM image
+boots through a real `.sfc` cartridge container.

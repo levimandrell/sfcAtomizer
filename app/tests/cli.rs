@@ -1296,6 +1296,211 @@ fn preview_brr_writes_wav_and_report() {
 }
 
 // =============================================================================
+// M1.5 — compile-spc / verify-spc-audible
+// =============================================================================
+
+#[test]
+fn cli_compile_spc_happy_path() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip cli_compile_spc_happy_path: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "compile_demo");
+
+    let spc = dir.path().join("demo.spc");
+    let image = dir.path().join("demo.aram.bin");
+    let map = dir.path().join("demo.aram-map.json");
+    let report = dir.path().join("demo.compile-report.json");
+
+    let out = Command::new(bin())
+        .args(["compile-spc", "--project"])
+        .arg(&proj)
+        .args(["--out-spc"])
+        .arg(&spc)
+        .args(["--out-image"])
+        .arg(&image)
+        .args(["--out-map"])
+        .arg(&map)
+        .args(["--out-report"])
+        .arg(&report)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let spc_bytes = std::fs::read(&spc).unwrap();
+    assert_eq!(spc_bytes.len(), 0x10200);
+    let aram_bytes = std::fs::read(&image).unwrap();
+    assert_eq!(aram_bytes.len(), 0x10000);
+    // Driver bytes start at offset $0200 — first instruction is
+    // `mov $f2, #$6c` ⇒ $8F $6C $F2.
+    assert_eq!(&aram_bytes[0x200..0x203], &[0x8F, 0x6C, 0xF2]);
+    let v = read_json(&report);
+    assert_envelope(&v, "compile_spc");
+    let driver_bytes = v["driver_code_bytes"].as_u64().unwrap();
+    assert!((100..=4096).contains(&driver_bytes));
+}
+
+#[test]
+fn cli_compile_spc_invalid_project_returns_2() {
+    if !sfc_atomizer_core::tools::resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = dir.path().join("bad.sfcproj.json");
+    Command::new(bin())
+        .args(["new-project", "--out"])
+        .arg(&proj)
+        .args(["--name", "bad"])
+        .output()
+        .unwrap();
+    let out = Command::new(bin())
+        .args(["compile-spc", "--project"])
+        .arg(&proj)
+        .args(["--out-spc"])
+        .arg(dir.path().join("x.spc"))
+        .args(["--out-image"])
+        .arg(dir.path().join("x.bin"))
+        .args(["--out-map"])
+        .arg(dir.path().join("x.json"))
+        .args(["--out-report"])
+        .arg(dir.path().join("x.report.json"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn cli_verify_spc_audible_oracle_resolved() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved || !oracle_resolved_for_test() {
+        eprintln!(
+            "skip cli_verify_spc_audible_oracle_resolved: asar={} oracle={}",
+            resolve_asar().resolved,
+            oracle_resolved_for_test()
+        );
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "audible_demo");
+    let spc = dir.path().join("audible.spc");
+
+    // Compile.
+    let compile = Command::new(bin())
+        .args(["compile-spc", "--project"])
+        .arg(&proj)
+        .args(["--out-spc"])
+        .arg(&spc)
+        .args(["--out-image"])
+        .arg(dir.path().join("a.bin"))
+        .args(["--out-map"])
+        .arg(dir.path().join("a.map.json"))
+        .args(["--out-report"])
+        .arg(dir.path().join("a.compile.json"))
+        .output()
+        .unwrap();
+    assert_eq!(compile.status.code(), Some(0), "{:?}", compile);
+
+    // Verify.
+    let report = dir.path().join("audible-report.json");
+    let pcm = dir.path().join("audible.pcm");
+    let oracle = oracle_wrapper_path();
+    let out = Command::new(bin())
+        .args(["verify-spc-audible", "--spc"])
+        .arg(&spc)
+        .args(["--frames", "8192"])
+        .args(["--out-report"])
+        .arg(&report)
+        .args(["--out-pcm"])
+        .arg(&pcm)
+        .args(["--oracle"])
+        .arg(&oracle)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = read_json(&report);
+    assert_envelope(&v, "audible_verification");
+    assert_eq!(v["status"], "ok");
+    let max_abs = v["observed"]["max_abs"].as_u64().unwrap();
+    assert!(max_abs >= 1000, "max_abs {max_abs} below threshold");
+}
+
+#[test]
+fn cli_verify_spc_audible_silent_fixture_fails() {
+    if !oracle_resolved_for_test() {
+        eprintln!("skip: oracle not resolved");
+        return;
+    }
+    // Build the M0 muted smoke .spc by writing a 66048-byte buffer
+    // with only the magic + the M0 contract bytes set. Easier: we
+    // know the m0-acceptance test produces it, so reuse that path.
+    let dir = TempDir::new().unwrap();
+    // Instead of running m0-acceptance (heavy), construct a muted
+    // SPC inline: build_smoke_image needs a 64KB ARAM blob; use
+    // all zeros (driver doesn't run audibly with FLG=$60 mute).
+    use sfc_atomizer_core::spc::{build_smoke_image, SPC_FILE_SIZE};
+    let aram = vec![0u8; 0x10000];
+    let img = build_smoke_image(aram).unwrap();
+    let spc_bytes = img.to_bytes().unwrap();
+    assert_eq!(spc_bytes.len(), SPC_FILE_SIZE);
+    let spc = dir.path().join("muted.spc");
+    std::fs::write(&spc, &spc_bytes).unwrap();
+
+    let report = dir.path().join("muted-report.json");
+    let pcm = dir.path().join("muted.pcm");
+    let oracle = oracle_wrapper_path();
+    let out = Command::new(bin())
+        .args(["verify-spc-audible", "--spc"])
+        .arg(&spc)
+        .args(["--frames", "4096"])
+        .args(["--out-report"])
+        .arg(&report)
+        .args(["--out-pcm"])
+        .arg(&pcm)
+        .args(["--oracle"])
+        .arg(&oracle)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "expected silent_fail exit 2");
+    let v = read_json(&report);
+    assert_eq!(v["status"], "silent_fail");
+}
+
+#[test]
+fn cli_verify_spc_audible_oracle_missing_returns_1() {
+    let dir = TempDir::new().unwrap();
+    let bogus_spc = dir.path().join("nope.spc");
+    // Force oracle missing via a definitely-not-an-executable env
+    // pointing at a non-existent file.
+    let report = dir.path().join("r.json");
+    let pcm = dir.path().join("p.pcm");
+    let bogus_oracle = dir.path().join("nonexistent_oracle.exe");
+    let out = Command::new(bin())
+        .env("SFCWC_SNES_SPC_ORACLE", &bogus_oracle)
+        .args(["verify-spc-audible", "--spc"])
+        .arg(&bogus_spc)
+        .args(["--out-report"])
+        .arg(&report)
+        .args(["--out-pcm"])
+        .arg(&pcm)
+        // Explicitly DON'T pass --oracle so the resolver path runs.
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+}
+
+// =============================================================================
 // M1.4 — pack
 // =============================================================================
 
