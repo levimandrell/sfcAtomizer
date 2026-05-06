@@ -11,16 +11,20 @@ use sfc_atomizer_core::aram::{map_from_image, ARAM_LEN};
 use sfc_atomizer_core::asm::{
     sha256_hex, sha256_hex_file, AsarBackend, AssembleError, AssembleInput, AssemblerBackend,
 };
-use sfc_atomizer_core::audio::AudioFormat;
+use sfc_atomizer_core::audio::{decode_to_mono_pcm, probe, AudioDecodeError, AudioFormat};
+use sfc_atomizer_core::audition::export_decoded_brr_wav;
+use sfc_atomizer_core::brr_encoder::{encode as brr_encode, encode_looped, EncodeOptions};
 use sfc_atomizer_core::brr_fixtures::{run_fixture, M0_RAW_DECODE_FIXTURES};
 use sfc_atomizer_core::import::{import_audio, ImportError, ImportOptions};
+use sfc_atomizer_core::loop_finder::{find_loop_candidates, LoopFinderOptions};
 use sfc_atomizer_core::manifest::verify_bundle;
 use sfc_atomizer_core::project::{ProjectIoError, ProjectV1, ValidationError};
 use sfc_atomizer_core::report::{
-    AramKind, AramMapReport, AssembleReport, AssembleStatus, BrrFixtureReport, BundleStatus,
-    BundleSteps, BundleSummary, CalibrationReport, CalibrationStatus, DoctorReport, DoctorStatus,
-    DoctorTools, FixtureSetInfo, M0Manifest, ObservedInfo, OracleInfo, ProvisionalTolerances,
-    RenderInfo, RustInfo, SpcExportReport, SpcInitialState, SpcStatus, StepStatus, ToolStatus,
+    AramKind, AramMapReport, AssembleReport, AssembleStatus, AuditionReport, BrrEncodeBlock,
+    BrrEncodeReport, BrrFixtureReport, BundleStatus, BundleSteps, BundleSummary, CalibrationReport,
+    CalibrationStatus, DoctorReport, DoctorStatus, DoctorTools, FixtureSetInfo, LoopCandidateJson,
+    LoopFinderReport, M0Manifest, ObservedInfo, OracleInfo, ProvisionalTolerances, RenderInfo,
+    RustInfo, SpcExportReport, SpcInitialState, SpcStatus, StepStatus, ToolStatus,
     ValidationErrorJson, ValidationReport, ValidationStatus, SCHEMA_VERSION,
 };
 use sfc_atomizer_core::spc::{
@@ -136,6 +140,51 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Encode a WAV / AIFF / BRR audio file to BRR bytes (M1.3).
+    ///
+    /// Decodes via the same path as `import` (mono mix, 16-bit PCM),
+    /// runs the M1 BRR encoder, and writes both the `.brr` byte file
+    /// and a structured `BrrEncodeReport`.
+    EncodeBrr {
+        #[arg(long)]
+        audio: PathBuf,
+        #[arg(long)]
+        out_brr: PathBuf,
+        #[arg(long)]
+        out_report: Option<PathBuf>,
+        /// If set, encode as a looped sample with the loop entry at
+        /// this sample index (must be a multiple of 16).
+        #[arg(long)]
+        loop_start_sample: Option<u32>,
+        /// Allow filter 1..=3 on block 0. Default forces filter 0 for
+        /// safety against predictor history at KON.
+        #[arg(long)]
+        no_force_filter_0_first_block: bool,
+    },
+    /// Decode a BRR file to a 16-bit mono PCM WAV for offline preview.
+    PreviewBrr {
+        #[arg(long)]
+        brr: PathBuf,
+        #[arg(long)]
+        out_wav: PathBuf,
+        #[arg(long)]
+        out_report: Option<PathBuf>,
+        #[arg(long, default_value_t = 32000u32)]
+        sample_rate_hz: u32,
+    },
+    /// Search for sustain-loop candidates in a sample.
+    FindLoopCandidates {
+        #[arg(long)]
+        audio: PathBuf,
+        #[arg(long)]
+        out_report: PathBuf,
+        #[arg(long, default_value_t = 32u32)]
+        window_samples: u32,
+        #[arg(long, default_value_t = 8u32)]
+        max_candidates: u32,
+        #[arg(long)]
+        no_snap_to_brr_block: bool,
+    },
     /// Import a WAV / AIFF / BRR audio file as a new sample-pool entry.
     ///
     /// Default behaviour copies the source into `<project_dir>/audio/`
@@ -214,6 +263,38 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::ValidateProject { project, json, out } => {
             cmd_validate_project(&project, json, out.as_deref())
         }
+        Command::EncodeBrr {
+            audio,
+            out_brr,
+            out_report,
+            loop_start_sample,
+            no_force_filter_0_first_block,
+        } => cmd_encode_brr(
+            &audio,
+            &out_brr,
+            out_report.as_deref(),
+            loop_start_sample,
+            !no_force_filter_0_first_block,
+        ),
+        Command::PreviewBrr {
+            brr,
+            out_wav,
+            out_report,
+            sample_rate_hz,
+        } => cmd_preview_brr(&brr, &out_wav, out_report.as_deref(), sample_rate_hz),
+        Command::FindLoopCandidates {
+            audio,
+            out_report,
+            window_samples,
+            max_candidates,
+            no_snap_to_brr_block,
+        } => cmd_find_loop_candidates(
+            &audio,
+            &out_report,
+            window_samples as usize,
+            max_candidates as usize,
+            !no_snap_to_brr_block,
+        ),
         Command::Import {
             project,
             audio,
@@ -1562,6 +1643,237 @@ fn cmd_import(project: &Path, audio: &Path, options: ImportOptions) -> Result<()
             std::process::exit(exit_code);
         }
     }
+}
+
+// =============================================================================
+// encode-brr / preview-brr / find-loop-candidates (M1.3)
+// =============================================================================
+
+fn cmd_encode_brr(
+    audio: &Path,
+    out_brr: &Path,
+    out_report: Option<&Path>,
+    loop_start_sample: Option<u32>,
+    force_filter_0_first_block: bool,
+) -> Result<(), CliError> {
+    let metadata = match probe(audio) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("encode-brr: probe failed for {}: {e}", audio.display());
+            std::process::exit(1);
+        }
+    };
+    let pcm = match decode_to_mono_pcm(audio) {
+        Ok(p) => p,
+        Err(e) => {
+            let exit = match &e {
+                AudioDecodeError::Probe(_) | AudioDecodeError::Io(_) => 1,
+                AudioDecodeError::Symphonia(_) | AudioDecodeError::FrameCountMismatch { .. } => 2,
+            };
+            eprintln!("encode-brr: decode failed for {}: {e}", audio.display());
+            std::process::exit(exit);
+        }
+    };
+
+    let opts = EncodeOptions {
+        force_filter_0_first_block,
+        loop_entry_block_index: None,
+    };
+    let encode_result = match loop_start_sample {
+        Some(start) => match encode_looped(&pcm, start, &opts) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("encode-brr: {e}");
+                std::process::exit(2);
+            }
+        },
+        None => brr_encode(&pcm, &opts),
+    };
+
+    if let Some(parent) = out_brr.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir(parent)?;
+        }
+    }
+    std::fs::write(out_brr, &encode_result.bytes).map_err(|source| CliError::Io {
+        path: out_brr.to_path_buf(),
+        source,
+    })?;
+
+    let source_sha = sfc_atomizer_core::asm::sha256_hex_file(audio).unwrap_or_default();
+    let output_sha = sfc_atomizer_core::asm::sha256_hex(&encode_result.bytes);
+
+    let summary = encode_result.summary;
+    let report = BrrEncodeReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: BrrEncodeReport::REPORT_TYPE.to_string(),
+        source_path: audio.display().to_string(),
+        source_sha256: source_sha,
+        source_frames: metadata.frames,
+        source_sample_rate_hz: metadata.sample_rate_hz,
+        output_path: out_brr.display().to_string(),
+        output_sha256: output_sha,
+        output_bytes: encode_result.bytes.len() as u64,
+        total_blocks: summary.total_blocks,
+        overall_rms_error: summary.overall_rms_error,
+        overall_peak_error: summary.overall_peak_error,
+        total_clamp_count: summary.total_clamp_count,
+        filter_distribution: summary.filter_distribution,
+        force_filter_0_first_block,
+        loop_start_sample,
+        loop_entry_block_index: loop_start_sample.map(|s| s / 16),
+        loop_click_score: summary.loop_click_score,
+        blocks: encode_result
+            .blocks
+            .iter()
+            .map(|b| BrrEncodeBlock {
+                index: b.index,
+                filter: b.filter,
+                shift: b.shift,
+                end_flag: b.end_flag,
+                loop_flag: b.loop_flag,
+                block_rms_error: b.block_rms_error,
+                block_peak_error: b.block_peak_error,
+                block_clamp_count: b.block_clamp_count,
+            })
+            .collect(),
+    };
+
+    if let Some(p) = out_report {
+        write_json(p, &report)?;
+    }
+
+    eprintln!(
+        "encode-brr: {} -> {} ({} blocks, {} bytes; rms={:.2}, peak={}, clamps={})",
+        audio.display(),
+        out_brr.display(),
+        summary.total_blocks,
+        encode_result.bytes.len(),
+        summary.overall_rms_error,
+        summary.overall_peak_error,
+        summary.total_clamp_count,
+    );
+
+    Ok(())
+}
+
+fn cmd_preview_brr(
+    brr: &Path,
+    out_wav: &Path,
+    out_report: Option<&Path>,
+    sample_rate_hz: u32,
+) -> Result<(), CliError> {
+    let brr_bytes = std::fs::read(brr).map_err(|source| CliError::Io {
+        path: brr.to_path_buf(),
+        source,
+    })?;
+
+    let report_inner = match export_decoded_brr_wav(&brr_bytes, sample_rate_hz, out_wav) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("preview-brr: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let input_sha = sfc_atomizer_core::asm::sha256_hex(&brr_bytes);
+    let wav_bytes = std::fs::read(out_wav).map_err(|source| CliError::Io {
+        path: out_wav.to_path_buf(),
+        source,
+    })?;
+    let output_sha = sfc_atomizer_core::asm::sha256_hex(&wav_bytes);
+
+    let report = AuditionReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: AuditionReport::REPORT_TYPE.to_string(),
+        input_path: brr.display().to_string(),
+        input_sha256: input_sha,
+        output_path: out_wav.display().to_string(),
+        output_sha256: output_sha,
+        blocks_decoded: report_inner.blocks_decoded,
+        samples_written: report_inner.samples_written,
+        bytes_written: report_inner.bytes_written,
+        sample_rate_hz,
+    };
+    if let Some(p) = out_report {
+        write_json(p, &report)?;
+    }
+
+    eprintln!(
+        "preview-brr: {} -> {} ({} blocks, {} samples, {} Hz)",
+        brr.display(),
+        out_wav.display(),
+        report_inner.blocks_decoded,
+        report_inner.samples_written,
+        sample_rate_hz,
+    );
+    Ok(())
+}
+
+fn cmd_find_loop_candidates(
+    audio: &Path,
+    out_report: &Path,
+    window_samples: usize,
+    max_candidates: usize,
+    snap_to_brr_block: bool,
+) -> Result<(), CliError> {
+    let metadata = match probe(audio) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!(
+                "find-loop-candidates: probe failed for {}: {e}",
+                audio.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    let pcm = match decode_to_mono_pcm(audio) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "find-loop-candidates: decode failed for {}: {e}",
+                audio.display()
+            );
+            std::process::exit(2);
+        }
+    };
+
+    let opts = LoopFinderOptions {
+        window_samples,
+        max_candidates,
+        snap_to_brr_block,
+    };
+    let candidates = find_loop_candidates(&pcm, &opts);
+    let source_sha = sfc_atomizer_core::asm::sha256_hex_file(audio).unwrap_or_default();
+
+    let report = LoopFinderReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: LoopFinderReport::REPORT_TYPE.to_string(),
+        source_path: audio.display().to_string(),
+        source_sha256: source_sha,
+        source_frames: metadata.frames,
+        window_samples: window_samples as u32,
+        snap_to_brr_block,
+        candidates: candidates
+            .iter()
+            .map(|c| LoopCandidateJson {
+                start_sample: c.start_sample,
+                end_sample: c.end_sample,
+                rms_window_difference: c.rms_window_difference,
+                seam_click: c.seam_click,
+                score: c.score,
+            })
+            .collect(),
+    };
+    write_json(out_report, &report)?;
+
+    eprintln!(
+        "find-loop-candidates: {} -> {} ({} candidates)",
+        audio.display(),
+        out_report.display(),
+        report.candidates.len(),
+    );
+    Ok(())
 }
 
 fn print_validate_summary(report: &ValidationReport) {

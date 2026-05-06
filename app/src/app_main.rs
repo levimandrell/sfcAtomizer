@@ -14,7 +14,11 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
+use sfc_atomizer_core::audio::decode_to_mono_pcm;
+use sfc_atomizer_core::audition::export_decoded_brr_wav;
+use sfc_atomizer_core::brr_encoder::{encode as brr_encode, encode_looped, EncodeOptions};
 use sfc_atomizer_core::import::{import_audio, ImportOptions};
+use sfc_atomizer_core::loop_finder::{find_loop_candidates, LoopCandidate, LoopFinderOptions};
 use sfc_atomizer_core::project::{ProjectV1, SampleSlot, ValidationError};
 
 const WINDOW_DEFAULT_WIDTH: f32 = 1024.0;
@@ -53,9 +57,20 @@ struct SfcwcApp {
     save_as_modal: ModalState,
     new_modal: NewModalState,
     show_errors_modal: bool,
+    loop_candidates_modal: LoopCandidatesModalState,
 
     // One-shot status message (e.g. "loaded /tmp/x.json").
     status_message: Option<String>,
+}
+
+#[derive(Default)]
+struct LoopCandidatesModalState {
+    visible: bool,
+    /// Sample id the candidates were computed for; clicking Apply on a
+    /// candidate writes back to this id, so a sample switch in between
+    /// closes the modal rather than corrupting the wrong slot.
+    target_sample_id: Option<String>,
+    candidates: Vec<LoopCandidate>,
 }
 
 #[derive(Default)]
@@ -146,6 +161,7 @@ impl eframe::App for SfcwcApp {
         self.draw_save_as_modal(ctx);
         self.draw_new_modal(ctx);
         self.draw_errors_modal(ctx);
+        self.draw_loop_candidates_modal(ctx);
     }
 }
 
@@ -323,8 +339,10 @@ impl SfcwcApp {
     }
 
     fn draw_center(&mut self, ctx: &egui::Context) {
+        let selected = self.selected_sample_id.clone();
+        let mut response = SampleDetailResponse::default();
         egui::CentralPanel::default().show(ctx, |ui| {
-            let Some(project) = self.project.as_ref() else {
+            let Some(project) = self.project.as_mut() else {
                 ui.vertical_centered(|ui| {
                     ui.add_space(40.0);
                     ui.label("Open a project from the File menu.");
@@ -333,9 +351,11 @@ impl SfcwcApp {
                 });
                 return;
             };
-            match self.selected_sample_id.as_deref() {
-                Some(id) => match project.sample_pool.iter().find(|s| s.id == id) {
-                    Some(s) => draw_sample_detail(ui, s),
+            match selected.as_deref() {
+                Some(id) => match project.sample_pool.iter_mut().find(|s| s.id == id) {
+                    Some(s) => {
+                        response = draw_sample_detail(ui, s);
+                    }
                     None => {
                         ui.weak(format!("(selected sample {id} not in pool)"));
                     }
@@ -343,6 +363,17 @@ impl SfcwcApp {
                 None => draw_project_detail(ui, project),
             }
         });
+        if response.edited {
+            if let Some(p) = self.project.as_ref() {
+                self.validation_errors = p.validate().err().unwrap_or_default();
+            }
+        }
+        if response.find_loops {
+            self.do_find_loops();
+        }
+        if response.preview_brr {
+            self.do_preview_brr();
+        }
     }
 
     fn draw_open_modal(&mut self, ctx: &egui::Context) {
@@ -441,6 +472,202 @@ impl SfcwcApp {
         }
     }
 
+    fn do_find_loops(&mut self) {
+        let Some(sample_id) = self.selected_sample_id.clone() else {
+            self.status_message = Some("find loops: no sample selected".to_string());
+            return;
+        };
+        let Some(project) = self.project.as_ref() else {
+            return;
+        };
+        let Some(sample) = project.sample_pool.iter().find(|s| s.id == sample_id) else {
+            return;
+        };
+        let Some(audio_path) = self.resolve_sample_audio_path(sample) else {
+            self.status_message =
+                Some(format!("find loops: cannot resolve {}", sample.source.path));
+            return;
+        };
+        let pcm = match decode_to_mono_pcm(&audio_path) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status_message = Some(format!("find loops: decode failed: {e}"));
+                return;
+            }
+        };
+        let candidates = find_loop_candidates(&pcm, &LoopFinderOptions::default());
+        if candidates.is_empty() {
+            self.status_message =
+                Some("find loops: no candidates (sample may be too short)".to_string());
+            return;
+        }
+        self.loop_candidates_modal.target_sample_id = Some(sample_id);
+        self.loop_candidates_modal.candidates = candidates;
+        self.loop_candidates_modal.visible = true;
+        self.status_message = Some(format!(
+            "find loops: {} candidates",
+            self.loop_candidates_modal.candidates.len()
+        ));
+    }
+
+    fn do_preview_brr(&mut self) {
+        let Some(sample_id) = self.selected_sample_id.clone() else {
+            self.status_message = Some("preview: no sample selected".to_string());
+            return;
+        };
+        let Some(project) = self.project.as_ref() else {
+            return;
+        };
+        let Some(sample) = project
+            .sample_pool
+            .iter()
+            .find(|s| s.id == sample_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(audio_path) = self.resolve_sample_audio_path(&sample) else {
+            self.status_message = Some(format!("preview: cannot resolve {}", sample.source.path));
+            return;
+        };
+        let pcm = match decode_to_mono_pcm(&audio_path) {
+            Ok(p) => p,
+            Err(e) => {
+                self.status_message = Some(format!("preview: decode failed: {e}"));
+                return;
+            }
+        };
+        let opts = EncodeOptions::default();
+        let encode_result = if sample.looped.enabled {
+            match (sample.looped.start_sample, sample.looped.end_sample) {
+                (Some(start), _) => match encode_looped(&pcm, start, &opts) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        self.status_message = Some(format!("preview: encode failed: {e}"));
+                        return;
+                    }
+                },
+                _ => brr_encode(&pcm, &opts),
+            }
+        } else {
+            brr_encode(&pcm, &opts)
+        };
+
+        let project_dir = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let preview_dir = project_dir.join(".sfcwc-preview");
+        if let Err(e) = std::fs::create_dir_all(&preview_dir) {
+            self.status_message = Some(format!("preview: mkdir failed: {e}"));
+            return;
+        }
+        let wav_path = preview_dir.join(format!("{}.audition.wav", sample_id));
+        let sample_rate_hz = sample.source.sample_rate_hz.max(1);
+        match export_decoded_brr_wav(&encode_result.bytes, sample_rate_hz, &wav_path) {
+            Ok(r) => {
+                self.status_message = Some(format!(
+                    "preview: wrote {} ({} samples, {} blocks; rms={:.2}, peak={})",
+                    wav_path.display(),
+                    r.samples_written,
+                    r.blocks_decoded,
+                    encode_result.summary.overall_rms_error,
+                    encode_result.summary.overall_peak_error,
+                ));
+            }
+            Err(e) => {
+                self.status_message = Some(format!("preview: write failed: {e}"));
+            }
+        }
+    }
+
+    fn resolve_sample_audio_path(&self, sample: &SampleSlot) -> Option<PathBuf> {
+        let raw = Path::new(&sample.source.path);
+        if raw.is_absolute() {
+            return Some(raw.to_path_buf());
+        }
+        let project_dir = self.project_path.as_ref()?.parent()?;
+        Some(project_dir.join(raw))
+    }
+
+    fn draw_loop_candidates_modal(&mut self, ctx: &egui::Context) {
+        if !self.loop_candidates_modal.visible {
+            return;
+        }
+        let mut close = false;
+        let mut apply: Option<LoopCandidate> = None;
+        let target_sample = self.loop_candidates_modal.target_sample_id.clone();
+        egui::Window::new("Loop candidates")
+            .collapsible(false)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Top candidates for {}:",
+                    target_sample.as_deref().unwrap_or("(unknown)")
+                ));
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("loop_cands_grid")
+                            .num_columns(5)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.strong("start");
+                                ui.strong("end");
+                                ui.strong("rms");
+                                ui.strong("click");
+                                ui.label("");
+                                ui.end_row();
+                                for c in &self.loop_candidates_modal.candidates {
+                                    ui.monospace(c.start_sample.to_string());
+                                    ui.monospace(c.end_sample.to_string());
+                                    ui.monospace(format!("{:.2}", c.rms_window_difference));
+                                    ui.monospace(c.seam_click.to_string());
+                                    if ui.button("Apply").clicked() {
+                                        apply = Some(*c);
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                ui.separator();
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+        if let (Some(c), Some(target)) = (apply, target_sample) {
+            self.apply_loop_candidate(&target, c);
+            close = true;
+        }
+        if close {
+            self.loop_candidates_modal.visible = false;
+            self.loop_candidates_modal.candidates.clear();
+            self.loop_candidates_modal.target_sample_id = None;
+        }
+    }
+
+    fn apply_loop_candidate(&mut self, sample_id: &str, c: LoopCandidate) {
+        let Some(project) = self.project.as_mut() else {
+            return;
+        };
+        let Some(sample) = project.sample_pool.iter_mut().find(|s| s.id == sample_id) else {
+            return;
+        };
+        sample.looped.enabled = true;
+        sample.looped.start_sample = Some(c.start_sample);
+        sample.looped.end_sample = Some(c.end_sample);
+        if let Some(p) = self.project.as_ref() {
+            self.validation_errors = p.validate().err().unwrap_or_default();
+        }
+        self.status_message = Some(format!(
+            "loop applied: start={} end={}",
+            c.start_sample, c.end_sample
+        ));
+    }
+
     fn draw_errors_modal(&mut self, ctx: &egui::Context) {
         if !self.show_errors_modal {
             return;
@@ -505,7 +732,15 @@ fn draw_project_detail(ui: &mut egui::Ui, project: &ProjectV1) {
         });
 }
 
-fn draw_sample_detail(ui: &mut egui::Ui, s: &SampleSlot) {
+#[derive(Default, Clone, Copy)]
+struct SampleDetailResponse {
+    edited: bool,
+    find_loops: bool,
+    preview_brr: bool,
+}
+
+fn draw_sample_detail(ui: &mut egui::Ui, s: &mut SampleSlot) -> SampleDetailResponse {
+    let mut resp = SampleDetailResponse::default();
     ui.heading(format!("Sample — {}", s.id));
     ui.separator();
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -539,17 +774,42 @@ fn draw_sample_detail(ui: &mut egui::Ui, s: &SampleSlot) {
                 ui.label("root_midi_note");
                 ui.monospace(s.root_midi_note.to_string());
                 ui.end_row();
+
                 ui.label("loop.enabled");
-                ui.monospace(s.looped.enabled.to_string());
+                if ui.checkbox(&mut s.looped.enabled, "").changed() {
+                    resp.edited = true;
+                }
                 ui.end_row();
+
                 if s.looped.enabled {
+                    let frames = s.source.frames as u32;
                     ui.label("loop.start_sample");
-                    ui.monospace(format!("{:?}", s.looped.start_sample));
+                    let mut start = s.looped.start_sample.unwrap_or(0);
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut start)
+                                .speed(16.0)
+                                .range(0..=frames.saturating_sub(1)),
+                        )
+                        .changed()
+                    {
+                        s.looped.start_sample = Some(start - (start % 16));
+                        resp.edited = true;
+                    }
                     ui.end_row();
+
                     ui.label("loop.end_sample");
-                    ui.monospace(format!("{:?}", s.looped.end_sample));
+                    let mut end = s.looped.end_sample.unwrap_or(frames);
+                    if ui
+                        .add(egui::DragValue::new(&mut end).speed(16.0).range(0..=frames))
+                        .changed()
+                    {
+                        s.looped.end_sample = Some(end - (end % 16));
+                        resp.edited = true;
+                    }
                     ui.end_row();
                 }
+
                 ui.label("playback.volume");
                 ui.monospace(format!("{:.3}", s.playback.volume));
                 ui.end_row();
@@ -592,7 +852,17 @@ fn draw_sample_detail(ui: &mut egui::Ui, s: &SampleSlot) {
                     }
                 }
             });
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Find Loop Candidates").clicked() {
+                resp.find_loops = true;
+            }
+            if ui.button("Preview BRR").clicked() {
+                resp.preview_brr = true;
+            }
+        });
     });
+    resp
 }
 
 fn format_format(f: &sfc_atomizer_core::project::SampleFormat) -> &'static str {
