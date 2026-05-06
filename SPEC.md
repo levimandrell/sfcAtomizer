@@ -83,6 +83,7 @@ Rust GUI / CLI
   ├─ SPC / SFC / module exporters
   ├─ Internal preview renderer
   └─ Oracle bridge (snes_spc)
+
 SPC700 assembly driver
   ├─ boot/init
   ├─ S-DSP register helpers
@@ -335,7 +336,7 @@ The encoder is a core compiler component, not an implementation detail.
 
 ### 10.1 Implementation
 
-Rust-native encoder and decoder in the `core` crate. No external binary dependencies for the internal scoring path. Decoder is bit-exact relative to S-DSP BRR decode behavior including filter rounding and clamping. Encoder and decoder share a single fixture set; round-trip determinism is a unit-test gate. External validation against snes_spc lives in §16.
+Rust-native encoder and decoder in the `core` crate. No external binary dependencies for the internal scoring path. Decoder is bit-exact relative to S-DSP BRR decode behavior including filter rounding and clamping. Encoder and decoder share a single fixture set; round-trip determinism is a unit-test gate. External validation against snes_spc lives in §17 and §18.
 
 Raw BRR decode equivalence is a bit-identical gate at M0 — no tolerance negotiation. Tolerances against the oracle for S-DSP voice render and full-module render are calibrated by the harness (§18) at M0 and recorded as provisional; they are not quality gates until M1 freezes the first accepted tolerance table (§21).
 
@@ -658,6 +659,18 @@ The compiler needs bit-exact BRR decode and S-DSP-relevant scoring behavior. It 
 
 Three concerns are kept separate: compiler scoring (internal Rust path, three modes per §10.1), preview playback (internal path with optional oracle), and validation (oracle and ares).
 
+### 17.1 Tool discovery
+
+Host-side external tools are resolved via environment variables, with PATH as fallback:
+
+| Tool                              | Env var                  | Fallback                                       |
+|-----------------------------------|--------------------------|------------------------------------------------|
+| asar (assembler)                  | `SFCWC_ASAR`             | `asar` / `asar.exe` on PATH                    |
+| snes_spc oracle wrapper           | `SFCWC_SNES_SPC_ORACLE`  | `tools/snes_spc_oracle` next to the workspace  |
+| Mesen2 (manual verification only) | `SFCWC_MESEN2`           | not auto-launched; user opens manually         |
+
+The host app's `doctor` command reports which tools were resolved, their versions, and their resolution paths. Missing tools produce diagnostic warnings, not crashes; commands that strictly require a missing tool fail with a clear error pointing at the env var.
+
 ---
 
 ## 18. Calibration harness
@@ -724,23 +737,19 @@ Later optimization candidates (not in scope now): shared kernel + optional handl
 - Rust toolchain bootstrap and project skeleton.
 - Rust BRR encoder + raw decoder in the core crate.
 - asar-backed minimal SPC700 hello-sample driver.
-- Minimal `.spc` and `.sfc` exporters; ARAM map report.
+- Minimal `.spc` exporter and ARAM map report. (`.sfc` exporter deferred to M1 alongside the loader contract — see §19.2.)
 - Oracle bridge spike against snes_spc (not gating).
 - Calibration harness scaffolding and report-format definition (provisional tolerances allowed).
 
 **Acceptance:**
 
-- Known WAV fixture encodes and decodes deterministically; byte-identical across runs.
 - Looped BRR atom round-trips through the decoder with legal loop alignment.
 - Encoder exposes per-block error, filter selection, shift, post-decode loop-click score.
 - Raw BRR decoder passes deterministic fixture tests with exact PCM equality for filter, shift/range, rounding, and clamp behavior. No tolerance negotiation; bit-identical or fail.
+- Generated `.spc` opens in Mesen2 and produces audio. M0 `.spc` verification is manual via Mesen2; automated playback validation comes in M1+.
 - Oracle bridge can render a fixed fixture corpus through snes_spc and produce a calibration report.
 - The first calibration report records provisional tolerances for S-DSP voice render and full-module render. Provisional tolerances are not yet quality gates.
 - M1 freezes the first accepted tolerance table; regressions against it become CI failures from M1 onward.
-- A generated `.spc` renders successfully through snes_spc.
-- One looped BRR sample plays in an SPC player and the test ROM.
-
-M0 is complete only when internal decode, oracle render, ARAM layout, loop alignment, and SPC export all agree on deterministic fixtures. A BRR file playing is necessary but not sufficient.
 
 M0 is complete when the raw BRR decoder is byte-exact on fixtures, asar produces a Mesen2-loadable `.spc`, the ARAM packer rejects overlap, and the calibration harness produces a structured report — even if the report's tolerance numbers are provisional. WLA-DX, embedded snes_spc preview, and final S-DSP render equivalence are out of scope until later milestones.
 
