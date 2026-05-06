@@ -113,20 +113,35 @@ M1_LOADER_SIZE_BYTES   = 588                                ; was 581 pre-rebase
 M1_AUDIBLE_MAX_ABS     = 11072                              ; unchanged from M1.7
 M1_AUDIBLE_RMS         = 5519.6                             ; unchanged from M1.7
 M1_AUDIBLE_THRESHOLDS  = min_max_abs=1000, min_rms=200      ; frozen at M1.7
+M1_LOOP_CLICK_SCORE    = 795                                ; |first_loop_decoded - last_decoded|,
+                                                            ; M1.3 BRR encoder, canonical
+                                                            ; 8192-sample 8000-amp period-64
+                                                            ; sine, loop_start=0,
+                                                            ; force_filter_0_first_block=true.
+                                                            ; Locked at M2.1 as the future
+                                                            ; M2.5/M2.6 oracle-loop-click
+                                                            ; baseline (consultant #9).
 ```
 
 Pre-rebase commit (M1.7 baseline): `4bf286f` (top of
 `docs: STATUS — M1 complete; lock baseline SHAs;
 consolidate audition queue`).
 
-### Awaiting user audible audition
+### M2.0 user audition result (M2.1 phase 0)
 
-The M1.6 `.sfc` audition will now PASS on Mesen2 (the
-loader's stale-ack and the driver's bootstrap-token bugs
-are both fixed in this pass). The expected behaviour:
-load → ~5 s of sustained sine → brief gap → sustained
-sine again (clone) → repeats. Queued for user return; the
-M1.5 `.spc` audition was unaffected (unchanged output).
+PM auditioned all three M2.0-postlude WAVs and the
+underlying `.spc` / `.sfc` artifacts on real Mesen2.
+Outcome: M1 driver bootstrap-token fix (consultant #1) and
+loader ack-token + ack-code fix (consultant #10) both
+confirmed working in real-hardware emulation. Audible
+periodic loop click at the fundamental cycle rate (~4 Hz
+for 8192-sample loops at 32 kHz) observed and expected per
+consultant finding #9 — the loop-click oracle metric is
+deferred to M2.5/M2.6 and `M1_LOOP_CLICK_SCORE = 795` is
+locked above as its baseline.
+
+`audition/m2.0-postlude/` removed in M2.1 phase 0 (audit
+artifact, not part of the long-term repo).
 
 ## Previous passes
 
@@ -948,6 +963,16 @@ M1_AUDIBLE_MAX_ABS     = 11072      ; oracle render unchanged from M1.7 —
                                     ; not the audio output
 M1_AUDIBLE_RMS         = 5519.6
 M1_AUDIBLE_THRESHOLDS  = min_max_abs=1000, min_rms=200 (frozen at M1.7)
+M1_LOOP_CLICK_SCORE    = 795
+                       ; |first_loop_decoded - last_decoded| from the M1.3 BRR
+                       ; encoder for the canonical 8192-sample 8000-amp period-64
+                       ; sine with loop_start=0 and force_filter_0_first_block=true.
+                       ; Locked at M2.1 as the future M2.5/M2.6 oracle-loop-click
+                       ; metric baseline (consultant finding #9). Audible
+                       ; periodic loop click at the fundamental cycle rate
+                       ; (~4 Hz for 8192-sample loops at 32 kHz) was confirmed
+                       ; in the M2.0-postlude Mesen2 audition; treating this
+                       ; level as acceptable until the metric ships.
 ```
 
 Pre-rebase commit (M1.7 baseline): `4bf286f`. Old SHAs are
