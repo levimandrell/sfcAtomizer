@@ -1,0 +1,9 @@
+{
+  "name": "filter3_nonzero_history",
+  "description": "Filter 3 (prev1*115/64 - prev2*13/16) with nonzero predictor seed. Same data as filter2_nonzero_history with filter bits flipped; locks filter 3's distinct integer arithmetic against an identical input.",
+  "initial_history": { "prev1": 512, "prev2": -1024 },
+  "blocks_hex": ["2C 12 34 56 78 9A BC DE F0"],
+  "expected_pcm": [1754, 2739, 3501, 4072, 4481, 4754, 4915, 4952, 4890, 4750, 4551, 4309, 4038, 3749, 3453, 3157],
+  "provenance": "hand-walked",
+  "provenance_notes": "Header 0x2C = 0010 1100: shift=2, filter=11b=3. Per fullsnes / boldowa-snesbrr filter 3: out = shifted + (p1<<1) + ((-(p1+(p1<<2)+(p1<<3)))>>6) + (-p2) + ((p2+(p2<<1))>>4), then clamp to i16, then 15-bit wrap. The two new terms relative to filter 2 are the inner `13*p1` (= p1 + 4p1 + 8p1) divided by 64 with a sign flip, and `3*p2` (= p2 + 2p2) divided by 16. Sample 0: nibble=0x1 → shifted = 2. p1=512, p2=-1024. (p1<<1) = 1024 → s = 2 + 1024 = 1026. inner = p1 + 4*p1 + 8*p1 = 13*512 = 6656; -6656 >> 6 = -104 (since -6656/64 = -104 exact) → s = 1026 - 104 = 922. -p2 = 1024 → s = 1946. (p2 + 2*p2) >> 4 = (-3072) >> 4 = -192 (since -3072/16 = -192 exact) → s = 1946 - 192 = 1754. Clamp = 1754. Wrap = 1754. Update p1=1754, p2=512. Sample 1: nibble=0x2 → shifted = 4. p1=1754, p2=512. 2*p1 = 3508 → s = 4 + 3508 = 3512. -13*p1 >> 6 = -22802 >> 6 = -357 (-22802/64 = -356.28 floored = -357) → s = 3512 - 357 = 3155. -p2 = -512 → s = 2643. 3*p2 >> 4 = 1536 >> 4 = 96 → s = 2643 + 96 = 2739. Wrap = 2739. Verified by core/fixtures/brr/_reference.py."
+}

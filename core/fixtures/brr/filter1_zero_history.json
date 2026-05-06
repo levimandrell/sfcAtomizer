@@ -1,0 +1,9 @@
+{
+  "name": "filter1_zero_history",
+  "description": "Filter 1 starting from {prev1=0, prev2=0}. Uniform nibble pattern (all 0x1) so the shape of the output is purely the prev1*15/16 term accumulating from zero.",
+  "initial_history": { "prev1": 0, "prev2": 0 },
+  "blocks_hex": ["44 11 11 11 11 11 11 11 11"],
+  "expected_pcm": [8, 15, 22, 28, 34, 39, 44, 49, 53, 57, 61, 65, 68, 71, 74, 77],
+  "provenance": "hand-walked",
+  "provenance_notes": "Header 0x44: shift=4, filter=1. Each nibble = 0x1 → sign_ext = 1 → shifted = (1<<4)>>1 = 8. Filter 1 (per boldowa/snesbrr): out = shifted + p1 + (-p1 >> 4), i.e. shifted + p1*15/16 with arithmetic-shift rounding. Sample 0: p1=0 → 8 + 0 + 0 = 8; update p1=8. Sample 1: p1=8 → 8 + 8 + (-8>>4) = 8 + 8 + (-1) = 15 (note -8/16 = -0.5, floored = -1); update p1=15. Sample 2: p1=15 → 8 + 15 + (-15>>4) = 8 + 15 + (-1) (-15/16 = -0.9375 floored = -1) = 22; p1=22. Sample 3: p1=22 → 8 + 22 + (-22>>4) = 8 + 22 + (-2) (-22/16 = -1.375 floored = -2) = 28. Subsequent samples follow the same convergent envelope, asymptote ≈ 8 * 16 = 128 (theoretical fixed point). Verified by core/fixtures/brr/_reference.py."
+}

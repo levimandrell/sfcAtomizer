@@ -1,0 +1,9 @@
+{
+  "name": "filter2_nonzero_history",
+  "description": "Filter 2 (prev1*61/32 - prev2*15/16) with nonzero predictor seed. Filter 2's two-tap prediction is arithmetically the most delicate of the four — the `(-3*p1) >> 5` term must be computed in i32 to round the way hardware does, and prev2 contribution is significant.",
+  "initial_history": { "prev1": 512, "prev2": -1024 },
+  "blocks_hex": ["28 12 34 56 78 9A BC DE F0"],
+  "expected_pcm": [1938, 3218, 4323, 5231, 5928, 6407, 6669, 6689, 6483, 6075, 5492, 4765, 3928, 3015, 2062, 1103],
+  "provenance": "hand-walked",
+  "provenance_notes": "Header 0x28 = 0010 1000: shift=2, filter=10b=2. Per fullsnes / boldowa-snesbrr filter 2: out = shifted + (p1<<1) + ((-(p1+(p1<<1)))>>5) + (-p2) + (p2>>4), then clamp to i16, then 15-bit wrap. Sample 0: nibble=0x1 → +1, shifted = (1<<2)>>1 = 2. p1=512, p2=-1024. (p1<<1) = 1024 → s = 2 + 1024 = 1026. (-(p1+2*p1))>>5 = (-1536)>>5 = -48 (since -1536/32 = -48 exact) → s = 1026 - 48 = 978. (-p2) = 1024 → s = 978 + 1024 = 2002. (p2>>4) = -1024>>4 = -64 → s = 2002 - 64 = 1938. Clamp(i16, 1938) = 1938. Wrap_15bit(1938) = 1938. Update p1=1938, p2=512. Sample 1: nibble=0x2 → shifted = (2<<2)>>1 = 4. p1=1938, p2=512. 2*p1 = 3876 → s = 4 + 3876 = 3880. (-(p1+2*p1))>>5 = (-5814)>>5 = -182 (since -5814/32 = -181.6875 floored = -182) → s = 3880 - 182 = 3698. -p2 = -512 → s = 3186. p2>>4 = 32 → s = 3218. Clamp = 3218. Wrap = 3218. Sample 2 onwards follows the same pattern; output peaks around sample 7 (6689 ≈ 0.2 of 15-bit range — well below the clamp). Verified by core/fixtures/brr/_reference.py."
+}

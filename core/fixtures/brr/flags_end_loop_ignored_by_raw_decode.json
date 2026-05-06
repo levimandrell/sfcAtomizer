@@ -1,0 +1,9 @@
+{
+  "name": "flags_end_loop_ignored_by_raw_decode",
+  "description": "Identical data bytes to filter0_basic, but with the END (bit 0) and LOOP (bit 1) flags set in the header. expected_pcm is byte-identical to filter0_basic — locking the contract that raw BRR decode does not act on END/LOOP. They are S-DSP voice-loop control flow, not raw-decoder concerns.",
+  "initial_history": { "prev1": 0, "prev2": 0 },
+  "blocks_hex": ["03 12 34 56 78 9A BC DE F0"],
+  "expected_pcm": [0, 1, 1, 2, 2, 3, 3, -4, -4, -3, -3, -2, -2, -1, -1, 0],
+  "provenance": "hand-walked",
+  "provenance_notes": "Header 0x03 = 0000 0011: shift=0, filter=0, loop=1, end=1. Same filter (0) and shift (0) as filter0_basic — only the END and LOOP flag bits change. Per fullsnes / boldowa-snesbrr, the raw BRR decode pipeline reads SHIFT and FILTER from the header but does not branch on END or LOOP; those flags are reported up to the S-DSP voice loop for it to handle key-off and loop-pointer reload, but they are not decoder inputs. expected_pcm therefore must equal filter0_basic.expected_pcm exactly. Source of truth: filter0_basic.json (independently hand-walked). The Rust decoder enforces this contract via a unit test (`header_flags_do_not_affect_decode`) in addition to this fixture."
+}

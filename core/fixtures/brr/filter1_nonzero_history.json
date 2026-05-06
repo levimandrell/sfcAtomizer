@@ -1,0 +1,9 @@
+{
+  "name": "filter1_nonzero_history",
+  "description": "Filter 1 with a deliberately nonzero predictor seed. Same block shape as filter1_zero_history but starting from prev1=1024, prev2=-512 — verifies that the prev1*15/16 decay term carries the seed rather than re-establishing from zero.",
+  "initial_history": { "prev1": 1024, "prev2": -512 },
+  "blocks_hex": ["44 11 11 11 11 11 11 11 11"],
+  "expected_pcm": [968, 915, 865, 818, 774, 733, 695, 659, 625, 593, 563, 535, 509, 485, 462, 441],
+  "provenance": "hand-walked",
+  "provenance_notes": "Header 0x44: shift=4, filter=1. Per-sample shifted = 8 (as in filter1_zero_history). Sample 0: shifted=8, p1=1024 → 8 + 1024 + (-1024>>4) = 8 + 1024 + (-64) (since -1024/16 = -64 exact) = 968; update p1=968, p2=1024. Sample 1: shifted=8, p1=968 → 8 + 968 + (-968>>4) = 8 + 968 + (-61) (-968/16 = -60.5 floored = -61) = 915; p1=915. Sample 2: shifted=8, p1=915 → 8 + 915 + (-915>>4) = 8 + 915 + (-58) (-915/16 = -57.1875 floored = -58) = 865. The decay constant is ≈15/16; the steady-state target is 8 * 16 = 128, so each sample = round_to_15bit(prev1 * 15/16 + 8) and the seed of 1024 decays toward 128. prev2 is unused under filter 1; it is still updated by the predictor step but never read. Verified by core/fixtures/brr/_reference.py."
+}

@@ -1,0 +1,17 @@
+{
+  "name": "multi_block_predictor_history",
+  "description": "Three filter-1 blocks decoded back-to-back. Locks the cross-block predictor continuity contract: block N's last two output samples become block N+1's prev1/prev2 seeds. A bug that resets state between blocks produces incorrect output starting at sample 16.",
+  "initial_history": { "prev1": 0, "prev2": 0 },
+  "blocks_hex": [
+    "44 12 34 56 78 9A BC DE F0",
+    "44 11 22 33 44 55 66 77 88",
+    "44 FF EE DD CC BB AA 99 88"
+  ],
+  "expected_pcm": [
+    8, 23, 45, 74, 109, 150, 196, 119, 55, 3, -38, -68, -88, -99, -101, -95,
+    -82, -69, -49, -30, -5, 19, 49, 77, 112, 145, 183, 219, 261, 300, 217, 139,
+    122, 106, 83, 61, 33, 6, -27, -58, -95, -130, -170, -208, -251, -292, -338, -381
+  ],
+  "provenance": "spec-derived",
+  "provenance_notes": "All three blocks have header 0x44: shift=4, filter=1. expected_pcm produced by core/fixtures/brr/_reference.py — an independent, deliberately separate Python implementation of the same fullsnes/snesbrr formulas. Spot-checks of cross-block continuity: sample 15 (last sample of block 0) = -95; sample 16 (first sample of block 1) is computed with p1=-95, p2=-101. Block 1's first nibble = 0x1 → shifted=8; out = 8 + (-95) + (-(-95)>>4) = 8 + (-95) + (95>>4) = 8 - 95 + 5 = -82. ✓ matches expected_pcm[16]. Sample 31 (last of block 1) = 139; sample 32 (first of block 2) computed with p1=139, p2=217. Block 2's first nibble = 0xF → -1 → shifted = (-1<<4)>>1 = -16>>1 = -8. out = -8 + 139 + (-139>>4) = -8 + 139 + (-9) (since -139/16 = -8.6875 floored = -9) = 122. ✓ matches expected_pcm[32]. Each per-block transition was hand-verified; the bulk of the array is from the reference script."
+}

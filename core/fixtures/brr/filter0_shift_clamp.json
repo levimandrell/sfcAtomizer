@@ -1,0 +1,15 @@
+{
+  "name": "filter0_shift_clamp",
+  "description": "Two filter-0 blocks. Block 0 uses shift=12 (max normal range) and exercises the 15-bit wrap on the negative-nibble extreme. Block 1 uses shift=13, the documented 'special' case where positive nibbles produce 0 and negative nibbles produce -2048.",
+  "initial_history": { "prev1": 0, "prev2": 0 },
+  "blocks_hex": [
+    "C0 12 34 56 78 9A BC DE F0",
+    "D0 12 34 56 78 9A BC DE F0"
+  ],
+  "expected_pcm": [
+    2048, 4096, 6144, 8192, 10240, 12288, 14336, -16384, -14336, -12288, -10240, -8192, -6144, -4096, -2048, 0,
+    0, 0, 0, 0, 0, 0, 0, -2048, -2048, -2048, -2048, -2048, -2048, -2048, -2048, 0
+  ],
+  "provenance": "hand-walked",
+  "provenance_notes": "Block 0 header 0xC0: shift=12, filter=0. Per-sample shifted = (sign_ext(nibble) << 12) >> 1 = sign_ext(nibble) << 11. Sample 0 nibble 0x1 → +1 → 1<<11 = 2048. Sample 6 nibble 0x7 → +7 → 7<<11 = 14336. Sample 7 nibble 0x8 → -8 → -8<<11 = -16384 (this is exactly the 15-bit lower bound; the wrap step int16(-16384<<1)>>1 = int16(-32768)>>1 = -32768>>1 = -16384, no overflow). Sample 14 nibble 0xF → -1 → -1<<11 = -2048. Sample 15 nibble 0x0 → 0. Block 1 header 0xD0: shift=13 → special path. Per fullsnes/snesbrr: shifted = sign_ext(nibble) AND NOT 0x07FF, which yields 0 for non-negative nibbles and -2048 for negative ones (SnesLab's equivalent: (nibble>>3)<<11 where >>3 is arithmetic, so 0 for n≥0 and -2048 for n<0). With shift=13 and nibbles 1,2,3,4,5,6,7,8,9,A,B,C,D,E,F,0 the output is 0,0,0,0,0,0,0,-2048,-2048,-2048,-2048,-2048,-2048,-2048,-2048,0. Predictor history irrelevant under filter 0; carries 14336 → 0 across the boundary harmlessly. Verified by core/fixtures/brr/_reference.py. Locks the documented hardware behavior for the rare encoder choice of shift>12."
+}

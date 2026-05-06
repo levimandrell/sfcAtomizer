@@ -1,0 +1,9 @@
+{
+  "name": "loop_boundary_history",
+  "description": "Loop-entry predictor continuity per SPEC §10.2. Decodes the loop-entry block (block 0 of the loop) with the predictor state captured from the END of a prior decode pass over four blocks. This is the state the S-DSP voice loop reaches at the loop point on iteration 2 onward; locking it ensures encoder loop-state scoring sees the correct seed.",
+  "initial_history": { "prev1": 385, "prev2": 326 },
+  "blocks_hex": ["28 12 34 56 78 9A BC DE F0"],
+  "expected_pcm": [429, 460, 479, 489, 492, 490, 486, 450, 387, 303, 204, 95, -17, -127, -230, -320],
+  "provenance": "spec-derived",
+  "provenance_notes": "The loop entry seed (prev1=385, prev2=326) was derived by decoding the four-block loop body with starting history (0,0) and capturing the post-block-3 predictor state, per SPEC §10.2 'predictor history continuity from one iteration into the next.' Loop body blocks (used to derive the seed, NOT decoded by this fixture): ['28 12 34 56 78 9A BC DE F0', '28 11 22 33 44 55 66 77 88', '28 7F 6E 5D 4C 3B 2A 19 08', '28 88 77 66 55 44 33 22 11']. All four use header 0x28 (shift=2, filter=2). The seed-capture and the iteration-2 decode were both performed by core/fixtures/brr/_reference.py. Sample 0 hand-check: block header 0x28, nibble 0x1 → shifted=(1<<2)>>1=2. Filter 2 with p1=385, p2=326: 2*p1=770 → s=772. (-3*p1)>>5 = -1155>>5 = -37 (since -1155/32 = -36.09375 floored = -37) → s=735. -p2 = -326 → s=409. p2>>4 = 326>>4 = 20 (326/16 = 20.375 floored to 20) → s=429. Clamp=429. Wrap=429. ✓ matches expected_pcm[0]. The fixture is self-contained: a generic decoder runner reading initial_history + blocks_hex reproduces the array without needing to model the iteration-1 walk."
+}
