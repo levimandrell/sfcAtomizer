@@ -8,6 +8,7 @@ pub mod aram;
 pub mod asm;
 pub mod brr;
 pub mod brr_fixtures;
+pub mod manifest;
 pub mod report;
 pub mod spc;
 pub mod tools;
