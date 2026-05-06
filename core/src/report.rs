@@ -442,6 +442,50 @@ pub struct ProvisionalTolerances {
 }
 
 // =============================================================================
+// Validation report — `sfcwc validate-project`
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ValidationReport {
+    pub schema_version: u32,
+    pub report_type: String,
+    pub project_path: String,
+    pub status: ValidationStatus,
+    pub errors: Vec<ValidationErrorJson>,
+}
+
+impl ValidationReport {
+    pub const REPORT_TYPE: &'static str = "validation";
+
+    pub fn stub() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            report_type: Self::REPORT_TYPE.to_string(),
+            project_path: String::new(),
+            status: ValidationStatus::Ok,
+            errors: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationStatus {
+    Ok,
+    Invalid,
+    IoError,
+}
+
+/// One validation error in serializable form. Mirror of
+/// `core::project::ValidationError` reduced to a flat `{path, message}`
+/// shape so JSON consumers don't have to know the typed error enum.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidationErrorJson {
+    pub path: String,
+    pub message: String,
+}
+
+// =============================================================================
 // M0 manifest — `sfcwc m0-acceptance`
 // =============================================================================
 
@@ -787,6 +831,42 @@ mod tests {
         assert!(r.diagnostics.is_empty());
         assert_eq!(r.error, None);
         assert_eq!(r.status, CalibrationStatus::NotRun);
+    }
+
+    #[test]
+    fn validation_report_round_trip() {
+        round_trip(&ValidationReport::stub());
+
+        let r = ValidationReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: ValidationReport::REPORT_TYPE.to_string(),
+            project_path: "build/m1/project.sfcproj.json".to_string(),
+            status: ValidationStatus::Invalid,
+            errors: vec![
+                ValidationErrorJson {
+                    path: "/master_echo/edl".to_string(),
+                    message: "master_echo.enabled=true requires edl in 1..=15, got 0".to_string(),
+                },
+                ValidationErrorJson {
+                    path: "/m1/active_sample_id".to_string(),
+                    message: "m1.active_sample_id \"\" not found in sample_pool".to_string(),
+                },
+            ],
+        };
+        round_trip(&r);
+    }
+
+    #[test]
+    fn validation_status_round_trip() {
+        for s in [
+            ValidationStatus::Ok,
+            ValidationStatus::Invalid,
+            ValidationStatus::IoError,
+        ] {
+            let json = serde_json::to_string(&s).unwrap();
+            let back: ValidationStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, s);
+        }
     }
 
     #[test]
