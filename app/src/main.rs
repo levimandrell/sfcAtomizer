@@ -15,22 +15,24 @@ use sfc_atomizer_core::audio::{decode_to_mono_pcm, probe, AudioDecodeError, Audi
 use sfc_atomizer_core::audition::export_decoded_brr_wav;
 use sfc_atomizer_core::brr_encoder::{encode as brr_encode, encode_looped, EncodeOptions};
 use sfc_atomizer_core::brr_fixtures::{run_fixture, M0_RAW_DECODE_FIXTURES};
+use sfc_atomizer_core::driver_build::{build as driver_build, DriverBuildInput};
 use sfc_atomizer_core::import::{import_audio, ImportError, ImportOptions};
 use sfc_atomizer_core::loop_finder::{find_loop_candidates, LoopFinderOptions};
 use sfc_atomizer_core::manifest::verify_bundle;
 use sfc_atomizer_core::packer::{pack as packer_pack, EncodedSample, PackInput};
 use sfc_atomizer_core::project::{ProjectIoError, ProjectV1, ValidationError};
 use sfc_atomizer_core::report::{
-    AramKind, AramMapReport, AssembleReport, AssembleStatus, AuditionReport, BrrEncodeBlock,
-    BrrEncodeReport, BrrFixtureReport, BundleStatus, BundleSteps, BundleSummary, CalibrationReport,
-    CalibrationStatus, DoctorReport, DoctorStatus, DoctorTools, FixtureSetInfo, LoopCandidateJson,
-    LoopFinderReport, M0Manifest, ObservedInfo, OracleInfo, ProvisionalTolerances, RenderInfo,
-    RustInfo, SpcExportReport, SpcInitialState, SpcStatus, StepStatus, ToolStatus,
+    AramKind, AramMapReport, AssembleReport, AssembleStatus, AudibleStatus, AudibleThresholds,
+    AudibleVerificationReport, AuditionReport, BrrEncodeBlock, BrrEncodeReport, BrrFixtureReport,
+    BundleStatus, BundleSteps, BundleSummary, CalibrationReport, CalibrationStatus,
+    CompileSpcReport, DoctorReport, DoctorStatus, DoctorTools, FixtureSetInfo, LoopCandidateJson,
+    LoopFinderReport, M0Manifest, ObservedAudio, ObservedInfo, OracleInfo, ProvisionalTolerances,
+    RenderInfo, RustInfo, SpcExportReport, SpcInitialState, SpcStatus, StepStatus, ToolStatus,
     ValidationErrorJson, ValidationReport, ValidationStatus, SCHEMA_VERSION,
 };
 use sfc_atomizer_core::spc::{
-    build_smoke_image, verify_structure, SpcCpuState, SpcImage, SMOKE_CPU_STATE, SPC_ARAM_SIZE,
-    SPC_FILE_SIZE,
+    build_m1_image, build_smoke_image, verify_structure, SpcCpuState, SpcImage, SMOKE_CPU_STATE,
+    SPC_ARAM_SIZE, SPC_FILE_SIZE,
 };
 use sfc_atomizer_core::tools::{self, ResolvedTool, ToolSource};
 use thiserror::Error;
@@ -140,6 +142,48 @@ enum Command {
         /// Also write the report JSON to a file.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Compile a project end-to-end into an audible `.spc` file (M1.5).
+    ///
+    /// Encode → driver_build → pack → SPC export with the M1
+    /// state contract (PC=$0200, GPRs=0, SP=$EF, DSP regs=0;
+    /// driver writes FLG=$60 mute on its first instruction).
+    /// Exit codes: 0 ok, 1 IO/parse, 2 project-invalid, 3 pack
+    /// error, 4 driver-build error.
+    CompileSpc {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        out_spc: Option<PathBuf>,
+        #[arg(long)]
+        out_image: Option<PathBuf>,
+        #[arg(long)]
+        out_map: Option<PathBuf>,
+        #[arg(long)]
+        out_report: Option<PathBuf>,
+    },
+    /// Render a `.spc` through the snes_spc oracle and assert
+    /// audible (non-silent) output (M1.5).
+    ///
+    /// Exit codes: 0 ok, 1 IO / oracle error, 2 silent_fail
+    /// (driver muted or KON missed).
+    VerifySpcAudible {
+        #[arg(long)]
+        spc: PathBuf,
+        #[arg(long, default_value_t = 16384u32)]
+        frames: u32,
+        #[arg(long)]
+        out_report: Option<PathBuf>,
+        #[arg(long)]
+        out_pcm: Option<PathBuf>,
+        #[arg(long, default_value_t = 1000u32)]
+        min_max_abs: u32,
+        #[arg(long, default_value_t = 200.0f64)]
+        min_rms: f64,
+        /// Override `SFCWC_SNES_SPC_ORACLE` and the workspace
+        /// default (same shape as `calibrate-oracle`).
+        #[arg(long)]
+        oracle: Option<PathBuf>,
     },
     /// Pack a project into a 64 KB ARAM image + map report (M1.4).
     ///
@@ -290,6 +334,36 @@ fn run(cli: Cli) -> Result<(), CliError> {
             out_map,
             driver,
         } => cmd_pack(&project, &out_image, &out_map, driver.as_deref()),
+        Command::CompileSpc {
+            project,
+            out_spc,
+            out_image,
+            out_map,
+            out_report,
+        } => cmd_compile_spc(
+            &project,
+            out_spc.as_deref(),
+            out_image.as_deref(),
+            out_map.as_deref(),
+            out_report.as_deref(),
+        ),
+        Command::VerifySpcAudible {
+            spc,
+            frames,
+            out_report,
+            out_pcm,
+            min_max_abs,
+            min_rms,
+            oracle,
+        } => cmd_verify_spc_audible(
+            &spc,
+            frames,
+            out_report.as_deref(),
+            out_pcm.as_deref(),
+            min_max_abs,
+            min_rms,
+            oracle.as_deref(),
+        ),
         Command::EncodeBrr {
             audio,
             out_brr,
@@ -1676,23 +1750,38 @@ fn cmd_import(project: &Path, audio: &Path, options: ImportOptions) -> Result<()
 // pack (M1.4)
 // =============================================================================
 
-fn cmd_pack(
+/// Outcome of [`compile_aram_image`] — a fully packed 64 KB image
+/// plus the matching map report plus the driver-build attribution
+/// (size + SHA) so callers can put both in their reports.
+struct CompileAramOutcome {
+    project: ProjectV1,
+    image: Box<[u8; 0x10000]>,
+    map_report: AramMapReport,
+    driver_code_bytes: u32,
+    driver_code_sha256: String,
+}
+
+/// Produce a 64 KB ARAM image from a project file: load → validate
+/// → decode each sample → encode BRR → run M1.5 driver_build →
+/// run the M1.4 packer with the real driver. `driver_override`
+/// (used for `sfcwc pack --driver <path>`) bypasses driver_build
+/// and feeds the raw bytes straight to the packer.
+fn compile_aram_image(
+    label: &str,
     project_path: &Path,
-    out_image: &Path,
-    out_map: &Path,
-    driver_path: Option<&Path>,
-) -> Result<(), CliError> {
-    // 1. Load + validate.
+    driver_override: Option<Vec<u8>>,
+) -> Result<CompileAramOutcome, ()> {
+    // Load + validate.
     let project = match ProjectV1::load_from_path(project_path) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("pack: load failed for {}: {e}", project_path.display());
+            eprintln!("{label}: load failed for {}: {e}", project_path.display());
             std::process::exit(1);
         }
     };
     if let Err(verrors) = project.validate() {
         eprintln!(
-            "pack: project invalid — {} ({} error{})",
+            "{label}: project invalid — {} ({} error{})",
             project_path.display(),
             verrors.len(),
             if verrors.len() == 1 { "" } else { "s" },
@@ -1703,7 +1792,7 @@ fn cmd_pack(
         std::process::exit(2);
     }
 
-    // 2. Encode each sample's BRR.
+    // Encode each sample's BRR.
     let project_dir = project_path.parent().unwrap_or_else(|| Path::new("."));
     let mut encoded: Vec<EncodedSample> = Vec::with_capacity(project.sample_pool.len());
     for slot in &project.sample_pool {
@@ -1721,7 +1810,7 @@ fn cmd_pack(
                     AudioDecodeError::Symphonia(_)
                     | AudioDecodeError::FrameCountMismatch { .. } => 2,
                 };
-                eprintln!("pack: decode failed for sample {}: {e}", slot.id);
+                eprintln!("{label}: decode failed for sample {}: {e}", slot.id);
                 std::process::exit(exit);
             }
         };
@@ -1732,7 +1821,7 @@ fn cmd_pack(
                     let r = match encode_looped(&pcm, start, &opts) {
                         Ok(r) => r,
                         Err(e) => {
-                            eprintln!("pack: encode failed for sample {}: {e}", slot.id);
+                            eprintln!("{label}: encode failed for sample {}: {e}", slot.id);
                             std::process::exit(3);
                         }
                     };
@@ -1750,20 +1839,51 @@ fn cmd_pack(
         });
     }
 
-    // 3. Driver code: --driver path or empty Vec → packer leaves the
-    //    4 KB region zero-filled.
-    let driver_code = match driver_path {
-        Some(p) => match std::fs::read(p) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("pack: driver read failed for {}: {e}", p.display());
-                std::process::exit(1);
+    // Build the driver. With an override path we skip driver_build
+    // entirely; otherwise we shadow-pack with an empty driver to
+    // get the layout (src_dir_page, echo_esa) and feed that to
+    // driver_build.
+    let (driver_code, driver_code_sha256) = match driver_override {
+        Some(bytes) => {
+            let sha = sfc_atomizer_core::asm::sha256_hex(&bytes);
+            (bytes, sha)
+        }
+        None => {
+            let shadow = match packer_pack(PackInput {
+                project: project.clone(),
+                encoded_samples: encoded.clone(),
+                driver_code: Vec::new(),
+            }) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("{label}: shadow pack failed: {e}");
+                    std::process::exit(3);
+                }
+            };
+            let work = match tempfile::tempdir() {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("{label}: tempdir: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match driver_build(DriverBuildInput {
+                project: &project,
+                map_report: &shadow.map_report,
+                source_override: None,
+                working_dir: work.path().to_path_buf(),
+            }) {
+                Ok(out) => (out.driver_code, out.driver_code_sha256),
+                Err(e) => {
+                    eprintln!("{label}: driver_build failed: {e}");
+                    std::process::exit(4);
+                }
             }
-        },
-        None => Vec::new(),
+        }
     };
+    let driver_code_bytes = driver_code.len() as u32;
 
-    // 4. Pack.
+    // Real pack.
     let result = match packer_pack(PackInput {
         project: project.clone(),
         encoded_samples: encoded,
@@ -1771,32 +1891,63 @@ fn cmd_pack(
     }) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("pack: {e}");
+            eprintln!("{label}: {e}");
             std::process::exit(3);
         }
     };
 
-    // 5. Write image + map.
+    Ok(CompileAramOutcome {
+        project,
+        image: result.aram_image,
+        map_report: result.map_report,
+        driver_code_bytes,
+        driver_code_sha256,
+    })
+}
+
+fn cmd_pack(
+    project_path: &Path,
+    out_image: &Path,
+    out_map: &Path,
+    driver_path: Option<&Path>,
+) -> Result<(), CliError> {
+    let driver_override = match driver_path {
+        Some(p) => match std::fs::read(p) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("pack: driver read failed for {}: {e}", p.display());
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+    let outcome = compile_aram_image("pack", project_path, driver_override)
+        .expect("compile_aram_image returns via exit on error");
+    let project = outcome.project;
+    let result_image = outcome.image;
+    let map_report = outcome.map_report;
+
+    // Write image + map.
     if let Some(parent) = out_image.parent() {
         if !parent.as_os_str().is_empty() {
             create_dir(parent)?;
         }
     }
-    std::fs::write(out_image, &result.aram_image[..]).map_err(|source| CliError::Io {
+    std::fs::write(out_image, &result_image[..]).map_err(|source| CliError::Io {
         path: out_image.to_path_buf(),
         source,
     })?;
-    write_json(out_map, &result.map_report)?;
+    write_json(out_map, &map_report)?;
 
-    let image_sha = sfc_atomizer_core::asm::sha256_hex(&result.aram_image[..]);
-    let summ = result.map_report.samples.as_ref();
+    let image_sha = sfc_atomizer_core::asm::sha256_hex(&result_image[..]);
+    let summ = map_report.samples.as_ref();
     let total_brr = summ.map(|s| s.total_brr_bytes).unwrap_or(0);
-    let echo_summ = result.map_report.echo.as_ref();
+    let echo_summ = map_report.echo.as_ref();
     let echo_label = match echo_summ {
         Some(e) if e.enabled => format!("EDL={} ({} B)", e.edl, e.buffer_bytes),
         _ => "off".to_string(),
     };
-    let free = result.map_report.free_bytes;
+    let free = map_report.free_bytes;
     let free_pct = (free as f64) * 100.0 / 65536.0;
     eprintln!(
         "pack: {} sample{}, {} BRR bytes, echo {}, free={} B ({:.1}%); image -> {} (sha256={}); map -> {}",
@@ -1810,6 +1961,293 @@ fn cmd_pack(
         image_sha,
         out_map.display(),
     );
+    Ok(())
+}
+
+// =============================================================================
+// compile-spc / verify-spc-audible (M1.5)
+// =============================================================================
+
+fn cmd_compile_spc(
+    project_path: &Path,
+    out_spc: Option<&Path>,
+    out_image: Option<&Path>,
+    out_map: Option<&Path>,
+    out_report: Option<&Path>,
+) -> Result<(), CliError> {
+    let outcome = compile_aram_image("compile-spc", project_path, None)
+        .expect("compile_aram_image returns via exit on error");
+    let project = &outcome.project;
+
+    let stem = project_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| project.project.name.clone());
+    // Strip .sfcproj suffix if present (matches CLI new-project filename).
+    let stem = stem
+        .strip_suffix(".sfcproj")
+        .map(str::to_string)
+        .unwrap_or(stem);
+
+    let out_spc_owned = out_spc
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m1").join(format!("{stem}.spc")));
+    let out_image_owned = out_image
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m1").join(format!("{stem}.aram.bin")));
+    let out_map_owned = out_map
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m1").join(format!("{stem}.aram-map.json")));
+    let out_report_owned = out_report
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m1").join(format!("{stem}.compile-report.json")));
+
+    // Write ARAM image + map.
+    if let Some(p) = out_image_owned.parent() {
+        if !p.as_os_str().is_empty() {
+            create_dir(p)?;
+        }
+    }
+    std::fs::write(&out_image_owned, &outcome.image[..]).map_err(|source| CliError::Io {
+        path: out_image_owned.clone(),
+        source,
+    })?;
+    write_json(&out_map_owned, &outcome.map_report)?;
+
+    // Build the SPC image (M1 contract: zero DSP regs; driver
+    // writes FLG=$60 on its first instruction).
+    let aram_vec: Vec<u8> = outcome.image[..].to_vec();
+    let spc_image: SpcImage =
+        build_m1_image(aram_vec).expect("build_m1_image with valid 64 KB input");
+    let spc_bytes = spc_image
+        .to_bytes()
+        .expect("to_bytes on validated M1 image");
+    if let Some(p) = out_spc_owned.parent() {
+        if !p.as_os_str().is_empty() {
+            create_dir(p)?;
+        }
+    }
+    std::fs::write(&out_spc_owned, &spc_bytes).map_err(|source| CliError::Io {
+        path: out_spc_owned.clone(),
+        source,
+    })?;
+
+    let aram_image_sha256 = sfc_atomizer_core::asm::sha256_hex(&outcome.image[..]);
+    let spc_file_sha256 = sfc_atomizer_core::asm::sha256_hex(&spc_bytes);
+
+    let report = CompileSpcReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: CompileSpcReport::REPORT_TYPE.to_string(),
+        project_name: project.project.name.clone(),
+        active_sample_id: project.m1.active_sample_id.clone(),
+        aram_image_sha256: aram_image_sha256.clone(),
+        spc_file_sha256: spc_file_sha256.clone(),
+        driver_code_sha256: outcome.driver_code_sha256.clone(),
+        driver_code_bytes: outcome.driver_code_bytes,
+        map_report_path: out_map_owned.display().to_string(),
+        spc_path: out_spc_owned.display().to_string(),
+        aram_image_path: out_image_owned.display().to_string(),
+    };
+    write_json(&out_report_owned, &report)?;
+
+    eprintln!(
+        "compile-spc: project={:?} sample={}, driver={} B (sha={}), image={} B (sha={}), spc={} B (sha={}); -> {}",
+        project.project.name,
+        project.m1.active_sample_id,
+        outcome.driver_code_bytes,
+        outcome.driver_code_sha256,
+        outcome.image.len(),
+        aram_image_sha256,
+        spc_bytes.len(),
+        spc_file_sha256,
+        out_spc_owned.display(),
+    );
+    Ok(())
+}
+
+fn cmd_verify_spc_audible(
+    spc_path: &Path,
+    frames: u32,
+    out_report: Option<&Path>,
+    out_pcm: Option<&Path>,
+    min_max_abs: u32,
+    min_rms: f64,
+    oracle: Option<&Path>,
+) -> Result<(), CliError> {
+    let stem = spc_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "spc".to_string());
+    let out_report_owned = out_report
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m1").join(format!("{stem}.audible-report.json")));
+    let out_pcm_owned = out_pcm
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m1").join(format!("{stem}.audible.pcm_s16le")));
+
+    let mut report = AudibleVerificationReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: AudibleVerificationReport::REPORT_TYPE.to_string(),
+        spc_path: spc_path.display().to_string(),
+        spc_sha256: sfc_atomizer_core::asm::sha256_hex_file(spc_path).unwrap_or_default(),
+        frames_rendered: 0,
+        sample_rate_hz: 32_000,
+        observed: ObservedAudio {
+            max_abs: 0,
+            rms: 0.0,
+            bytes_zero: 0,
+            bytes_total: 0,
+            fraction_zero: 0.0,
+        },
+        thresholds: AudibleThresholds {
+            min_max_abs,
+            min_rms,
+        },
+        status: AudibleStatus::OracleError,
+        error: None,
+    };
+
+    let workspace_root = std::env::current_dir().map_err(CliError::Cwd)?;
+    let oracle_path = match resolve_oracle(oracle, &workspace_root) {
+        Some(p) => p,
+        None => {
+            report.error = Some(
+                "oracle wrapper not resolved (set SFCWC_SNES_SPC_ORACLE or build it under tools/snes_spc_oracle/build/Release)".to_string(),
+            );
+            write_json(&out_report_owned, &report)?;
+            eprintln!(
+                "verify-spc-audible: oracle wrapper not resolved; report -> {}",
+                out_report_owned.display()
+            );
+            std::process::exit(1);
+        }
+    };
+
+    if !spc_path.is_file() {
+        report.error = Some(format!("input SPC missing: {}", spc_path.display()));
+        write_json(&out_report_owned, &report)?;
+        eprintln!(
+            "verify-spc-audible: input SPC missing at {}",
+            spc_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    if let Some(p) = out_pcm_owned.parent() {
+        if !p.as_os_str().is_empty() {
+            create_dir(p)?;
+        }
+    }
+
+    // Wrapper's own report sidecar (M0.5 pattern).
+    let mut wrapper_report = out_report_owned.clone();
+    let wrapper_name = match wrapper_report.file_name() {
+        Some(n) => format!("{}.oracle-side.json", n.to_string_lossy()),
+        None => "oracle-side.json".to_string(),
+    };
+    wrapper_report.set_file_name(wrapper_name);
+
+    let output = std::process::Command::new(&oracle_path)
+        .arg("render")
+        .arg("--input-spc")
+        .arg(spc_path)
+        .arg("--frames")
+        .arg(frames.to_string())
+        .arg("--output-pcm")
+        .arg(&out_pcm_owned)
+        .arg("--report")
+        .arg(&wrapper_report)
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            report.error = Some(format!("spawn oracle: {e}"));
+            write_json(&out_report_owned, &report)?;
+            eprintln!(
+                "verify-spc-audible: cannot spawn oracle ({e}); report -> {}",
+                out_report_owned.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        report.error = Some(format!("oracle exited {code}: {}", first_line(&stderr)));
+        write_json(&out_report_owned, &report)?;
+        eprintln!(
+            "verify-spc-audible: oracle exited {code}; report -> {}",
+            out_report_owned.display()
+        );
+        std::process::exit(1);
+    }
+
+    let pcm_bytes = match std::fs::read(&out_pcm_owned) {
+        Ok(b) => b,
+        Err(e) => {
+            report.error = Some(format!("read oracle PCM: {e}"));
+            write_json(&out_report_owned, &report)?;
+            eprintln!(
+                "verify-spc-audible: cannot read oracle PCM: {e}; report -> {}",
+                out_report_owned.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    let expected_pcm_bytes = (frames as usize) * 4;
+    if pcm_bytes.len() != expected_pcm_bytes {
+        report.error = Some(format!(
+            "oracle PCM wrong size: expected {}, got {}",
+            expected_pcm_bytes,
+            pcm_bytes.len()
+        ));
+        write_json(&out_report_owned, &report)?;
+        eprintln!(
+            "verify-spc-audible: PCM wrong size; report -> {}",
+            out_report_owned.display()
+        );
+        std::process::exit(1);
+    }
+
+    let (max_abs, rms) = pcm_stats_from_bytes(&pcm_bytes);
+    let bytes_zero = pcm_bytes.iter().filter(|&&b| b == 0).count() as u32;
+    let bytes_total = pcm_bytes.len() as u32;
+    let fraction_zero = (bytes_zero as f64) / (bytes_total as f64);
+    report.frames_rendered = frames;
+    report.observed = ObservedAudio {
+        max_abs: max_abs as u32,
+        rms,
+        bytes_zero,
+        bytes_total,
+        fraction_zero,
+    };
+
+    let status = if (max_abs as u32) < min_max_abs || rms < min_rms {
+        AudibleStatus::SilentFail
+    } else {
+        AudibleStatus::Ok
+    };
+    report.status = status;
+
+    write_json(&out_report_owned, &report)?;
+
+    let status_label = match status {
+        AudibleStatus::Ok => "ok",
+        AudibleStatus::SilentFail => "silent_fail",
+        AudibleStatus::OracleError => "oracle_error",
+    };
+    eprintln!(
+        "verify-spc-audible: {} frames, max_abs={}, rms={:.1}, status={}; report -> {}",
+        frames,
+        max_abs,
+        rms,
+        status_label,
+        out_report_owned.display()
+    );
+
+    if status == AudibleStatus::SilentFail {
+        std::process::exit(2);
+    }
     Ok(())
 }
 
