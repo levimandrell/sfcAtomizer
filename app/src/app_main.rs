@@ -17,11 +17,14 @@ use eframe::egui;
 use sfc_atomizer_core::audio::decode_to_mono_pcm;
 use sfc_atomizer_core::audition::export_decoded_brr_wav;
 use sfc_atomizer_core::brr_encoder::{encode as brr_encode, encode_looped, EncodeOptions};
+use sfc_atomizer_core::driver_build::{build as driver_build, DriverBuildInput};
 use sfc_atomizer_core::import::{import_audio, ImportOptions};
 use sfc_atomizer_core::loop_finder::{find_loop_candidates, LoopCandidate, LoopFinderOptions};
 use sfc_atomizer_core::packer::{pack as packer_pack, EncodedSample, PackInput};
 use sfc_atomizer_core::project::{ProjectV1, SampleSlot, ValidationError};
 use sfc_atomizer_core::report::{AramKind, AramMapReport};
+use sfc_atomizer_core::spc::build_m1_image;
+use sfc_atomizer_core::tools::resolve_snes_spc_oracle;
 
 const WINDOW_DEFAULT_WIDTH: f32 = 1024.0;
 const WINDOW_DEFAULT_HEIGHT: f32 = 640.0;
@@ -69,6 +72,17 @@ struct SfcwcApp {
     /// sample's source file wasn't where the project said it was).
     /// Surfaced under the meter so the user knows why it's stale.
     aram_meter_error: Option<String>,
+
+    /// Path to the most recently compiled `.spc`. Enables the
+    /// Verify Audible button.
+    last_compiled_spc: Option<PathBuf>,
+    /// Free-form summary line for the last compile result.
+    last_compile_summary: Option<String>,
+    /// Free-form summary line for the last audible-verify result;
+    /// includes max_abs / rms / status.
+    last_audible_summary: Option<String>,
+    /// Severity of the last audible-verify run for color rendering.
+    last_audible_ok: Option<bool>,
 
     // One-shot status message (e.g. "loaded /tmp/x.json").
     status_message: Option<String>,
@@ -427,9 +441,13 @@ impl SfcwcApp {
     fn draw_center(&mut self, ctx: &egui::Context) {
         let selected = self.selected_sample_id.clone();
         let mut response = SampleDetailResponse::default();
-        let mut request_meter_refresh = false;
+        let mut project_resp = ProjectDetailResponse::default();
         let aram_meter = self.aram_meter.clone();
         let aram_meter_error = self.aram_meter_error.clone();
+        let last_compile_summary = self.last_compile_summary.clone();
+        let last_audible_summary = self.last_audible_summary.clone();
+        let last_audible_ok = self.last_audible_ok;
+        let has_compiled_spc = self.last_compiled_spc.is_some();
         egui::CentralPanel::default().show(ctx, |ui| {
             let Some(project) = self.project.as_mut() else {
                 ui.vertical_centered(|ui| {
@@ -450,11 +468,17 @@ impl SfcwcApp {
                     }
                 },
                 None => {
-                    request_meter_refresh = draw_project_detail(
+                    project_resp = draw_project_detail(
                         ui,
-                        project,
-                        aram_meter.as_ref(),
-                        aram_meter_error.as_deref(),
+                        ProjectDetailState {
+                            project,
+                            aram_meter: aram_meter.as_ref(),
+                            aram_meter_error: aram_meter_error.as_deref(),
+                            last_compile_summary: last_compile_summary.as_deref(),
+                            last_audible_summary: last_audible_summary.as_deref(),
+                            last_audible_ok,
+                            has_compiled_spc,
+                        },
                     );
                 }
             }
@@ -471,8 +495,14 @@ impl SfcwcApp {
         if response.preview_brr {
             self.do_preview_brr();
         }
-        if request_meter_refresh {
+        if project_resp.refresh_meter {
             self.recompute_aram_meter();
+        }
+        if project_resp.compile_spc {
+            self.do_compile_spc();
+        }
+        if project_resp.verify_audible {
+            self.do_verify_audible();
         }
     }
 
@@ -749,6 +779,229 @@ impl SfcwcApp {
         }
     }
 
+    /// Synchronous in-process compile-spc. On success stores the
+    /// path in `last_compiled_spc` so Verify Audible can run.
+    fn do_compile_spc(&mut self) {
+        let Some(project) = self.project.as_ref().cloned() else {
+            self.last_compile_summary = Some("compile-spc: no project loaded".to_string());
+            return;
+        };
+        if !self.validation_errors.is_empty() {
+            self.last_compile_summary =
+                Some("compile-spc: project has validation errors".to_string());
+            return;
+        }
+        let project_dir = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        // 1. Encode samples.
+        let mut encoded: Vec<EncodedSample> = Vec::with_capacity(project.sample_pool.len());
+        for slot in &project.sample_pool {
+            let raw = Path::new(&slot.source.path);
+            let audio_path = if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                project_dir.join(raw)
+            };
+            let pcm = match decode_to_mono_pcm(&audio_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.last_compile_summary =
+                        Some(format!("compile-spc: decode {}: {e}", slot.source.path));
+                    return;
+                }
+            };
+            let opts = EncodeOptions::default();
+            let (bytes, loop_entry_block) = if slot.looped.enabled {
+                match slot.looped.start_sample {
+                    Some(start) => match encode_looped(&pcm, start, &opts) {
+                        Ok(r) => (r.bytes, Some(start / 16)),
+                        Err(e) => {
+                            self.last_compile_summary =
+                                Some(format!("compile-spc: encode_looped {}: {e}", slot.id));
+                            return;
+                        }
+                    },
+                    None => (brr_encode(&pcm, &opts).bytes, None),
+                }
+            } else {
+                (brr_encode(&pcm, &opts).bytes, None)
+            };
+            encoded.push(EncodedSample {
+                sample_id: slot.id.clone(),
+                bytes,
+                loop_entry_block,
+            });
+        }
+
+        // 2. Shadow pack to get the layout for driver_build.
+        let shadow = match packer_pack(PackInput {
+            project: project.clone(),
+            encoded_samples: encoded.clone(),
+            driver_code: Vec::new(),
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                self.last_compile_summary = Some(format!("compile-spc: shadow pack: {e}"));
+                return;
+            }
+        };
+
+        // 3. Build driver.
+        let work = match tempfile::tempdir() {
+            Ok(d) => d,
+            Err(e) => {
+                self.last_compile_summary = Some(format!("compile-spc: tempdir: {e}"));
+                return;
+            }
+        };
+        let driver_out = match driver_build(DriverBuildInput {
+            project: &project,
+            map_report: &shadow.map_report,
+            source_override: None,
+            working_dir: work.path().to_path_buf(),
+        }) {
+            Ok(o) => o,
+            Err(e) => {
+                self.last_compile_summary = Some(format!("compile-spc: driver_build: {e}"));
+                return;
+            }
+        };
+
+        // 4. Real pack.
+        let result = match packer_pack(PackInput {
+            project: project.clone(),
+            encoded_samples: encoded,
+            driver_code: driver_out.driver_code.clone(),
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                self.last_compile_summary = Some(format!("compile-spc: pack: {e}"));
+                return;
+            }
+        };
+
+        // 5. SPC + write.
+        let aram_vec: Vec<u8> = result.aram_image[..].to_vec();
+        let spc = match build_m1_image(aram_vec) {
+            Ok(s) => s,
+            Err(e) => {
+                self.last_compile_summary = Some(format!("compile-spc: build_m1_image: {e:?}"));
+                return;
+            }
+        };
+        let spc_bytes = match spc.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                self.last_compile_summary = Some(format!("compile-spc: to_bytes: {e:?}"));
+                return;
+            }
+        };
+
+        let stem = project
+            .project
+            .name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect::<String>();
+        let stem = if stem.is_empty() {
+            "project".to_string()
+        } else {
+            stem
+        };
+        let out_dir = project_dir.join(".sfcwc-build");
+        if let Err(e) = std::fs::create_dir_all(&out_dir) {
+            self.last_compile_summary =
+                Some(format!("compile-spc: mkdir {}: {e}", out_dir.display()));
+            return;
+        }
+        let spc_path = out_dir.join(format!("{stem}.spc"));
+        if let Err(e) = std::fs::write(&spc_path, &spc_bytes) {
+            self.last_compile_summary =
+                Some(format!("compile-spc: write {}: {e}", spc_path.display()));
+            return;
+        }
+
+        self.last_compiled_spc = Some(spc_path.clone());
+        self.last_compile_summary = Some(format!(
+            "compile-spc OK: driver={} B, spc={} B → {}",
+            driver_out.driver_code.len(),
+            spc_bytes.len(),
+            spc_path.display(),
+        ));
+        self.last_audible_summary = None;
+        self.last_audible_ok = None;
+    }
+
+    fn do_verify_audible(&mut self) {
+        let Some(spc) = self.last_compiled_spc.clone() else {
+            self.last_audible_summary = Some("verify: no compiled SPC".to_string());
+            self.last_audible_ok = Some(false);
+            return;
+        };
+        let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let oracle = resolve_snes_spc_oracle(&workspace_root);
+        if !oracle.resolved {
+            self.last_audible_summary =
+                Some("verify: oracle wrapper not resolved (set SFCWC_SNES_SPC_ORACLE)".to_string());
+            self.last_audible_ok = Some(false);
+            return;
+        }
+        let oracle_path = oracle.path.expect("resolved => path");
+
+        let pcm_path = spc.with_extension("audible.pcm_s16le");
+        let report_path = spc.with_extension("audible-report.json");
+        let frames = 16384u32;
+        let output = std::process::Command::new(&oracle_path)
+            .arg("render")
+            .arg("--input-spc")
+            .arg(&spc)
+            .arg("--frames")
+            .arg(frames.to_string())
+            .arg("--output-pcm")
+            .arg(&pcm_path)
+            .arg("--report")
+            .arg(&report_path)
+            .output();
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => {
+                self.last_audible_summary = Some(format!("verify: spawn oracle: {e}"));
+                self.last_audible_ok = Some(false);
+                return;
+            }
+        };
+        if !output.status.success() {
+            self.last_audible_summary = Some(format!(
+                "verify: oracle exited {}",
+                output.status.code().unwrap_or(-1)
+            ));
+            self.last_audible_ok = Some(false);
+            return;
+        }
+        let pcm = match std::fs::read(&pcm_path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.last_audible_summary = Some(format!("verify: read PCM: {e}"));
+                self.last_audible_ok = Some(false);
+                return;
+            }
+        };
+        let (max_abs, rms) = pcm_stats(&pcm);
+        let ok = max_abs >= 1000 && rms >= 200.0;
+        self.last_audible_summary = Some(format!(
+            "verify: {} frames, max_abs={}, rms={:.1}, status={}",
+            frames,
+            max_abs,
+            rms,
+            if ok { "ok" } else { "silent_fail" },
+        ));
+        self.last_audible_ok = Some(ok);
+    }
+
     fn apply_loop_candidate(&mut self, sample_id: &str, c: LoopCandidate) {
         let Some(project) = self.project.as_mut() else {
             return;
@@ -796,14 +1049,37 @@ impl SfcwcApp {
     }
 }
 
-/// Returns `true` when the user clicked "Refresh ARAM meter".
-fn draw_project_detail(
-    ui: &mut egui::Ui,
-    project: &ProjectV1,
-    aram_meter: Option<&AramMapReport>,
-    aram_meter_error: Option<&str>,
-) -> bool {
-    let mut request_refresh = false;
+#[derive(Default, Clone, Copy)]
+struct ProjectDetailResponse {
+    refresh_meter: bool,
+    compile_spc: bool,
+    verify_audible: bool,
+}
+
+/// State the project-detail panel reads from `SfcwcApp`. Cloned
+/// into a single struct so the rendering function stays under
+/// clippy's 7-arg ceiling.
+struct ProjectDetailState<'a> {
+    project: &'a ProjectV1,
+    aram_meter: Option<&'a AramMapReport>,
+    aram_meter_error: Option<&'a str>,
+    last_compile_summary: Option<&'a str>,
+    last_audible_summary: Option<&'a str>,
+    last_audible_ok: Option<bool>,
+    has_compiled_spc: bool,
+}
+
+fn draw_project_detail(ui: &mut egui::Ui, s: ProjectDetailState<'_>) -> ProjectDetailResponse {
+    let ProjectDetailState {
+        project,
+        aram_meter,
+        aram_meter_error,
+        last_compile_summary,
+        last_audible_summary,
+        last_audible_ok,
+        has_compiled_spc,
+    } = s;
+    let mut resp = ProjectDetailResponse::default();
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.heading("Project");
         ui.separator();
@@ -845,7 +1121,7 @@ fn draw_project_detail(
         ui.horizontal(|ui| {
             ui.heading("ARAM meter");
             if ui.button("Refresh").clicked() {
-                request_refresh = true;
+                resp.refresh_meter = true;
             }
         });
         if let Some(err) = aram_meter_error {
@@ -856,8 +1132,34 @@ fn draw_project_detail(
         } else if aram_meter_error.is_none() {
             ui.weak("(meter unavailable — open a valid project)");
         }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.heading("Compile + verify (M1.5)");
+        ui.horizontal(|ui| {
+            if ui.button("Compile SPC").clicked() {
+                resp.compile_spc = true;
+            }
+            if ui
+                .add_enabled(has_compiled_spc, egui::Button::new("Verify Audible"))
+                .clicked()
+            {
+                resp.verify_audible = true;
+            }
+        });
+        if let Some(s) = last_compile_summary {
+            ui.weak(s);
+        }
+        if let Some(s) = last_audible_summary {
+            let color = match last_audible_ok {
+                Some(true) => egui::Color32::from_rgb(80, 180, 100),
+                Some(false) => egui::Color32::from_rgb(220, 80, 80),
+                None => egui::Color32::GRAY,
+            };
+            ui.colored_label(color, s);
+        }
     });
-    request_refresh
+    resp
 }
 
 fn draw_aram_meter(ui: &mut egui::Ui, report: &AramMapReport) {
@@ -937,6 +1239,24 @@ fn draw_aram_meter(ui: &mut egui::Ui, report: &AramMapReport) {
             ui.colored_label(egui::Color32::from_rgb(220, 200, 80), format!("• {w}"));
         }
     }
+}
+
+fn pcm_stats(pcm: &[u8]) -> (i32, f64) {
+    let n = pcm.len() / 2;
+    if n == 0 {
+        return (0, 0.0);
+    }
+    let mut max_abs: i32 = 0;
+    let mut sum_sq: f64 = 0.0;
+    for chunk in pcm.chunks_exact(2) {
+        let s = i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
+        let a = s.unsigned_abs() as i32;
+        if a > max_abs {
+            max_abs = a;
+        }
+        sum_sq += (s as f64) * (s as f64);
+    }
+    (max_abs, (sum_sq / n as f64).sqrt())
 }
 
 fn color_for_kind(kind: AramKind) -> egui::Color32 {
