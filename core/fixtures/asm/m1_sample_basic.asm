@@ -24,7 +24,10 @@
 ; are the driver_code blob.
 ;
 ; Direct-page state:
-;   $00 = dp_last_token  (last command_token observed)
+;   $00 = dp_last_token  (last command_token observed; SEEDED from
+;                          $F4 at init — see step 8.1 — so the IPL
+;                          exec residual byte is not mistaken for a
+;                          fresh command on the first main_loop poll)
 ;   $01 = dp_status_flags (current status_flags byte)
 ; ============================================================
 
@@ -113,9 +116,34 @@ driver_entry:
     mov $f2, #$6c
     mov $f3, #flg_running
 
-    ; 8. Direct-page state.
-    mov $00, #$00
+    ; 8. Direct-page state. Note: dp_last_token gets seeded in 8.1
+    ; from the live host port, not zero-initialised — the M2.0
+    ; bootstrap fix.
     mov $01, #status_flags_initial
+
+    ; 8.1 Seed dp_last_token from the current host-port value so any
+    ; residual byte from IPL upload/exec (the kick byte sitting on
+    ; CPUIO0 after the loader's "$2141 = $00 → exec" handshake) is
+    ; not mistaken for a fresh host command on the first main_loop
+    ; poll. Pre-M2.0 the driver wrote zero here and then read $F4 in
+    ; main_loop; the .sfc IPL exec path leaves $F4 non-zero, so the
+    ; first poll fired the invalid-command path, stomped $F5 with
+    ; $EE, and tripped the loader's wait_driver_ready timeout. The
+    ; .spc / oracle path is unaffected because spc_load_spc
+    ; initialises $F4 from the embedded ARAM image (zero).
+    ;
+    ; Expected encoded bytes: E4 F4 C4 00 (asar picks the 2-byte
+    ; direct-page form for $F4 since both source and dest are in
+    ; DP).
+    ;   E4 F4 = mov a, $f4 (load CPUIO0 host-port mirror)
+    ;   C4 00 = mov $00, a (store into dp_last_token)
+    ;
+    ; The regression test in tests/m1_driver_bootstrap.rs locks the
+    ; encoded bytes; if asar emits a different addressing form that
+    ; still reads CPUIO0 and stores to dp $00, update the regression
+    ; test accordingly.
+    mov a, $f4
+    mov $00, a
 
     ; 9. KON voice 0.
     mov $f2, #$4c
