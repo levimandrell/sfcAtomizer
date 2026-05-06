@@ -2,10 +2,60 @@
 
 ## Current milestone
 
-**M0 — Research harness** — in progress. Asar backend smoke is in
-(M0.3); minimal `.spc` exporter is next (M0.4).
+**M0 — Research harness** — in progress. Minimal `.spc` exporter
+is in (M0.4) with a Mesen2-loadable file produced by an end-to-end
+m0-acceptance chain; oracle wrapper boundary is next (M0.5).
+**Manual Mesen2 verification by the user is the M0.4 acceptance
+gate** — the producer side is locked here.
 
 ## Last pass
+
+**Pass M0.4 — Minimal `.spc` exporter smoke.**
+
+- Phase A: New `core::spc` module — SPC v0.30 layout constants for
+  the 66,048-byte file (header / ARAM / DSP / 64 B unused gap /
+  Extra RAM), `SpcCpuState` / `SpcImage` / `SpcBuildError` types,
+  and `SpcImage::to_bytes`/`write_to_path`. Layout cross-checked
+  against fullsnes and vspcplay; 0x10180..0x101C0 is the canonical
+  unused gap, 0x101C0..0x10200 is Extra RAM.
+- Phase B: New SPEC §19.3 SPC smoke state contract — PC=$0200,
+  GPRs zero, SP=$EF, FLG=$60 (Mute amp + Echo write disable), all
+  other DSP regs zero, ID666 indicator absent (0x1B). Mirrored as
+  `SMOKE_CPU_STATE`, `SMOKE_FLG`, `smoke_dsp_regs`,
+  `build_smoke_image` constants/functions in `core::spc`.
+- Phase C: `core::spc::verify_structure` — observation-only parse
+  of any v0.30 SPC, returns magic_ok / minor_version /
+  id666_present / cpu / per-region SHA-256s. Never asserts; the
+  caller decides what's fatal.
+- Phase D: New `core::aram` module with
+  `map_from_image(&[u8; 65536]) -> AramMapReport`. Walks for
+  first/last nonzero byte in `$0200..$FFC0` to identify
+  driver_code; everything else is `free`. Documented as a stopgap
+  valid for the M0 smoke output; the real packer lands in M3+.
+  The new partition invariant: regions sum to total_aram exactly,
+  free_bytes equals the sum of `Free` regions.
+- Phase E: `SpcExportReport` extended with four new optional
+  fields — `input_aram_sha256`, `dsp_state_sha256`,
+  `spc_file_sha256`, `error`. Same `skip_serializing_if` pattern
+  as M0.3; pre-M0.4 reports still parse.
+- Phase F: `sfcwc export-spc-smoke` rewired with `--aram`,
+  `--out-spc`, `--verify-structure` flags. Reads driver.bin,
+  builds smoke image, writes 66 KB .spc, optionally re-verifies
+  structure. ARAM-missing/wrong-size is failure-as-data.
+- Phase G: `sfcwc m0-acceptance` chained end-to-end — doctor →
+  decode-fixtures → assemble-smoke → export-spc-smoke →
+  aram::map_from_image → calibrate-oracle (still stub) →
+  manifest. Failures in one step don't halt the chain; the
+  manifest still gets produced.
+- Phase H: 76 tests passing — 54 core unit + 10 BRR fixture
+  integration + 12 app CLI integration. New tests cover SPC byte
+  layout, ARAM partition invariant, the export-spc happy/sad
+  paths, and a full m0-acceptance chain run.
+
+`cargo check`, `cargo fmt --check`, `cargo clippy --all-targets --
+-D warnings`, and `cargo test` all green.
+
+## Previous passes
 
 **Pass M0.3 — Asar backend smoke.**
 
@@ -203,6 +253,22 @@ test` all green.
 - **Smoke .asm location** `core/fixtures/asm/m0_smoke.asm` (M0.3):
   first-class fixture, not test-only. Sentinel bytes `00 2F FD` at
   offset `0x0200` are locked by an integration test.
+- **SPC v0.30 file size 66,048 bytes, no extended ID666** (M0.4):
+  Header (256 B) + ARAM (64 KB) + DSP (128 B) + unused gap (64 B at
+  0x10180) + Extra RAM (64 B at 0x101C0). ID666 indicator = absent
+  (0x1B); the 210-byte tag region is zero-filled. xid6/extended
+  ID666 deferred until a use case appears.
+- **M0 smoke state contract** (M0.4, SPEC §19.3): PC=$0200, GPRs=0,
+  SP=$EF, DSP FLG=$60 (Mute amp + Echo write disable), every other
+  DSP reg = 0. Result: SPC700 runs the driver from $0200 while the
+  DSP produces no audio. M1+ smoke profiles will add an
+  audible-but-deterministic state.
+- **ARAM map approach for M0** (M0.4): `core::aram::map_from_image`
+  walks the assembled image for nonzero driver-code extent. Valid
+  for "single contiguous driver, no sample pool, no atom pool yet."
+  The M3+ ARAM packer replaces this whole module; M0.4's stopgap
+  reports the new invariant that regions partition total_aram
+  exactly (rather than the M0.1 stub's "fixed regions only" model).
 
 ## Open questions remaining
 
@@ -215,7 +281,8 @@ Cross-reference SPEC §23. Of the four questions there:
 
 ## Next pass
 
-**M0.4 — Minimal `.spc` exporter smoke.** PM to brief. The 64 KB
-ARAM image from M0.3 gets wrapped in a valid SPC-format header so
-the M0 driver can be opened in Mesen2 for manual playback
-verification.
+**M0.5 — snes_spc oracle wrapper boundary.** PM to brief. The
+`tools/snes_spc_oracle` binary boundary documented in SPEC §17.1
+gets a defined wire protocol; the host can render an SPC through
+the oracle for cross-verification against future BRR/render
+calibration.
