@@ -19,7 +19,9 @@ use sfc_atomizer_core::audition::export_decoded_brr_wav;
 use sfc_atomizer_core::brr_encoder::{encode as brr_encode, encode_looped, EncodeOptions};
 use sfc_atomizer_core::import::{import_audio, ImportOptions};
 use sfc_atomizer_core::loop_finder::{find_loop_candidates, LoopCandidate, LoopFinderOptions};
+use sfc_atomizer_core::packer::{pack as packer_pack, EncodedSample, PackInput};
 use sfc_atomizer_core::project::{ProjectV1, SampleSlot, ValidationError};
+use sfc_atomizer_core::report::{AramKind, AramMapReport};
 
 const WINDOW_DEFAULT_WIDTH: f32 = 1024.0;
 const WINDOW_DEFAULT_HEIGHT: f32 = 640.0;
@@ -59,6 +61,15 @@ struct SfcwcApp {
     show_errors_modal: bool,
     loop_candidates_modal: LoopCandidatesModalState,
 
+    /// Cached ARAM map for the meter view. Invalidated on project
+    /// load, sample edits, and manual refresh; encoder + packer pass
+    /// is too expensive to run every frame.
+    aram_meter: Option<AramMapReport>,
+    /// Stashed error message when the last recompute failed (e.g. a
+    /// sample's source file wasn't where the project said it was).
+    /// Surfaced under the meter so the user knows why it's stale.
+    aram_meter_error: Option<String>,
+
     // One-shot status message (e.g. "loaded /tmp/x.json").
     status_message: Option<String>,
 }
@@ -96,12 +107,86 @@ impl SfcwcApp {
                 self.validation_errors = errors;
                 self.selected_sample_id = None;
                 self.status_message = Some(format!("loaded {}", path.display()));
+                self.recompute_aram_meter();
             }
             Err(e) => {
                 self.project = None;
                 self.project_path = None;
                 self.validation_errors = Vec::new();
                 self.status_message = Some(format!("load failed: {e}"));
+                self.aram_meter = None;
+                self.aram_meter_error = None;
+            }
+        }
+    }
+
+    /// Synchronously decode + encode every sample, run the packer, and
+    /// stash the resulting [`AramMapReport`] for the meter view. On
+    /// any failure (missing audio, decode error, pack overflow), leave
+    /// the previous meter untouched and stash an error string.
+    fn recompute_aram_meter(&mut self) {
+        let Some(project) = self.project.as_ref() else {
+            self.aram_meter = None;
+            self.aram_meter_error = None;
+            return;
+        };
+        if !self.validation_errors.is_empty() {
+            self.aram_meter = None;
+            self.aram_meter_error = Some("project has validation errors".to_string());
+            return;
+        }
+        let project_dir = self
+            .project_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let mut encoded: Vec<EncodedSample> = Vec::with_capacity(project.sample_pool.len());
+        for slot in &project.sample_pool {
+            let raw = Path::new(&slot.source.path);
+            let audio_path = if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                project_dir.join(raw)
+            };
+            let pcm = match decode_to_mono_pcm(&audio_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.aram_meter_error = Some(format!("decode {}: {e}", slot.source.path));
+                    return;
+                }
+            };
+            let opts = EncodeOptions::default();
+            let (bytes, loop_entry_block) = if slot.looped.enabled {
+                match slot.looped.start_sample {
+                    Some(start) => match encode_looped(&pcm, start, &opts) {
+                        Ok(r) => (r.bytes, Some(start / 16)),
+                        Err(e) => {
+                            self.aram_meter_error = Some(format!("encode_looped {}: {e}", slot.id));
+                            return;
+                        }
+                    },
+                    None => (brr_encode(&pcm, &opts).bytes, None),
+                }
+            } else {
+                (brr_encode(&pcm, &opts).bytes, None)
+            };
+            encoded.push(EncodedSample {
+                sample_id: slot.id.clone(),
+                bytes,
+                loop_entry_block,
+            });
+        }
+        match packer_pack(PackInput {
+            project: project.clone(),
+            encoded_samples: encoded,
+            driver_code: Vec::new(),
+        }) {
+            Ok(out) => {
+                self.aram_meter = Some(out.map_report);
+                self.aram_meter_error = None;
+            }
+            Err(e) => {
+                self.aram_meter_error = Some(format!("pack: {e}"));
             }
         }
     }
@@ -135,6 +220,7 @@ impl SfcwcApp {
                 self.project = Some(template);
                 self.selected_sample_id = None;
                 self.status_message = Some(format!("created {}", path.display()));
+                self.recompute_aram_meter();
             }
             Err(e) => {
                 self.status_message = Some(format!("new project failed: {e}"));
@@ -341,6 +427,9 @@ impl SfcwcApp {
     fn draw_center(&mut self, ctx: &egui::Context) {
         let selected = self.selected_sample_id.clone();
         let mut response = SampleDetailResponse::default();
+        let mut request_meter_refresh = false;
+        let aram_meter = self.aram_meter.clone();
+        let aram_meter_error = self.aram_meter_error.clone();
         egui::CentralPanel::default().show(ctx, |ui| {
             let Some(project) = self.project.as_mut() else {
                 ui.vertical_centered(|ui| {
@@ -360,19 +449,30 @@ impl SfcwcApp {
                         ui.weak(format!("(selected sample {id} not in pool)"));
                     }
                 },
-                None => draw_project_detail(ui, project),
+                None => {
+                    request_meter_refresh = draw_project_detail(
+                        ui,
+                        project,
+                        aram_meter.as_ref(),
+                        aram_meter_error.as_deref(),
+                    );
+                }
             }
         });
         if response.edited {
             if let Some(p) = self.project.as_ref() {
                 self.validation_errors = p.validate().err().unwrap_or_default();
             }
+            self.recompute_aram_meter();
         }
         if response.find_loops {
             self.do_find_loops();
         }
         if response.preview_brr {
             self.do_preview_brr();
+        }
+        if request_meter_refresh {
+            self.recompute_aram_meter();
         }
     }
 
@@ -662,6 +762,7 @@ impl SfcwcApp {
         if let Some(p) = self.project.as_ref() {
             self.validation_errors = p.validate().err().unwrap_or_default();
         }
+        self.recompute_aram_meter();
         self.status_message = Some(format!(
             "loop applied: start={} end={}",
             c.start_sample, c.end_sample
@@ -695,41 +796,162 @@ impl SfcwcApp {
     }
 }
 
-fn draw_project_detail(ui: &mut egui::Ui, project: &ProjectV1) {
-    ui.heading("Project");
-    ui.separator();
-    egui::Grid::new("project_grid")
+/// Returns `true` when the user clicked "Refresh ARAM meter".
+fn draw_project_detail(
+    ui: &mut egui::Ui,
+    project: &ProjectV1,
+    aram_meter: Option<&AramMapReport>,
+    aram_meter_error: Option<&str>,
+) -> bool {
+    let mut request_refresh = false;
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.heading("Project");
+        ui.separator();
+        egui::Grid::new("project_grid")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("name");
+                ui.monospace(&project.project.name);
+                ui.end_row();
+                ui.label("tick_rate_hz");
+                ui.monospace(project.project.tick_rate_hz.to_string());
+                ui.end_row();
+                ui.label("driver.profile");
+                ui.monospace(&project.driver.profile);
+                ui.end_row();
+                ui.label("driver.bytecode_version");
+                ui.monospace(project.driver.bytecode_version.to_string());
+                ui.end_row();
+                ui.label("master_echo.enabled");
+                ui.monospace(project.master_echo.enabled.to_string());
+                ui.end_row();
+                ui.label("master_echo.edl");
+                ui.monospace(project.master_echo.edl.to_string());
+                ui.end_row();
+                ui.label("sample_pool.len");
+                ui.monospace(project.sample_pool.len().to_string());
+                ui.end_row();
+                ui.label("m1.active_sample_id");
+                ui.monospace(if project.m1.active_sample_id.is_empty() {
+                    "(none)"
+                } else {
+                    project.m1.active_sample_id.as_str()
+                });
+                ui.end_row();
+            });
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("ARAM meter");
+            if ui.button("Refresh").clicked() {
+                request_refresh = true;
+            }
+        });
+        if let Some(err) = aram_meter_error {
+            ui.colored_label(egui::Color32::from_rgb(220, 80, 80), format!("⚠ {err}"));
+        }
+        if let Some(report) = aram_meter {
+            draw_aram_meter(ui, report);
+        } else if aram_meter_error.is_none() {
+            ui.weak("(meter unavailable — open a valid project)");
+        }
+    });
+    request_refresh
+}
+
+fn draw_aram_meter(ui: &mut egui::Ui, report: &AramMapReport) {
+    let total = report.total_aram as f32;
+    let bar_height = 24.0;
+    let avail_width = ui.available_width().min(720.0);
+
+    let (rect, _resp) =
+        ui.allocate_exact_size(egui::vec2(avail_width, bar_height), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
+
+    let mut x = rect.left();
+    for region in &report.regions {
+        let width = (region.bytes as f32 / total) * avail_width;
+        if width <= 0.0 {
+            continue;
+        }
+        let segment =
+            egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(width, bar_height));
+        painter.rect_filled(segment, 0.0, color_for_kind(region.kind));
+        x += width;
+    }
+    painter.rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
+        egui::StrokeKind::Inside,
+    );
+
+    ui.add_space(8.0);
+
+    // Echo callout.
+    if let Some(echo) = report.echo.as_ref() {
+        if echo.enabled {
+            let label = format!(
+                "Echo: {} B ({:.1}% of ARAM), EDL={}, ESA=$ {:02X}",
+                echo.buffer_bytes, echo.percent_of_aram, echo.edl, echo.esa,
+            );
+            if echo.writeback_safe {
+                ui.label(egui::RichText::new(label).strong());
+            } else {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 80, 80),
+                    format!("⚠ {label}  (writeback hazard)"),
+                );
+            }
+        } else {
+            ui.label(egui::RichText::new("Echo: 0 B; echo writeback disabled").weak());
+        }
+    }
+
+    ui.add_space(8.0);
+    egui::Grid::new("aram_meter_breakdown")
         .num_columns(2)
         .show(ui, |ui| {
-            ui.label("name");
-            ui.monospace(&project.project.name);
+            ui.label("total");
+            ui.monospace(format!("{} B", report.total_aram));
             ui.end_row();
-            ui.label("tick_rate_hz");
-            ui.monospace(project.project.tick_rate_hz.to_string());
-            ui.end_row();
-            ui.label("driver.profile");
-            ui.monospace(&project.driver.profile);
-            ui.end_row();
-            ui.label("driver.bytecode_version");
-            ui.monospace(project.driver.bytecode_version.to_string());
-            ui.end_row();
-            ui.label("master_echo.enabled");
-            ui.monospace(project.master_echo.enabled.to_string());
-            ui.end_row();
-            ui.label("master_echo.edl");
-            ui.monospace(project.master_echo.edl.to_string());
-            ui.end_row();
-            ui.label("sample_pool.len");
-            ui.monospace(project.sample_pool.len().to_string());
-            ui.end_row();
-            ui.label("m1.active_sample_id");
-            ui.monospace(if project.m1.active_sample_id.is_empty() {
-                "(none)"
-            } else {
-                project.m1.active_sample_id.as_str()
-            });
+            for region in &report.regions {
+                ui.label(&region.name);
+                ui.monospace(format!(
+                    "{}–{}  ({} B)",
+                    region.start, region.end, region.bytes,
+                ));
+                ui.end_row();
+            }
+            ui.label("free_bytes");
+            ui.monospace(format!("{} B", report.free_bytes));
             ui.end_row();
         });
+
+    if !report.warnings.is_empty() {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Warnings:").strong());
+        for w in &report.warnings {
+            ui.colored_label(egui::Color32::from_rgb(220, 200, 80), format!("• {w}"));
+        }
+    }
+}
+
+fn color_for_kind(kind: AramKind) -> egui::Color32 {
+    match kind {
+        AramKind::FixedRuntime | AramKind::FixedHardware => egui::Color32::from_gray(80),
+        AramKind::DriverCode => egui::Color32::from_rgb(160, 160, 170),
+        AramKind::SourceDirectory => egui::Color32::from_rgb(150, 100, 200),
+        AramKind::SampleBrrPool => egui::Color32::from_rgb(80, 130, 220),
+        AramKind::EchoBuffer => egui::Color32::from_rgb(230, 140, 60),
+        AramKind::Free => egui::Color32::from_rgb(80, 180, 100),
+        AramKind::PitchTables
+        | AramKind::SequenceData
+        | AramKind::InstrumentMetadata
+        | AramKind::SynthAtomPool => egui::Color32::from_rgb(180, 180, 80),
+    }
 }
 
 #[derive(Default, Clone, Copy)]

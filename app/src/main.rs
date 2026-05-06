@@ -18,6 +18,7 @@ use sfc_atomizer_core::brr_fixtures::{run_fixture, M0_RAW_DECODE_FIXTURES};
 use sfc_atomizer_core::import::{import_audio, ImportError, ImportOptions};
 use sfc_atomizer_core::loop_finder::{find_loop_candidates, LoopFinderOptions};
 use sfc_atomizer_core::manifest::verify_bundle;
+use sfc_atomizer_core::packer::{pack as packer_pack, EncodedSample, PackInput};
 use sfc_atomizer_core::project::{ProjectIoError, ProjectV1, ValidationError};
 use sfc_atomizer_core::report::{
     AramKind, AramMapReport, AssembleReport, AssembleStatus, AuditionReport, BrrEncodeBlock,
@@ -139,6 +140,26 @@ enum Command {
         /// Also write the report JSON to a file.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Pack a project into a 64 KB ARAM image + map report (M1.4).
+    ///
+    /// Loads + validates the project, encodes each sample's BRR via
+    /// the M1.3 encoder, runs `core::packer::pack`, writes the
+    /// resulting image and map JSON.
+    ///
+    /// Exit codes: 0 ok, 1 IO/parse, 2 validation, 3 pack error.
+    Pack {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long, default_value = "build/m1/aram-image.bin")]
+        out_image: PathBuf,
+        #[arg(long, default_value = "build/m1/aram-map.json")]
+        out_map: PathBuf,
+        /// Optional pre-built driver-code blob. Defaults to a 4 KB
+        /// zero-filled placeholder (M1.4 only — M1.5 ships a real
+        /// driver).
+        #[arg(long)]
+        driver: Option<PathBuf>,
     },
     /// Encode a WAV / AIFF / BRR audio file to BRR bytes (M1.3).
     ///
@@ -263,6 +284,12 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::ValidateProject { project, json, out } => {
             cmd_validate_project(&project, json, out.as_deref())
         }
+        Command::Pack {
+            project,
+            out_image,
+            out_map,
+            driver,
+        } => cmd_pack(&project, &out_image, &out_map, driver.as_deref()),
         Command::EncodeBrr {
             audio,
             out_brr,
@@ -1643,6 +1670,147 @@ fn cmd_import(project: &Path, audio: &Path, options: ImportOptions) -> Result<()
             std::process::exit(exit_code);
         }
     }
+}
+
+// =============================================================================
+// pack (M1.4)
+// =============================================================================
+
+fn cmd_pack(
+    project_path: &Path,
+    out_image: &Path,
+    out_map: &Path,
+    driver_path: Option<&Path>,
+) -> Result<(), CliError> {
+    // 1. Load + validate.
+    let project = match ProjectV1::load_from_path(project_path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("pack: load failed for {}: {e}", project_path.display());
+            std::process::exit(1);
+        }
+    };
+    if let Err(verrors) = project.validate() {
+        eprintln!(
+            "pack: project invalid — {} ({} error{})",
+            project_path.display(),
+            verrors.len(),
+            if verrors.len() == 1 { "" } else { "s" },
+        );
+        for e in &verrors {
+            eprintln!("  {} : {}", e.path, e.kind);
+        }
+        std::process::exit(2);
+    }
+
+    // 2. Encode each sample's BRR.
+    let project_dir = project_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut encoded: Vec<EncodedSample> = Vec::with_capacity(project.sample_pool.len());
+    for slot in &project.sample_pool {
+        let raw = Path::new(&slot.source.path);
+        let audio_path: PathBuf = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            project_dir.join(raw)
+        };
+        let pcm = match decode_to_mono_pcm(&audio_path) {
+            Ok(p) => p,
+            Err(e) => {
+                let exit = match &e {
+                    AudioDecodeError::Probe(_) | AudioDecodeError::Io(_) => 1,
+                    AudioDecodeError::Symphonia(_)
+                    | AudioDecodeError::FrameCountMismatch { .. } => 2,
+                };
+                eprintln!("pack: decode failed for sample {}: {e}", slot.id);
+                std::process::exit(exit);
+            }
+        };
+        let opts = EncodeOptions::default();
+        let (bytes, loop_entry_block) = if slot.looped.enabled {
+            match slot.looped.start_sample {
+                Some(start) => {
+                    let r = match encode_looped(&pcm, start, &opts) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            eprintln!("pack: encode failed for sample {}: {e}", slot.id);
+                            std::process::exit(3);
+                        }
+                    };
+                    (r.bytes, Some(start / 16))
+                }
+                None => (brr_encode(&pcm, &opts).bytes, None),
+            }
+        } else {
+            (brr_encode(&pcm, &opts).bytes, None)
+        };
+        encoded.push(EncodedSample {
+            sample_id: slot.id.clone(),
+            bytes,
+            loop_entry_block,
+        });
+    }
+
+    // 3. Driver code: --driver path or empty Vec → packer leaves the
+    //    4 KB region zero-filled.
+    let driver_code = match driver_path {
+        Some(p) => match std::fs::read(p) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("pack: driver read failed for {}: {e}", p.display());
+                std::process::exit(1);
+            }
+        },
+        None => Vec::new(),
+    };
+
+    // 4. Pack.
+    let result = match packer_pack(PackInput {
+        project: project.clone(),
+        encoded_samples: encoded,
+        driver_code,
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("pack: {e}");
+            std::process::exit(3);
+        }
+    };
+
+    // 5. Write image + map.
+    if let Some(parent) = out_image.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir(parent)?;
+        }
+    }
+    std::fs::write(out_image, &result.aram_image[..]).map_err(|source| CliError::Io {
+        path: out_image.to_path_buf(),
+        source,
+    })?;
+    write_json(out_map, &result.map_report)?;
+
+    let image_sha = sfc_atomizer_core::asm::sha256_hex(&result.aram_image[..]);
+    let summ = result.map_report.samples.as_ref();
+    let total_brr = summ.map(|s| s.total_brr_bytes).unwrap_or(0);
+    let echo_summ = result.map_report.echo.as_ref();
+    let echo_label = match echo_summ {
+        Some(e) if e.enabled => format!("EDL={} ({} B)", e.edl, e.buffer_bytes),
+        _ => "off".to_string(),
+    };
+    let free = result.map_report.free_bytes;
+    let free_pct = (free as f64) * 100.0 / 65536.0;
+    eprintln!(
+        "pack: {} sample{}, {} BRR bytes, echo {}, free={} B ({:.1}%); image -> {} (sha256={}); map -> {}",
+        project.sample_pool.len(),
+        if project.sample_pool.len() == 1 { "" } else { "s" },
+        total_brr,
+        echo_label,
+        free,
+        free_pct,
+        out_image.display(),
+        image_sha,
+        out_map.display(),
+    );
+    Ok(())
 }
 
 // =============================================================================
