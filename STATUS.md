@@ -1076,6 +1076,28 @@ these SHAs is a producer-side regression and must be flagged.
   bytes alongside max_abs/rms; the bundle pulls it from one place
   rather than parsing the wrapper's report.
 
+### M2.0 postlude — audition artifacts generated
+
+`build/audition/` carries three Mesen2-ready artefacts for
+user audible verification on return:
+
+- `canonical_sine.spc` — 500 Hz sustained sine (.spc baseline,
+  unchanged from M1.5).
+- `canonical_sine.sfc` — single-project clone, exercises the
+  `.sfc` IPL upload + RESET_TO_IPL + re-upload flow with
+  audibly-identical modules. **Pre-M2.0 this would
+  green-screen on driver-ready timeout; the M2.0 hotfixes
+  unblocked it.**
+- `swap_220_to_440.sfc` — two distinct projects
+  (~219 Hz / ~438 Hz, exact 2:1 octave). Audible pitch jump
+  at the swap point proves module B was actually uploaded.
+
+Oracle cross-check on `swap_220_to_440.sfc`:
+`modules_audio_identical=false`, A/B both pass the audible
+threshold, `status=ok`. The two projects produce
+distinguishable rendered PCM (different SHAs) which is the
+positive signal we want for the swap exerciser.
+
 ### Host-specific tool resolution
 
 - **Mesen2 on this host** (set during M2.0 follow-up): User-scope
