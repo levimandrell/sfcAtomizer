@@ -35,11 +35,11 @@ use sfc_atomizer_core::report::{
     BrrFixtureReport, BundleStatus, BundleSteps, BundleSummary, CalibrationReport,
     CalibrationStatus, CompileSfcReport, CompileSpcReport, DoctorReport, DoctorStatus, DoctorTools,
     FixtureSetInfo, LoopCandidateJson, LoopFinderReport, M0Manifest, M1BundleSteps,
-    M1BundleSummary, M1Manifest, ObservedAudio, ObservedInfo, OracleInfo, ProvisionalTolerances,
-    RenderInfo, RustInfo, SequenceCompileReport, SfcFinding, SfcHeaderSummary, SfcModuleSummary,
-    SfcModulesAudibleReport, SfcStructureReport, SfcStructureStatus, SpcExportReport,
-    SpcInitialState, SpcStatus, StepStatus, ToolStatus, ValidationErrorJson, ValidationReport,
-    ValidationStatus, SCHEMA_VERSION,
+    M1BundleSummary, M1Manifest, ObservedAudio, ObservedInfo, OracleInfo, OracleStereoReport,
+    PerChannelMetrics, ProvisionalTolerances, RenderInfo, RustInfo, SequenceCompileReport,
+    SfcFinding, SfcHeaderSummary, SfcModuleSummary, SfcModulesAudibleReport, SfcStructureReport,
+    SfcStructureStatus, SpcExportReport, SpcInitialState, SpcStatus, StepStatus, StereoWindow,
+    ToolStatus, ValidationErrorJson, ValidationReport, ValidationStatus, SCHEMA_VERSION,
 };
 use sfc_atomizer_core::sfc_export::{
     export_sfc, SfcExportInput, LOROM_HEADER_BASE, LOROM_HEADER_CHECKSUM_COMPLEMENT_OFFSET,
@@ -473,6 +473,45 @@ enum Command {
         #[arg(long)]
         out_wav: Option<PathBuf>,
     },
+    /// Render a `.spc` through the snes_spc oracle and emit per-
+    /// channel diagnostics (M2.5). Defaults to 160 000 frames at
+    /// 32 kHz (= 5 s; SPEC §21 M2 acceptance frame count).
+    VerifySpcStereo {
+        #[arg(long)]
+        spc: PathBuf,
+        #[arg(long, default_value_t = 160_000u32)]
+        frames: u32,
+        #[arg(long)]
+        out_report: Option<PathBuf>,
+        #[arg(long)]
+        out_pcm: Option<PathBuf>,
+        #[arg(long)]
+        oracle: Option<PathBuf>,
+        /// When set, also compute pre-step (ticks 80..=120) and
+        /// post-step (ticks 130..=249) windows used by the
+        /// source-step zero-crossing observability check.
+        #[arg(long)]
+        with_source_step_windows: bool,
+    },
+    /// Run the M2 per-channel acceptance suite: compile + render
+    /// + verify three .spc files (sample_only, atom_only, combined)
+    /// against SPEC §21 thresholds and emit a unified report.
+    /// Engineer's call: this is the M2.5 audible gate ahead of the
+    /// full m2-acceptance bundle (M2.8).
+    M2ChannelAcceptance {
+        #[arg(long)]
+        sample_only_project: PathBuf,
+        #[arg(long)]
+        atom_only_project: PathBuf,
+        #[arg(long)]
+        combined_project: PathBuf,
+        #[arg(long, default_value = "build/m2/channel-acceptance")]
+        out: PathBuf,
+        #[arg(long, default_value_t = 160_000u32)]
+        frames: u32,
+        #[arg(long)]
+        oracle: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -702,6 +741,36 @@ fn run(cli: Cli) -> Result<(), CliError> {
             sequence_id.as_deref(),
             out_bin.as_deref(),
             out_report.as_deref(),
+        ),
+        Command::VerifySpcStereo {
+            spc,
+            frames,
+            out_report,
+            out_pcm,
+            oracle,
+            with_source_step_windows,
+        } => cmd_verify_spc_stereo(
+            &spc,
+            frames,
+            out_report.as_deref(),
+            out_pcm.as_deref(),
+            oracle.as_deref(),
+            with_source_step_windows,
+        ),
+        Command::M2ChannelAcceptance {
+            sample_only_project,
+            atom_only_project,
+            combined_project,
+            out,
+            frames,
+            oracle,
+        } => cmd_m2_channel_acceptance(
+            &sample_only_project,
+            &atom_only_project,
+            &combined_project,
+            &out,
+            frames,
+            oracle.as_deref(),
         ),
     }
 }
@@ -1391,6 +1460,80 @@ fn pcm_stats_from_bytes(pcm: &[u8]) -> (i32, f64) {
     }
     let rms = (sum_sq / (n as f64)).sqrt();
     (max_abs, rms)
+}
+
+/// Per-channel metrics for the oracle's interleaved-stereo s16le
+/// PCM. `frame_start` is inclusive, `frame_end` is exclusive; pass
+/// 0..frames_total to get whole-render metrics.
+fn per_channel_metrics(
+    pcm: &[u8],
+    sample_rate_hz: u32,
+    frame_start: u32,
+    frame_end: u32,
+) -> (PerChannelMetrics, PerChannelMetrics) {
+    let total_frames = (pcm.len() / 4) as u32;
+    let start = frame_start.min(total_frames);
+    let end = frame_end.min(total_frames);
+    let frames = end.saturating_sub(start);
+    if frames == 0 {
+        let zero = PerChannelMetrics {
+            max_abs: 0,
+            rms: 0.0,
+            zero_crossing_rate: 0.0,
+        };
+        return (zero, zero);
+    }
+    let byte_start = start as usize * 4;
+    let byte_end = end as usize * 4;
+    let slice = &pcm[byte_start..byte_end];
+    let mut l_max: i32 = 0;
+    let mut r_max: i32 = 0;
+    let mut l_sum_sq: f64 = 0.0;
+    let mut r_sum_sq: f64 = 0.0;
+    let mut l_zc: u32 = 0;
+    let mut r_zc: u32 = 0;
+    let mut prev_l: Option<i16> = None;
+    let mut prev_r: Option<i16> = None;
+    for frame in slice.chunks_exact(4) {
+        let l = i16::from_le_bytes([frame[0], frame[1]]);
+        let r = i16::from_le_bytes([frame[2], frame[3]]);
+        let la = (l as i32).unsigned_abs() as i32;
+        let ra = (r as i32).unsigned_abs() as i32;
+        if la > l_max {
+            l_max = la;
+        }
+        if ra > r_max {
+            r_max = ra;
+        }
+        l_sum_sq += (l as f64) * (l as f64);
+        r_sum_sq += (r as f64) * (r as f64);
+        if let Some(pl) = prev_l {
+            // Sign change ⇒ zero-crossing.
+            if (pl >= 0) != (l >= 0) {
+                l_zc += 1;
+            }
+        }
+        if let Some(pr) = prev_r {
+            if (pr >= 0) != (r >= 0) {
+                r_zc += 1;
+            }
+        }
+        prev_l = Some(l);
+        prev_r = Some(r);
+    }
+    let n = frames as f64;
+    let secs = n / (sample_rate_hz as f64);
+    let l = PerChannelMetrics {
+        max_abs: l_max,
+        rms: (l_sum_sq / n).sqrt(),
+        zero_crossing_rate: (l_zc as f64) / secs,
+    };
+    let r = PerChannelMetrics {
+        max_abs: r_max,
+        rms: (r_sum_sq / n).sqrt(),
+        zero_crossing_rate: (r_zc as f64) / secs,
+    };
+    (l, r)
 }
 
 // =============================================================================
@@ -4611,6 +4754,296 @@ fn render_module_audible(
 // compile-spc / verify-spc-audible (M1.5)
 // =============================================================================
 
+/// M2.5 compile-spc path for v2 multi_voice_atom: encodes the
+/// sample, renders all atoms, builds the voice setup table,
+/// compiles the active sequence to SEQ2 bytecode, builds the M2
+/// driver via core::driver_build::build_m2 (filling in the
+/// voice_setup_addr / sequence_addr from the packed map), packs
+/// via core::packer::pack_v2, and wraps as a .spc with the M1
+/// state contract (PC=$0200, GPRs=0, SP=$EF, DSP regs=0; the M2
+/// driver init programs the regs at SPC playback).
+#[allow(clippy::too_many_arguments)]
+fn cmd_compile_spc_v2_multi_voice(
+    project_path: &Path,
+    v2: &sfc_atomizer_core::project_v2::ProjectV2,
+    out_spc: Option<&Path>,
+    out_image: Option<&Path>,
+    out_map: Option<&Path>,
+    out_report: Option<&Path>,
+) -> Result<(), CliError> {
+    if let Err(verrors) = v2.validate() {
+        eprintln!(
+            "compile-spc: v2 project invalid — {} ({} error{})",
+            project_path.display(),
+            verrors.len(),
+            if verrors.len() == 1 { "" } else { "s" }
+        );
+        for e in &verrors {
+            eprintln!("  {} : {}", e.path, e.kind);
+        }
+        std::process::exit(2);
+    }
+
+    let project_dir = project_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    // Encode samples through the M1.3 path.
+    let mut encoded_samples: Vec<sfc_atomizer_core::packer::EncodedSample> =
+        Vec::with_capacity(v2.sample_pool.len());
+    for slot in &v2.sample_pool {
+        let raw = Path::new(&slot.source.path);
+        let audio_path = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            project_dir.join(raw)
+        };
+        let pcm = match decode_to_mono_pcm(&audio_path) {
+            Ok(p) => p,
+            Err(e) => {
+                let exit = match &e {
+                    AudioDecodeError::Probe(_) | AudioDecodeError::Io(_) => 1,
+                    _ => 2,
+                };
+                eprintln!("compile-spc: decode failed for sample {}: {e}", slot.id);
+                std::process::exit(exit);
+            }
+        };
+        let opts = EncodeOptions::default();
+        let (bytes, loop_entry_block) = if slot.looped.enabled {
+            match slot.looped.start_sample {
+                Some(start) => match encode_looped(&pcm, start, &opts) {
+                    Ok(r) => (r.bytes, Some(start / 16)),
+                    Err(e) => {
+                        eprintln!("compile-spc: encode failed for sample {}: {e}", slot.id);
+                        std::process::exit(3);
+                    }
+                },
+                None => (brr_encode(&pcm, &opts).bytes, None),
+            }
+        } else {
+            (brr_encode(&pcm, &opts).bytes, None)
+        };
+        encoded_samples.push(sfc_atomizer_core::packer::EncodedSample {
+            sample_id: slot.id.clone(),
+            bytes,
+            loop_entry_block,
+        });
+    }
+
+    // Render atoms.
+    let mut encoded_atoms: Vec<sfc_atomizer_core::packer::EncodedSample> =
+        Vec::with_capacity(v2.atom_pool.len());
+    for atom in &v2.atom_pool {
+        let out = render_to_brr(atom).expect("AtomRenderError uninhabited at M2");
+        encoded_atoms.push(sfc_atomizer_core::packer::EncodedSample {
+            sample_id: atom.id.clone(),
+            bytes: out.brr_bytes,
+            loop_entry_block: Some(0),
+        });
+    }
+
+    // Voice setup table.
+    let voice_setup_table = match sfc_atomizer_core::voice_setup::build_voice_setup_table(v2) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("compile-spc: voice setup table: {e}");
+            std::process::exit(3);
+        }
+    };
+
+    // Compile the active sequence (or empty if none).
+    let manifest = sfc_atomizer_core::capability_manifest::CapabilityManifest::multi_voice_atom();
+    let sequence_data: Option<Vec<u8>> = match v2
+        .m2
+        .active_sequence_id
+        .as_deref()
+        .and_then(|id| v2.atom_sequences.iter().find(|s| s.id == id))
+    {
+        Some(seq) => {
+            let source_directory =
+                sfc_atomizer_core::sequence_compiler::SourceDirectory::from_project(v2);
+            let out = match sfc_atomizer_core::sequence_compiler::compile_sequence(
+                sfc_atomizer_core::sequence_compiler::SequenceCompileInput {
+                    project: v2,
+                    manifest: &manifest,
+                    source_directory: &source_directory,
+                    sequence: seq,
+                },
+            ) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("compile-spc: sequence compile: {e}");
+                    std::process::exit(3);
+                }
+            };
+            Some(out.bytecode)
+        }
+        None => None,
+    };
+
+    // Shadow pack with empty driver to learn voice_setup_addr / sequence_addr.
+    let shadow = match sfc_atomizer_core::packer::pack_v2(sfc_atomizer_core::packer::PackInputV2 {
+        project: v2.clone(),
+        encoded_samples: encoded_samples.clone(),
+        encoded_atoms: encoded_atoms.clone(),
+        driver_code: Vec::new(),
+        sequence_data: sequence_data.clone(),
+        voice_setup_table: Some(voice_setup_table.clone()),
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("compile-spc: shadow pack: {e}");
+            std::process::exit(3);
+        }
+    };
+    let voice_setup_addr = shadow
+        .map_report
+        .regions
+        .iter()
+        .find(|r| r.name == "voice_setup_table")
+        .map(|r| u32::from_str_radix(r.start.trim_start_matches("0x"), 16).unwrap() as u16)
+        .unwrap_or(0);
+    let sequence_addr = shadow
+        .map_report
+        .regions
+        .iter()
+        .find(|r| r.name == "sequence_data")
+        .map(|r| u32::from_str_radix(r.start.trim_start_matches("0x"), 16).unwrap() as u16)
+        .unwrap_or(0);
+
+    // Build M2 driver.
+    let driver_work = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("compile-spc: driver tempdir: {e}");
+            std::process::exit(1);
+        }
+    };
+    let driver_out = match sfc_atomizer_core::driver_build::build_m2(
+        sfc_atomizer_core::driver_build::DriverBuildInputM2 {
+            project: v2,
+            map_report: &shadow.map_report,
+            voice_setup_addr,
+            sequence_addr,
+            source_override: None,
+            working_dir: driver_work.path().to_path_buf(),
+        },
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("compile-spc: driver build: {e}");
+            std::process::exit(4);
+        }
+    };
+
+    // Real pack with the assembled driver.
+    let result = match sfc_atomizer_core::packer::pack_v2(sfc_atomizer_core::packer::PackInputV2 {
+        project: v2.clone(),
+        encoded_samples,
+        encoded_atoms,
+        driver_code: driver_out.driver_code.clone(),
+        sequence_data,
+        voice_setup_table: Some(voice_setup_table),
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("compile-spc: pack: {e}");
+            std::process::exit(3);
+        }
+    };
+
+    // Wrap as .spc.
+    let aram_vec: Vec<u8> = result.aram_image[..].to_vec();
+    let spc_image = match build_m1_image(aram_vec) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("compile-spc: build_m1_image: {e:?}");
+            std::process::exit(4);
+        }
+    };
+    let spc_bytes = match spc_image.to_bytes() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("compile-spc: spc to_bytes: {e:?}");
+            std::process::exit(4);
+        }
+    };
+
+    // Output paths.
+    let stem = project_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| v2.project.name.clone());
+    let stem = stem
+        .strip_suffix(".sfcproj")
+        .map(str::to_string)
+        .unwrap_or(stem);
+    let out_spc_owned = out_spc
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m2").join(format!("{stem}.spc")));
+    let out_image_owned = out_image
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m2").join(format!("{stem}.aram.bin")));
+    let out_map_owned = out_map
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m2").join(format!("{stem}.aram-map.json")));
+    let out_report_owned = out_report
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m2").join(format!("{stem}.compile-spc.json")));
+
+    if let Some(p) = out_spc_owned.parent() {
+        if !p.as_os_str().is_empty() {
+            create_dir(p)?;
+        }
+    }
+    std::fs::write(&out_spc_owned, &spc_bytes).map_err(|source| CliError::Io {
+        path: out_spc_owned.clone(),
+        source,
+    })?;
+    std::fs::write(&out_image_owned, &result.aram_image[..]).map_err(|source| CliError::Io {
+        path: out_image_owned.clone(),
+        source,
+    })?;
+    write_json(&out_map_owned, &result.map_report)?;
+
+    let aram_sha = sfc_atomizer_core::asm::sha256_hex(&result.aram_image[..]);
+    let spc_sha = sfc_atomizer_core::asm::sha256_hex(&spc_bytes);
+    let report = CompileSpcReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: CompileSpcReport::REPORT_TYPE.to_string(),
+        project_name: v2.project.name.clone(),
+        active_sample_id: v2
+            .m2
+            .active_sequence_id
+            .clone()
+            .unwrap_or_else(|| "<none>".to_string()),
+        aram_image_sha256: aram_sha.clone(),
+        spc_file_sha256: spc_sha.clone(),
+        driver_code_sha256: driver_out.driver_code_sha256.clone(),
+        driver_code_bytes: driver_out.driver_code.len() as u32,
+        map_report_path: out_map_owned.display().to_string(),
+        spc_path: out_spc_owned.display().to_string(),
+        aram_image_path: out_image_owned.display().to_string(),
+    };
+    write_json(&out_report_owned, &report)?;
+
+    eprintln!(
+        "compile-spc: project={:?} (multi_voice_atom), driver={} B (sha={}), atoms={}, image={} B (sha={}), spc={} B (sha={}); -> {}",
+        v2.project.name,
+        driver_out.driver_code.len(),
+        driver_out.driver_code_sha256,
+        v2.atom_pool.len(),
+        result.aram_image.len(),
+        aram_sha,
+        spc_bytes.len(),
+        spc_sha,
+        out_spc_owned.display()
+    );
+    Ok(())
+}
+
 fn cmd_compile_spc(
     project_path: &Path,
     out_spc: Option<&Path>,
@@ -4619,6 +5052,21 @@ fn cmd_compile_spc(
     out_report: Option<&Path>,
     refresh_source_hash: bool,
 ) -> Result<(), CliError> {
+    // M2.5: dispatch v2 multi_voice_atom projects through the
+    // dedicated path. v1 / v2-sample-only continue through the
+    // existing v1-shim pipeline.
+    if let Ok(LoadedProject::V2(v2)) = load_project_versioned(project_path) {
+        if v2.driver.profile == "multi_voice_atom" {
+            return cmd_compile_spc_v2_multi_voice(
+                project_path,
+                &v2,
+                out_spc,
+                out_image,
+                out_map,
+                out_report,
+            );
+        }
+    }
     let v1_input = prepare_v1_input("compile-spc", project_path);
     let outcome = compile_aram_image("compile-spc", &v1_input.path, None, refresh_source_hash)
         .expect("compile_aram_image returns via exit on error");
@@ -4920,6 +5368,386 @@ fn cmd_verify_spc_audible(
 // =============================================================================
 // encode-brr / preview-brr / find-loop-candidates (M1.3)
 // =============================================================================
+
+// =============================================================================
+// M2.5 — verify-spc-stereo + m2-channel-acceptance
+// =============================================================================
+
+/// Render a `.spc` through the oracle and emit per-channel
+/// diagnostics. Same oracle invocation as `verify-spc-audible`;
+/// difference is the report shape (left + right + optional pre/
+/// post windows for source-step observability).
+#[allow(clippy::too_many_arguments)]
+fn cmd_verify_spc_stereo(
+    spc_path: &Path,
+    frames: u32,
+    out_report: Option<&Path>,
+    out_pcm: Option<&Path>,
+    oracle: Option<&Path>,
+    with_source_step_windows: bool,
+) -> Result<(), CliError> {
+    let stem = spc_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "spc".to_string());
+    let out_report_owned = out_report
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m2").join(format!("{stem}.stereo-report.json")));
+    let out_pcm_owned = out_pcm
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m2").join(format!("{stem}.stereo.pcm_s16le")));
+
+    let mut report = OracleStereoReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: OracleStereoReport::REPORT_TYPE.to_string(),
+        spc_path: spc_path.display().to_string(),
+        spc_sha256: sfc_atomizer_core::asm::sha256_hex_file(spc_path).unwrap_or_default(),
+        frames_rendered: 0,
+        sample_rate_hz: 32_000,
+        left: PerChannelMetrics {
+            max_abs: 0,
+            rms: 0.0,
+            zero_crossing_rate: 0.0,
+        },
+        right: PerChannelMetrics {
+            max_abs: 0,
+            rms: 0.0,
+            zero_crossing_rate: 0.0,
+        },
+        source_step_pre_window: None,
+        source_step_post_window: None,
+        error: None,
+    };
+
+    let workspace_root = std::env::current_dir().map_err(CliError::Cwd)?;
+    let oracle_path = match resolve_oracle(oracle, &workspace_root) {
+        Some(p) => p,
+        None => {
+            report.error = Some("oracle wrapper not resolved".to_string());
+            write_json(&out_report_owned, &report)?;
+            eprintln!(
+                "verify-spc-stereo: oracle wrapper not resolved; report -> {}",
+                out_report_owned.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    if !spc_path.is_file() {
+        report.error = Some(format!("input SPC missing: {}", spc_path.display()));
+        write_json(&out_report_owned, &report)?;
+        std::process::exit(1);
+    }
+    if let Some(p) = out_pcm_owned.parent() {
+        if !p.as_os_str().is_empty() {
+            create_dir(p)?;
+        }
+    }
+
+    let mut wrapper_report = out_report_owned.clone();
+    let wrapper_name = match wrapper_report.file_name() {
+        Some(n) => format!("{}.oracle-side.json", n.to_string_lossy()),
+        None => "oracle-side.json".to_string(),
+    };
+    wrapper_report.set_file_name(wrapper_name);
+
+    let output = std::process::Command::new(&oracle_path)
+        .arg("render")
+        .arg("--input-spc")
+        .arg(spc_path)
+        .arg("--frames")
+        .arg(frames.to_string())
+        .arg("--output-pcm")
+        .arg(&out_pcm_owned)
+        .arg("--report")
+        .arg(&wrapper_report)
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            report.error = Some(format!("spawn oracle: {e}"));
+            write_json(&out_report_owned, &report)?;
+            std::process::exit(1);
+        }
+    };
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        report.error = Some(format!("oracle exited {code}: {}", first_line(&stderr)));
+        write_json(&out_report_owned, &report)?;
+        std::process::exit(1);
+    }
+    let pcm_bytes = match std::fs::read(&out_pcm_owned) {
+        Ok(b) => b,
+        Err(e) => {
+            report.error = Some(format!("read oracle PCM: {e}"));
+            write_json(&out_report_owned, &report)?;
+            std::process::exit(1);
+        }
+    };
+    let expected = (frames as usize) * 4; // stereo s16le = 4 B/frame
+    if pcm_bytes.len() != expected {
+        report.error = Some(format!(
+            "oracle PCM wrong size: expected {expected}, got {}",
+            pcm_bytes.len()
+        ));
+        write_json(&out_report_owned, &report)?;
+        std::process::exit(1);
+    }
+
+    let (l, r) = per_channel_metrics(&pcm_bytes, 32_000, 0, frames);
+    report.frames_rendered = frames;
+    report.left = l;
+    report.right = r;
+
+    if with_source_step_windows {
+        // SPEC §21 windows: pre=ticks 80..=120, post=ticks 130..=249.
+        // Convert ticks to frames at 60.150 Hz nominal:
+        //   frames_per_tick = 32000 / 60.150 ≈ 532.0
+        let fpt = 32_000.0 / 60.150;
+        let pre_start = (80.0 * fpt) as u32;
+        let pre_end = (120.0 * fpt) as u32;
+        let post_start = (130.0 * fpt) as u32;
+        let post_end = (249.0 * fpt) as u32;
+        let (pre_l, pre_r) = per_channel_metrics(&pcm_bytes, 32_000, pre_start, pre_end);
+        let (post_l, post_r) = per_channel_metrics(&pcm_bytes, 32_000, post_start, post_end);
+        report.source_step_pre_window = Some(StereoWindow {
+            frame_start: pre_start,
+            frame_end: pre_end,
+            left: pre_l,
+            right: pre_r,
+        });
+        report.source_step_post_window = Some(StereoWindow {
+            frame_start: post_start,
+            frame_end: post_end,
+            left: post_l,
+            right: post_r,
+        });
+    }
+
+    write_json(&out_report_owned, &report)?;
+    eprintln!(
+        "verify-spc-stereo: {} frames; L max_abs={} rms={:.1} zcr={:.1}; R max_abs={} rms={:.1} zcr={:.1}; -> {}",
+        frames,
+        report.left.max_abs,
+        report.left.rms,
+        report.left.zero_crossing_rate,
+        report.right.max_abs,
+        report.right.rms,
+        report.right.zero_crossing_rate,
+        out_report_owned.display()
+    );
+    Ok(())
+}
+
+/// M2 channel acceptance suite: compile + verify-spc-stereo on
+/// three projects (sample_only, atom_only, combined) and check
+/// SPEC §21 thresholds. Emits a unified report.
+fn cmd_m2_channel_acceptance(
+    sample_only_project: &Path,
+    atom_only_project: &Path,
+    combined_project: &Path,
+    out_dir: &Path,
+    frames: u32,
+    oracle: Option<&Path>,
+) -> Result<(), CliError> {
+    create_dir(out_dir)?;
+    let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sfcwc"));
+
+    let step = |label: &str,
+                project: &Path,
+                with_windows: bool|
+     -> Result<(PathBuf, OracleStereoReport), CliError> {
+        let stem = label;
+        let spc = out_dir.join(format!("{stem}.spc"));
+        let aram = out_dir.join(format!("{stem}.aram.bin"));
+        let map = out_dir.join(format!("{stem}.map.json"));
+        let compile_report = out_dir.join(format!("{stem}.compile.json"));
+        let stereo_report = out_dir.join(format!("{stem}.stereo.json"));
+        let pcm = out_dir.join(format!("{stem}.pcm_s16le"));
+
+        let r = std::process::Command::new(&bin)
+            .args(["compile-spc", "--project"])
+            .arg(project)
+            .args(["--out-spc"])
+            .arg(&spc)
+            .args(["--out-image"])
+            .arg(&aram)
+            .args(["--out-map"])
+            .arg(&map)
+            .args(["--out-report"])
+            .arg(&compile_report)
+            .output()
+            .expect("spawn sfcwc compile-spc");
+        if !r.status.success() {
+            eprintln!(
+                "m2-channel-acceptance: compile-spc {label} exited {:?}: {}",
+                r.status.code(),
+                String::from_utf8_lossy(&r.stderr)
+            );
+            std::process::exit(2);
+        }
+
+        let mut stereo_args = vec![
+            "verify-spc-stereo".to_string(),
+            "--spc".to_string(),
+            spc.display().to_string(),
+            "--frames".to_string(),
+            frames.to_string(),
+            "--out-report".to_string(),
+            stereo_report.display().to_string(),
+            "--out-pcm".to_string(),
+            pcm.display().to_string(),
+        ];
+        if let Some(o) = oracle {
+            stereo_args.push("--oracle".to_string());
+            stereo_args.push(o.display().to_string());
+        }
+        if with_windows {
+            stereo_args.push("--with-source-step-windows".to_string());
+        }
+        let r = std::process::Command::new(&bin)
+            .args(&stereo_args)
+            .output()
+            .expect("spawn sfcwc verify-spc-stereo");
+        if !r.status.success() {
+            eprintln!(
+                "m2-channel-acceptance: verify-spc-stereo {label} exited {:?}: {}",
+                r.status.code(),
+                String::from_utf8_lossy(&r.stderr)
+            );
+            std::process::exit(1);
+        }
+        let report: OracleStereoReport =
+            serde_json::from_slice(&std::fs::read(&stereo_report).expect("read stereo report"))
+                .expect("parse stereo report");
+        Ok((spc, report))
+    };
+
+    let (sample_spc, sample_only) = step("sample_only", sample_only_project, false)?;
+    let (atom_spc, atom_only) = step("atom_only", atom_only_project, false)?;
+    let (combined_spc, combined) = step("combined", combined_project, true)?;
+
+    // SPEC §21 thresholds.
+    let mut findings: Vec<String> = Vec::new();
+    if sample_only.left.max_abs < 1000 || sample_only.left.rms < 200.0 {
+        findings.push(format!(
+            "sample_only.left audible failed: max_abs={}, rms={:.1}",
+            sample_only.left.max_abs, sample_only.left.rms
+        ));
+    }
+    if sample_only.right.max_abs > 50 {
+        findings.push(format!(
+            "sample_only.right not silent: max_abs={} (limit 50)",
+            sample_only.right.max_abs
+        ));
+    }
+    if atom_only.right.max_abs < 1000 || atom_only.right.rms < 200.0 {
+        findings.push(format!(
+            "atom_only.right audible failed: max_abs={}, rms={:.1}",
+            atom_only.right.max_abs, atom_only.right.rms
+        ));
+    }
+    if atom_only.left.max_abs > 50 {
+        findings.push(format!(
+            "atom_only.left not silent: max_abs={} (limit 50)",
+            atom_only.left.max_abs
+        ));
+    }
+    if combined.left.max_abs < 1000 || combined.left.rms < 200.0 {
+        findings.push(format!(
+            "combined.left audible failed: max_abs={}, rms={:.1}",
+            combined.left.max_abs, combined.left.rms
+        ));
+    }
+    if combined.right.max_abs < 1000 || combined.right.rms < 200.0 {
+        findings.push(format!(
+            "combined.right audible failed: max_abs={}, rms={:.1}",
+            combined.right.max_abs, combined.right.rms
+        ));
+    }
+    let l_dev = (combined.left.rms - sample_only.left.rms).abs() / sample_only.left.rms.max(1.0);
+    let r_dev = (combined.right.rms - atom_only.right.rms).abs() / atom_only.right.rms.max(1.0);
+    if l_dev > 0.10 {
+        findings.push(format!(
+            "combined.left.rms {:.1} deviates {:.1}% from sample_only.left.rms {:.1}",
+            combined.left.rms,
+            l_dev * 100.0,
+            sample_only.left.rms
+        ));
+    }
+    if r_dev > 0.10 {
+        findings.push(format!(
+            "combined.right.rms {:.1} deviates {:.1}% from atom_only.right.rms {:.1}",
+            combined.right.rms,
+            r_dev * 100.0,
+            atom_only.right.rms
+        ));
+    }
+    let (pre, post) = (
+        combined.source_step_pre_window.as_ref(),
+        combined.source_step_post_window.as_ref(),
+    );
+    let mut step_ratio = 0.0;
+    if let (Some(pre), Some(post)) = (pre, post) {
+        step_ratio = post.right.zero_crossing_rate / pre.right.zero_crossing_rate.max(1e-6);
+        if step_ratio < 1.5 {
+            findings.push(format!(
+                "source-step zero-crossing ratio {step_ratio:.2} < 1.5 (pre.zcr={:.1}, post.zcr={:.1})",
+                pre.right.zero_crossing_rate, post.right.zero_crossing_rate
+            ));
+        }
+    } else {
+        findings.push("combined.spc missing pre/post windows".to_string());
+    }
+
+    // Unified report.
+    #[derive(serde::Serialize)]
+    struct M2ChannelAcceptanceReport<'a> {
+        schema_version: u32,
+        report_type: &'a str,
+        sample_only_spc: String,
+        atom_only_spc: String,
+        combined_spc: String,
+        sample_only: &'a OracleStereoReport,
+        atom_only: &'a OracleStereoReport,
+        combined: &'a OracleStereoReport,
+        findings: &'a [String],
+        gate: &'a str,
+        source_step_zcr_ratio: f64,
+    }
+    let gate = if findings.is_empty() { "ok" } else { "error" };
+    let unified = M2ChannelAcceptanceReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: "m2_channel_acceptance",
+        sample_only_spc: sample_spc.display().to_string(),
+        atom_only_spc: atom_spc.display().to_string(),
+        combined_spc: combined_spc.display().to_string(),
+        sample_only: &sample_only,
+        atom_only: &atom_only,
+        combined: &combined,
+        findings: &findings,
+        gate,
+        source_step_zcr_ratio: step_ratio,
+    };
+    let unified_path = out_dir.join("m2-channel-acceptance.json");
+    write_json(&unified_path, &unified)?;
+
+    eprintln!(
+        "m2-channel-acceptance: gate={gate}; sample_only.left.rms={:.1}, atom_only.right.rms={:.1}, combined.left.rms={:.1}, combined.right.rms={:.1}, source_step_zcr_ratio={step_ratio:.2}; -> {}",
+        sample_only.left.rms,
+        atom_only.right.rms,
+        combined.left.rms,
+        combined.right.rms,
+        unified_path.display()
+    );
+    if !findings.is_empty() {
+        for f in &findings {
+            eprintln!("  finding: {f}");
+        }
+        std::process::exit(2);
+    }
+    Ok(())
+}
 
 fn cmd_encode_brr(
     audio: &Path,

@@ -916,6 +916,55 @@ impl AudibleVerificationReport {
     pub const REPORT_TYPE: &'static str = "audible_verification";
 }
 
+// =============================================================================
+// M2.5 — per-channel oracle stereo report
+// =============================================================================
+
+/// Per-channel diagnostics extracted from the oracle's interleaved-
+/// stereo s16le PCM. Used by `verify-spc-stereo` (M2.5) and the
+/// `m2-channel-acceptance` suite.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct PerChannelMetrics {
+    pub max_abs: i32,
+    pub rms: f64,
+    /// Zero-crossings per second.
+    pub zero_crossing_rate: f64,
+}
+
+/// Optional pre/post window block (only populated for the combined
+/// SPC where source-step observability is the load-bearing check).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct StereoWindow {
+    pub frame_start: u32,
+    pub frame_end: u32,
+    pub left: PerChannelMetrics,
+    pub right: PerChannelMetrics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OracleStereoReport {
+    pub schema_version: u32,
+    pub report_type: String,
+    pub spc_path: String,
+    pub spc_sha256: String,
+    pub frames_rendered: u32,
+    pub sample_rate_hz: u32,
+    pub left: PerChannelMetrics,
+    pub right: PerChannelMetrics,
+    /// Optional source-step pre/post windows (set when the caller
+    /// asked for the combined-SPC analysis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_step_pre_window: Option<StereoWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_step_post_window: Option<StereoWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl OracleStereoReport {
+    pub const REPORT_TYPE: &'static str = "oracle_stereo";
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct ObservedAudio {
     pub max_abs: u32,
