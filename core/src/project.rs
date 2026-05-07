@@ -173,239 +173,251 @@ impl ProjectV1 {
     }
 
     fn validate_sample(&self, prefix: &str, s: &SampleSlot, errors: &mut Vec<ValidationError>) {
-        // Rule 10: id pattern + length.
-        if !is_valid_id(&s.id) {
-            errors.push(ValidationError {
-                path: format!("{prefix}/id"),
-                kind: ValidationErrorKind::SampleIdPatternMismatch(s.id.clone()),
-            });
-        }
-        if !(1..=64).contains(&s.id.chars().count()) {
-            errors.push(ValidationError {
-                path: format!("{prefix}/id"),
-                kind: ValidationErrorKind::StringLength {
-                    len: s.id.chars().count(),
-                    min: 1,
-                    max: 64,
-                },
-            });
-        }
+        validate_sample_slot(prefix, s, errors);
+    }
+}
 
-        // Rule 11: name.
-        validate_string_field(errors, &format!("{prefix}/name"), &s.name, false);
+/// Free-function entry point for sample-slot validation, shared between v1
+/// (rules 10–24) and v2 (carry-forward of the same rules under §16.9). The
+/// `prefix` is the JSON-pointer path to the slot itself
+/// (`/sample_pool/<i>` for v1, same shape for v2).
+pub(crate) fn validate_sample_slot(
+    prefix: &str,
+    s: &SampleSlot,
+    errors: &mut Vec<ValidationError>,
+) {
+    // Rule 10: id pattern + length.
+    if !is_valid_id(&s.id) {
+        errors.push(ValidationError {
+            path: format!("{prefix}/id"),
+            kind: ValidationErrorKind::SampleIdPatternMismatch(s.id.clone()),
+        });
+    }
+    if !(1..=64).contains(&s.id.chars().count()) {
+        errors.push(ValidationError {
+            path: format!("{prefix}/id"),
+            kind: ValidationErrorKind::StringLength {
+                len: s.id.chars().count(),
+                min: 1,
+                max: 64,
+            },
+        });
+    }
 
-        // Rules 12–16: source.
-        let src_prefix = format!("{prefix}/source");
-        // 12: format is enum; serde already enforces.
-        // 13: sample_rate_hz 8000..=96000.
-        if !(8000..=96000).contains(&s.source.sample_rate_hz) {
-            errors.push(ValidationError {
-                path: format!("{src_prefix}/sample_rate_hz"),
-                kind: ValidationErrorKind::IntegerOutOfRange {
-                    value: s.source.sample_rate_hz as i64,
-                    min: 8000,
-                    max: 96000,
-                },
-            });
-        }
-        // 14: channels 1..=2.
-        if !(1..=2).contains(&s.source.channels) {
-            errors.push(ValidationError {
-                path: format!("{src_prefix}/channels"),
-                kind: ValidationErrorKind::IntegerOutOfRange {
-                    value: s.source.channels as i64,
-                    min: 1,
-                    max: 2,
-                },
-            });
-        }
-        // 15: frames >= 1.
-        if s.source.frames < 1 {
-            errors.push(ValidationError {
-                path: format!("{src_prefix}/frames"),
-                kind: ValidationErrorKind::IntegerOutOfRange {
-                    value: s.source.frames as i64,
-                    min: 1,
-                    max: i64::MAX,
-                },
-            });
-        }
-        // 16: sha256 lowercase hex 64 chars.
-        if !is_sha256_hex(&s.source.sha256) {
-            errors.push(ValidationError {
-                path: format!("{src_prefix}/sha256"),
-                kind: ValidationErrorKind::Sha256Invalid(s.source.sha256.clone()),
-            });
-        }
+    // Rule 11: name.
+    validate_string_field(errors, &format!("{prefix}/name"), &s.name, false);
 
-        // Rule 17: root_midi_note 0..=127. u8 allows 0..=255.
-        if s.root_midi_note > 127 {
-            errors.push(ValidationError {
-                path: format!("{prefix}/root_midi_note"),
-                kind: ValidationErrorKind::IntegerOutOfRange {
-                    value: s.root_midi_note as i64,
-                    min: 0,
-                    max: 127,
-                },
-            });
-        }
+    // Rules 12–16: source.
+    let src_prefix = format!("{prefix}/source");
+    // 12: format is enum; serde already enforces.
+    // 13: sample_rate_hz 8000..=96000.
+    if !(8000..=96000).contains(&s.source.sample_rate_hz) {
+        errors.push(ValidationError {
+            path: format!("{src_prefix}/sample_rate_hz"),
+            kind: ValidationErrorKind::IntegerOutOfRange {
+                value: s.source.sample_rate_hz as i64,
+                min: 8000,
+                max: 96000,
+            },
+        });
+    }
+    // 14: channels 1..=2.
+    if !(1..=2).contains(&s.source.channels) {
+        errors.push(ValidationError {
+            path: format!("{src_prefix}/channels"),
+            kind: ValidationErrorKind::IntegerOutOfRange {
+                value: s.source.channels as i64,
+                min: 1,
+                max: 2,
+            },
+        });
+    }
+    // 15: frames >= 1.
+    if s.source.frames < 1 {
+        errors.push(ValidationError {
+            path: format!("{src_prefix}/frames"),
+            kind: ValidationErrorKind::IntegerOutOfRange {
+                value: s.source.frames as i64,
+                min: 1,
+                max: i64::MAX,
+            },
+        });
+    }
+    // 16: sha256 lowercase hex 64 chars.
+    if !is_sha256_hex(&s.source.sha256) {
+        errors.push(ValidationError {
+            path: format!("{src_prefix}/sha256"),
+            kind: ValidationErrorKind::Sha256Invalid(s.source.sha256.clone()),
+        });
+    }
 
-        // Rule 18 + 19: loop bounds + snap.
-        let lp_prefix = format!("{prefix}/loop");
-        if s.looped.enabled {
-            match (s.looped.start_sample, s.looped.end_sample) {
-                (None, _) => errors.push(ValidationError {
-                    path: format!("{lp_prefix}/start_sample"),
-                    kind: ValidationErrorKind::LoopMissing {
-                        field: "start_sample",
+    // Rule 17: root_midi_note 0..=127. u8 allows 0..=255.
+    if s.root_midi_note > 127 {
+        errors.push(ValidationError {
+            path: format!("{prefix}/root_midi_note"),
+            kind: ValidationErrorKind::IntegerOutOfRange {
+                value: s.root_midi_note as i64,
+                min: 0,
+                max: 127,
+            },
+        });
+    }
+
+    // Rule 18 + 19: loop bounds + snap.
+    let lp_prefix = format!("{prefix}/loop");
+    if s.looped.enabled {
+        match (s.looped.start_sample, s.looped.end_sample) {
+            (None, _) => errors.push(ValidationError {
+                path: format!("{lp_prefix}/start_sample"),
+                kind: ValidationErrorKind::LoopMissing {
+                    field: "start_sample",
+                },
+            }),
+            (Some(_), None) => errors.push(ValidationError {
+                path: format!("{lp_prefix}/end_sample"),
+                kind: ValidationErrorKind::LoopMissing {
+                    field: "end_sample",
+                },
+            }),
+            (Some(start), Some(end)) => {
+                if start % 16 != 0 {
+                    errors.push(ValidationError {
+                        path: format!("{lp_prefix}/start_sample"),
+                        kind: ValidationErrorKind::LoopBoundNotMultipleOf16(start),
+                    });
+                }
+                if end % 16 != 0 {
+                    errors.push(ValidationError {
+                        path: format!("{lp_prefix}/end_sample"),
+                        kind: ValidationErrorKind::LoopBoundNotMultipleOf16(end),
+                    });
+                }
+                if end <= start {
+                    errors.push(ValidationError {
+                        path: format!("{lp_prefix}/end_sample"),
+                        kind: ValidationErrorKind::LoopEndNotGreaterThanStart { start, end },
+                    });
+                } else if end - start < 16 {
+                    errors.push(ValidationError {
+                        path: format!("{lp_prefix}/end_sample"),
+                        kind: ValidationErrorKind::LoopRangeTooShort { start, end },
+                    });
+                }
+                if (end as u64) > s.source.frames {
+                    errors.push(ValidationError {
+                        path: format!("{lp_prefix}/end_sample"),
+                        kind: ValidationErrorKind::LoopEndExceedsFrames {
+                            end,
+                            frames: s.source.frames,
+                        },
+                    });
+                }
+            }
+        }
+        match s.looped.snap.as_deref() {
+            Some("brr_block_16") => {}
+            Some(other) => errors.push(ValidationError {
+                path: format!("{lp_prefix}/snap"),
+                kind: ValidationErrorKind::LoopSnapUnsupported(other.to_string()),
+            }),
+            None => errors.push(ValidationError {
+                path: format!("{lp_prefix}/snap"),
+                kind: ValidationErrorKind::LoopMissing { field: "snap" },
+            }),
+        }
+    }
+
+    // Rules 20 & 21: playback.volume + pan.
+    let pb_prefix = format!("{prefix}/playback");
+    if s.playback.volume.is_nan() {
+        errors.push(ValidationError {
+            path: format!("{pb_prefix}/volume"),
+            kind: ValidationErrorKind::NaN,
+        });
+    } else if !(0.0..=1.0).contains(&s.playback.volume) {
+        errors.push(ValidationError {
+            path: format!("{pb_prefix}/volume"),
+            kind: ValidationErrorKind::FloatOutOfRange {
+                value: s.playback.volume,
+                min: 0.0,
+                max: 1.0,
+            },
+        });
+    }
+    if s.playback.pan.is_nan() {
+        errors.push(ValidationError {
+            path: format!("{pb_prefix}/pan"),
+            kind: ValidationErrorKind::NaN,
+        });
+    } else if !(-1.0..=1.0).contains(&s.playback.pan) {
+        errors.push(ValidationError {
+            path: format!("{pb_prefix}/pan"),
+            kind: ValidationErrorKind::FloatOutOfRange {
+                value: s.playback.pan,
+                min: -1.0,
+                max: 1.0,
+            },
+        });
+    }
+
+    // Rules 23 & 24: envelope ranges.
+    match &s.playback.envelope {
+        Envelope::Adsr {
+            attack,
+            decay,
+            sustain_level,
+            sustain_rate,
+        } => {
+            if *attack > 15 {
+                errors.push(ValidationError {
+                    path: format!("{pb_prefix}/envelope/attack"),
+                    kind: ValidationErrorKind::IntegerOutOfRange {
+                        value: *attack as i64,
+                        min: 0,
+                        max: 15,
                     },
-                }),
-                (Some(_), None) => errors.push(ValidationError {
-                    path: format!("{lp_prefix}/end_sample"),
-                    kind: ValidationErrorKind::LoopMissing {
-                        field: "end_sample",
+                });
+            }
+            if *decay > 7 {
+                errors.push(ValidationError {
+                    path: format!("{pb_prefix}/envelope/decay"),
+                    kind: ValidationErrorKind::IntegerOutOfRange {
+                        value: *decay as i64,
+                        min: 0,
+                        max: 7,
                     },
-                }),
-                (Some(start), Some(end)) => {
-                    if start % 16 != 0 {
-                        errors.push(ValidationError {
-                            path: format!("{lp_prefix}/start_sample"),
-                            kind: ValidationErrorKind::LoopBoundNotMultipleOf16(start),
-                        });
-                    }
-                    if end % 16 != 0 {
-                        errors.push(ValidationError {
-                            path: format!("{lp_prefix}/end_sample"),
-                            kind: ValidationErrorKind::LoopBoundNotMultipleOf16(end),
-                        });
-                    }
-                    if end <= start {
-                        errors.push(ValidationError {
-                            path: format!("{lp_prefix}/end_sample"),
-                            kind: ValidationErrorKind::LoopEndNotGreaterThanStart { start, end },
-                        });
-                    } else if end - start < 16 {
-                        errors.push(ValidationError {
-                            path: format!("{lp_prefix}/end_sample"),
-                            kind: ValidationErrorKind::LoopRangeTooShort { start, end },
-                        });
-                    }
-                    if (end as u64) > s.source.frames {
-                        errors.push(ValidationError {
-                            path: format!("{lp_prefix}/end_sample"),
-                            kind: ValidationErrorKind::LoopEndExceedsFrames {
-                                end,
-                                frames: s.source.frames,
-                            },
-                        });
-                    }
-                }
+                });
             }
-            match s.looped.snap.as_deref() {
-                Some("brr_block_16") => {}
-                Some(other) => errors.push(ValidationError {
-                    path: format!("{lp_prefix}/snap"),
-                    kind: ValidationErrorKind::LoopSnapUnsupported(other.to_string()),
-                }),
-                None => errors.push(ValidationError {
-                    path: format!("{lp_prefix}/snap"),
-                    kind: ValidationErrorKind::LoopMissing { field: "snap" },
-                }),
+            if *sustain_level > 7 {
+                errors.push(ValidationError {
+                    path: format!("{pb_prefix}/envelope/sustain_level"),
+                    kind: ValidationErrorKind::IntegerOutOfRange {
+                        value: *sustain_level as i64,
+                        min: 0,
+                        max: 7,
+                    },
+                });
+            }
+            if *sustain_rate > 31 {
+                errors.push(ValidationError {
+                    path: format!("{pb_prefix}/envelope/sustain_rate"),
+                    kind: ValidationErrorKind::IntegerOutOfRange {
+                        value: *sustain_rate as i64,
+                        min: 0,
+                        max: 31,
+                    },
+                });
             }
         }
-
-        // Rules 20 & 21: playback.volume + pan.
-        let pb_prefix = format!("{prefix}/playback");
-        if s.playback.volume.is_nan() {
-            errors.push(ValidationError {
-                path: format!("{pb_prefix}/volume"),
-                kind: ValidationErrorKind::NaN,
-            });
-        } else if !(0.0..=1.0).contains(&s.playback.volume) {
-            errors.push(ValidationError {
-                path: format!("{pb_prefix}/volume"),
-                kind: ValidationErrorKind::FloatOutOfRange {
-                    value: s.playback.volume,
-                    min: 0.0,
-                    max: 1.0,
-                },
-            });
-        }
-        if s.playback.pan.is_nan() {
-            errors.push(ValidationError {
-                path: format!("{pb_prefix}/pan"),
-                kind: ValidationErrorKind::NaN,
-            });
-        } else if !(-1.0..=1.0).contains(&s.playback.pan) {
-            errors.push(ValidationError {
-                path: format!("{pb_prefix}/pan"),
-                kind: ValidationErrorKind::FloatOutOfRange {
-                    value: s.playback.pan,
-                    min: -1.0,
-                    max: 1.0,
-                },
-            });
-        }
-
-        // Rules 23 & 24: envelope ranges.
-        match &s.playback.envelope {
-            Envelope::Adsr {
-                attack,
-                decay,
-                sustain_level,
-                sustain_rate,
-            } => {
-                if *attack > 15 {
-                    errors.push(ValidationError {
-                        path: format!("{pb_prefix}/envelope/attack"),
-                        kind: ValidationErrorKind::IntegerOutOfRange {
-                            value: *attack as i64,
-                            min: 0,
-                            max: 15,
-                        },
-                    });
-                }
-                if *decay > 7 {
-                    errors.push(ValidationError {
-                        path: format!("{pb_prefix}/envelope/decay"),
-                        kind: ValidationErrorKind::IntegerOutOfRange {
-                            value: *decay as i64,
-                            min: 0,
-                            max: 7,
-                        },
-                    });
-                }
-                if *sustain_level > 7 {
-                    errors.push(ValidationError {
-                        path: format!("{pb_prefix}/envelope/sustain_level"),
-                        kind: ValidationErrorKind::IntegerOutOfRange {
-                            value: *sustain_level as i64,
-                            min: 0,
-                            max: 7,
-                        },
-                    });
-                }
-                if *sustain_rate > 31 {
-                    errors.push(ValidationError {
-                        path: format!("{pb_prefix}/envelope/sustain_rate"),
-                        kind: ValidationErrorKind::IntegerOutOfRange {
-                            value: *sustain_rate as i64,
-                            min: 0,
-                            max: 31,
-                        },
-                    });
-                }
-            }
-            Envelope::GainRaw { .. } => {
-                // Rule 24: gain_byte 0..=255 — already enforced by u8.
-            }
+        Envelope::GainRaw { .. } => {
+            // Rule 24: gain_byte 0..=255 — already enforced by u8.
         }
     }
 }
 
 /// Apply rules 3 / 11: length 1..=64, no control chars; optionally
 /// reject `/`, `\`, `:` (path separators).
-fn validate_string_field(
+pub(crate) fn validate_string_field(
     errors: &mut Vec<ValidationError>,
     path: &str,
     s: &str,
@@ -438,14 +450,14 @@ fn validate_string_field(
 
 /// Sample id pattern: `^[a-z0-9_]+$`. Empty is invalid (covered by
 /// length check too, but doubled here defensively).
-fn is_valid_id(s: &str) -> bool {
+pub(crate) fn is_valid_id(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 /// 64 lowercase hex chars.
-fn is_sha256_hex(s: &str) -> bool {
+pub(crate) fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -815,6 +827,75 @@ pub enum ValidationErrorKind {
     SampleEchoWithoutMaster,
     #[error("m1.active_sample_id {0:?} not found in sample_pool")]
     ActiveSampleNotFound(String),
+
+    // -------- v2-only kinds (SPEC §16.9 rules 26..=57) --------
+    #[error(
+        "driver.profile {0:?} not allowed (expected \"sample_basic\" or \"multi_voice_atom\")"
+    )]
+    DriverProfileUnsupportedV2(String),
+    #[error("driver.bytecode_version {bytecode} not allowed for profile {profile:?} (expected {expected})")]
+    DriverBytecodeProfileMismatch {
+        profile: String,
+        bytecode: u32,
+        expected: u32,
+    },
+    #[error("atom id {0:?} doesn't match required pattern ^[a-z0-9_]+$")]
+    AtomIdPatternMismatch(String),
+    #[error("duplicate atom id {0:?}")]
+    DuplicateAtomId(String),
+    #[error("id {0:?} collides between sample_pool and atom_pool (cross-pool uniqueness)")]
+    SampleAtomIdCollision(String),
+    #[error("atom kind {0:?} not allowed (M2 expects \"additive_single_cycle_v0\")")]
+    AtomKindUnsupported(String),
+    #[error("atom cycle_len_samples {0} not allowed (expected 64, 128, or 256)")]
+    AtomCycleLenUnsupported(u16),
+    #[error("partials length {0} out of range 1..=8")]
+    AtomPartialsLength(usize),
+    #[error("partial.harmonic {0} out of range 1..=16")]
+    AtomPartialHarmonicOutOfRange(u8),
+    #[error("partial.phase_cycles {0} not in 0.0..1.0 (mod 1)")]
+    AtomPartialPhaseOutOfRange(f64),
+    #[error("atom_sequence id {0:?} doesn't match required pattern ^[a-z0-9_]+$")]
+    AtomSequenceIdPatternMismatch(String),
+    #[error("duplicate atom_sequence id {0:?}")]
+    DuplicateAtomSequenceId(String),
+    #[error("atom_sequence steps length {0} out of range 1..=32")]
+    AtomSequenceStepsLength(usize),
+    #[error("atom_sequence step {idx}: atom_id {id:?} not found in atom_pool")]
+    AtomSequenceStepAtomIdNotFound { idx: usize, id: String },
+    #[error("atom_sequence step 0: transition must be \"initial_kon\", got {0:?}")]
+    AtomSequenceFirstStepMustBeInitialKon(String),
+    #[error(
+        "atom_sequence step {idx}: subsequent steps must be \"fade_to_zero_retrigger\" in M2, got {got:?}"
+    )]
+    AtomSequenceLaterStepWrongTransition { idx: usize, got: String },
+    #[error("track id {0:?} doesn't match required pattern ^[a-z0-9_]+$")]
+    TrackIdPatternMismatch(String),
+    #[error("duplicate track id {0:?}")]
+    DuplicateTrackId(String),
+    #[error("duplicate track voice {0} (must be unique across tracks[])")]
+    DuplicateTrackVoice(u8),
+    #[error("track sample_id {0:?} not found in sample_pool")]
+    TrackSampleIdNotFound(String),
+    #[error("track atom_sequence_id {0:?} not found in atom_sequences")]
+    TrackAtomSequenceIdNotFound(String),
+    #[error(
+        "track voice {track_voice} doesn't match its atom_sequence voice {sequence_voice}"
+    )]
+    TrackAtomSequenceVoiceMismatch {
+        track_voice: u8,
+        sequence_voice: u8,
+    },
+    #[error("m2.active_sequence_id {0:?} not found in atom_sequences")]
+    ActiveAtomSequenceNotFound(String),
+    #[error(
+        "driver.profile=\"sample_basic\" forbids non-empty atom_pool / atom_sequences / atom_sequence tracks / voice-1 tracks"
+    )]
+    SampleBasicForbidsAtomData,
+    #[error(
+        "driver.profile=\"multi_voice_atom\" requires at least one atom_sequence track"
+    )]
+    MultiVoiceAtomRequiresAtomSequenceTrack,
 }
 
 #[cfg(test)]
