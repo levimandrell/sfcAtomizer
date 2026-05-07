@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "report_type": "release_baselines",
+  "release": "v0.2-rc",
+  "milestone": "M2.8",
+  "_doc": "Machine-readable baselines (consultant #23, #25). Three classifications: identity_gated (any drift = regression), behavior_gated (numeric thresholds documenting policy), documentary_snapshot (informational; expected to shift on declared milestones). Retired baselines kept for archaeology under `retired`.",
+  "identity_gated": [
+    {
+      "name": "M1_LOADER_SIZE_BYTES",
+      "value": 588,
+      "kind": "size_bytes",
+      "locked_at": "M1.6 (re-asserted M2.6)",
+      "test": "loader_byte_identity_at_m2_6"
+    },
+    {
+      "name": "M1_LOADER_SHA256",
+      "value": "955f525c5304af5aea1b53fe12a1b0b469dc9a86bd74dff50c3ffb381b873f40",
+      "kind": "sha256",
+      "locked_at": "M2.6",
+      "test": "loader_byte_identity_at_m2_6"
+    },
+    {
+      "name": "M1_DRIVER_CODE_SHA256",
+      "value": "671ee21ebb207302940075519e1ad0de557a97280038ab12aef7a22994b2bcfe",
+      "kind": "sha256",
+      "locked_at": "M2.0 (rebase)",
+      "test": "core/tests/driver_build.rs::build_driver_for_minimal_project (deterministic)"
+    },
+    {
+      "name": "M2_CANONICAL_SEQUENCE_BYTECODE_SHA256",
+      "value": "f9fa6ea85a7197b662a3b386c9606bb25954708b9714629de7069c90f0fd24f0",
+      "kind": "sha256",
+      "locked_at": "M2.4",
+      "test": "core/tests/sequence_compile.rs::end_to_end_compile_sequence_canonical_byte_pinned",
+      "see_also": "baselines/m2_canonical_fixtures.md"
+    },
+    {
+      "name": "M2_CANONICAL_VOICE_SETUP_TABLE_SHA256",
+      "value": "f2faaed8530fb82933e3c30b7537190ba150c38e00b82eee83517ac818089ad5",
+      "kind": "sha256",
+      "locked_at": "M2.4",
+      "test": "core/tests/sequence_compile.rs::voice_setup_table_byte_pinned_abi",
+      "see_also": "baselines/m2_canonical_fixtures.md"
+    },
+    {
+      "name": "M2_CANONICAL_SEQUENCE_TOTAL_TICKS",
+      "value": 249,
+      "kind": "tick_count",
+      "locked_at": "M2.4",
+      "_note": "sum-of-WAIT-operands; semantic locked at M2.4. Wall-elapsed tick count is `total_elapsed_ticks` = 254 (consultant #1, M2.8)."
+    }
+  ],
+  "behavior_gated": [
+    {
+      "name": "M1_AUDIBLE_MAX_ABS_FLOOR",
+      "value": 1000,
+      "kind": "threshold",
+      "locked_at": "M1.7",
+      "rule": "audible-channel max_abs >= 1000"
+    },
+    {
+      "name": "M1_AUDIBLE_RMS_FLOOR",
+      "value": 200,
+      "kind": "threshold",
+      "locked_at": "M1.7",
+      "rule": "audible-channel rms >= 200"
+    },
+    {
+      "name": "M2_AUDIBILITY_FLOORS",
+      "value": { "max_abs": 1000, "rms": 200 },
+      "kind": "thresholds",
+      "locked_at": "M2.5",
+      "rule": "per-channel audible floor for at-least-one-channel-audible per SPEC §21"
+    },
+    {
+      "name": "M2_SILENCE_CEILING",
+      "value": { "max_abs": 50 },
+      "kind": "threshold",
+      "locked_at": "M2.5",
+      "rule": "hard-panned voice's silent off-side: max_abs <= 50"
+    },
+    {
+      "name": "M2_SOURCE_STEP_ZCR_RATIO_FLOOR",
+      "value": 1.5,
+      "kind": "ratio",
+      "locked_at": "M2.5",
+      "rule": "post.right.zcr / pre.right.zcr >= 1.5 in canonical source-step combined fixture"
+    },
+    {
+      "name": "M2_MODULE_CAP_BYTES",
+      "value": 32768,
+      "kind": "size_ceiling",
+      "locked_at": "M2.6",
+      "rule": "SPEC §15.6: module.bin > 32 KiB triggers ModuleTooLarge; <= 32 KiB ok",
+      "test": "cli_compile_sfc_v2_module_over_32_kib_errors"
+    }
+  ],
+  "documentary_snapshot": [
+    {
+      "name": "M2_DRIVER_CODE_OBSERVED_BYTES",
+      "value": 1158,
+      "kind": "size_bytes",
+      "snapshot_at": "M2.5 (canonical M2 fixture, current asar version)",
+      "_note": "informational; not gated. Expected to shift at M3 when driver gains features."
+    },
+    {
+      "name": "M2_ATOM_128_SINE_BRR_SHA256",
+      "value": "348c791449916e1f9169d0e229cd79bf97967b19e22db3c4a5be7dc9c69ac876",
+      "kind": "sha256",
+      "snapshot_at": "M2.2",
+      "_note": "M3 BRR-encoder-quality work expected to invalidate; reclassify as snapshot per consultant #26."
+    },
+    {
+      "name": "M2_ATOM_128_SINE_BRR_BYTES",
+      "value": 72,
+      "kind": "size_bytes",
+      "snapshot_at": "M2.2",
+      "_note": "8 BRR blocks at 9 bytes each."
+    },
+    {
+      "name": "M2_ATOM_64_SINE_BRR_SHA256",
+      "value": "78da253b65a6a8d067102fe30ed90353c25b6981a71e3cafc6dd4f3041822e96",
+      "kind": "sha256",
+      "snapshot_at": "M2.2",
+      "_note": "M3 BRR encoder work expected to invalidate."
+    },
+    {
+      "name": "M2_ATOM_64_SINE_BRR_BYTES",
+      "value": 36,
+      "kind": "size_bytes",
+      "snapshot_at": "M2.2",
+      "_note": "4 BRR blocks at 9 bytes each."
+    },
+    {
+      "name": "M2_ATOM_128_SINE_PCM_SHA256",
+      "value": "7f9b274e9fa1c7088ba4d125a2899293bae79115bdd20824b2afb54116f9789a",
+      "kind": "sha256",
+      "snapshot_at": "M2.2",
+      "_note": "M3-stable IF atom render formula unchanged (consultant #27)."
+    },
+    {
+      "name": "M2_ATOM_64_SINE_PCM_SHA256",
+      "value": "0638ddfe8a2a8fb4c98ff6fed37ff3475c42dd257df893eca9e836d09d3e6565",
+      "kind": "sha256",
+      "snapshot_at": "M2.2",
+      "_note": "M3-stable IF atom render formula unchanged."
+    },
+    {
+      "name": "M2_ATOM_128_SINE_LOOP_CLICK_SCORE",
+      "value": 1197,
+      "kind": "click_score",
+      "snapshot_at": "M2.2",
+      "_note": "|first_loop_decoded - last_decoded| with M2.2 BRR encoder + force_filter_0_first_block. Audible loop click expected; deferred to M3 BRR-quality (consultant #9)."
+    },
+    {
+      "name": "M2_ATOM_64_SINE_LOOP_CLICK_SCORE",
+      "value": 2407,
+      "kind": "click_score",
+      "snapshot_at": "M2.2",
+      "_note": "Same envelope as the 128 atom; higher absolute value reflects shorter cycle length."
+    }
+  ],
+  "retired": [
+    {
+      "name": "M2_MULTI_VOICE_ARAM_SHA256_M24",
+      "value": "18861b8ad076ca170ca1d3d80cc73c8998c00c057d190b5164d17d243d216722",
+      "kind": "sha256",
+      "retired_at": "M2.5",
+      "reason": "driver bytes shifted (KOFF-clear-before-KON, init_kon_mask, jmp main_loop fix; sequence_addr now points at payload not header)",
+      "supersedes": "M2.3 baseline b25f8d5e..."
+    },
+    {
+      "name": "M2_MULTI_VOICE_ARAM_SHA256_M23",
+      "value": "b25f8d5e2c9579c603e5e06017e3f12540d9913b017c926636e76864435fb13e",
+      "kind": "sha256",
+      "retired_at": "M2.4",
+      "reason": "sequence_data region added between source directory and sample BRR pool"
+    }
+  ]
+}
