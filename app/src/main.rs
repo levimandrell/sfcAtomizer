@@ -36,10 +36,10 @@ use sfc_atomizer_core::report::{
     CalibrationStatus, CompileSfcReport, CompileSpcReport, DoctorReport, DoctorStatus, DoctorTools,
     FixtureSetInfo, LoopCandidateJson, LoopFinderReport, M0Manifest, M1BundleSteps,
     M1BundleSummary, M1Manifest, ObservedAudio, ObservedInfo, OracleInfo, ProvisionalTolerances,
-    RenderInfo, RustInfo, SfcFinding, SfcHeaderSummary, SfcModuleSummary, SfcModulesAudibleReport,
-    SfcStructureReport, SfcStructureStatus, SpcExportReport, SpcInitialState, SpcStatus,
-    StepStatus, ToolStatus, ValidationErrorJson, ValidationReport, ValidationStatus,
-    SCHEMA_VERSION,
+    RenderInfo, RustInfo, SequenceCompileReport, SfcFinding, SfcHeaderSummary, SfcModuleSummary,
+    SfcModulesAudibleReport, SfcStructureReport, SfcStructureStatus, SpcExportReport,
+    SpcInitialState, SpcStatus, StepStatus, ToolStatus, ValidationErrorJson, ValidationReport,
+    ValidationStatus, SCHEMA_VERSION,
 };
 use sfc_atomizer_core::sfc_export::{
     export_sfc, SfcExportInput, LOROM_HEADER_BASE, LOROM_HEADER_CHECKSUM_COMPLEMENT_OFFSET,
@@ -434,6 +434,29 @@ enum Command {
         #[arg(long)]
         out_pcm: Option<PathBuf>,
     },
+    /// Compile an atom_sequence to SEQ2 bytecode (M2.4).
+    ///
+    /// Loads + validates the v2 project, looks up the active
+    /// sequence (or `--sequence-id`), runs the SPEC §14.3 lowering,
+    /// writes the .seq.bin and a structured `SequenceCompileReport`.
+    /// The compile path is the same as the one M2.3's pack uses;
+    /// this CLI exists for engineer / CI inspection.
+    ///
+    /// Exit codes: 0 success, 1 IO/parse, 2 project-invalid /
+    /// sequence-not-found / capability-missing, 3 compile error
+    /// (budget, overlap, too-large).
+    CompileSequence {
+        #[arg(long)]
+        project: PathBuf,
+        /// Atom sequence id to compile. Defaults to
+        /// `m2.active_sequence_id` from the project.
+        #[arg(long)]
+        sequence_id: Option<String>,
+        #[arg(long)]
+        out_bin: Option<PathBuf>,
+        #[arg(long)]
+        out_report: Option<PathBuf>,
+    },
     /// Decode a rendered atom and write a looped audition WAV (M2.2).
     ///
     /// Renders the atom (same path as `render-atom`), decodes the
@@ -669,6 +692,17 @@ fn run(cli: Cli) -> Result<(), CliError> {
             duration_seconds,
             out_wav,
         } => cmd_preview_atom(&project, &atom, duration_seconds, out_wav.as_deref()),
+        Command::CompileSequence {
+            project,
+            sequence_id,
+            out_bin,
+            out_report,
+        } => cmd_compile_sequence(
+            &project,
+            sequence_id.as_deref(),
+            out_bin.as_deref(),
+            out_report.as_deref(),
+        ),
     }
 }
 
@@ -2441,6 +2475,147 @@ fn cmd_preview_atom(
     Ok(())
 }
 
+/// `sfcwc compile-sequence --project <v2> [--sequence-id <id>]`
+///
+/// Standalone driver of the M2.4 sequence compiler. Output paths
+/// default to `build/m2/sequences/<id>.seq.bin` and
+/// `<id>.sequence-compile-report.json` next to it. The report's
+/// `voice_setup_addr` and `sequence_addr` are 0 here (not yet
+/// packed); the same compiler runs inside `sfcwc pack` for v2
+/// multi_voice_atom and fills those addresses from the AramMapReport.
+fn cmd_compile_sequence(
+    project_path: &Path,
+    sequence_id: Option<&str>,
+    out_bin: Option<&Path>,
+    out_report: Option<&Path>,
+) -> Result<(), CliError> {
+    let v2 = match load_project_versioned(project_path) {
+        Ok(LoadedProject::V1(_)) => {
+            eprintln!(
+                "compile-sequence: {} is a v1 project; compile-sequence requires v2.",
+                project_path.display()
+            );
+            std::process::exit(2);
+        }
+        Ok(LoadedProject::V2(p)) => p,
+        Err(e) => {
+            eprintln!("compile-sequence: {e}");
+            std::process::exit(match e {
+                ProjectIoError::Validation(_) => 2,
+                _ => 1,
+            });
+        }
+    };
+    if let Err(verrors) = v2.validate() {
+        eprintln!(
+            "compile-sequence: project invalid — {} ({} error{})",
+            project_path.display(),
+            verrors.len(),
+            if verrors.len() == 1 { "" } else { "s" }
+        );
+        for e in &verrors {
+            eprintln!("  {} : {}", e.path, e.kind);
+        }
+        std::process::exit(2);
+    }
+
+    let resolved_id: String = match sequence_id
+        .map(|s| s.to_string())
+        .or_else(|| v2.m2.active_sequence_id.clone())
+    {
+        Some(id) => id,
+        None => {
+            eprintln!(
+                "compile-sequence: no active sequence; specify --sequence-id (m2.active_sequence_id is null in {})",
+                project_path.display()
+            );
+            std::process::exit(2);
+        }
+    };
+    let sequence = match v2.atom_sequences.iter().find(|s| s.id == resolved_id) {
+        Some(s) => s.clone(),
+        None => {
+            let available: Vec<&str> = v2.atom_sequences.iter().map(|s| s.id.as_str()).collect();
+            eprintln!(
+                "compile-sequence: sequence id {resolved_id:?} not found in atom_sequences. available: [{}]",
+                available.join(", ")
+            );
+            std::process::exit(2);
+        }
+    };
+
+    let manifest = sfc_atomizer_core::capability_manifest::CapabilityManifest::multi_voice_atom();
+    let source_directory = sfc_atomizer_core::sequence_compiler::SourceDirectory::from_project(&v2);
+    let output = match sfc_atomizer_core::sequence_compiler::compile_sequence(
+        sfc_atomizer_core::sequence_compiler::SequenceCompileInput {
+            project: &v2,
+            manifest: &manifest,
+            source_directory: &source_directory,
+            sequence: &sequence,
+        },
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            use sfc_atomizer_core::sequence_compiler::SequenceCompileError as SE;
+            let exit = match &e {
+                SE::CapabilityMissing { .. }
+                | SE::AtomIdNotInPool { .. }
+                | SE::FirstStepNotInitialKon { .. }
+                | SE::NonFirstStepWrongTransition { .. } => 2,
+                SE::WriteBudgetExceeded { .. }
+                | SE::OverlappingSlides { .. }
+                | SE::BytecodeTooLarge { .. }
+                | SE::StepTooShortForTransition { .. } => 3,
+            };
+            eprintln!("compile-sequence: {e}");
+            std::process::exit(exit);
+        }
+    };
+
+    let out_bin_owned = out_bin.map(|p| p.to_path_buf()).unwrap_or_else(|| {
+        PathBuf::from("build/m2/sequences").join(format!("{resolved_id}.seq.bin"))
+    });
+    let out_report_owned = out_report.map(|p| p.to_path_buf()).unwrap_or_else(|| {
+        PathBuf::from("build/m2/sequences")
+            .join(format!("{resolved_id}.sequence-compile-report.json"))
+    });
+    if let Some(parent) = out_bin_owned.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir(parent)?;
+        }
+    }
+    std::fs::write(&out_bin_owned, &output.bytecode).map_err(|source| CliError::Io {
+        path: out_bin_owned.clone(),
+        source,
+    })?;
+    let report = build_sequence_compile_report(
+        &v2.project.name,
+        Some(&resolved_id),
+        &output,
+        0, // voice_setup_addr — pack fills
+        0, // sequence_addr — pack fills
+        0, // region bytes — pack fills
+        0, // padding — pack fills
+        &manifest,
+    );
+    write_json(&out_report_owned, &report)?;
+
+    eprintln!(
+        "compile-sequence: {} ({}) — {} step(s), {} bytes total ({} header + {} payload), {} ticks, max writes/tick estimate={} (budget {}); -> {}",
+        resolved_id,
+        sequence.name,
+        sequence.steps.len(),
+        output.bytecode.len(),
+        sfc_atomizer_core::bytecode::SEQUENCE_HEADER_LEN,
+        output.bytecode_payload_len,
+        output.total_ticks,
+        output.max_writes_per_tick_estimate,
+        manifest.limits.max_dsp_writes_per_tick,
+        out_bin_owned.display(),
+    );
+    Ok(())
+}
+
 fn default_migration_report_path(out: &Path) -> PathBuf {
     let stem = out
         .file_stem()
@@ -2823,6 +2998,52 @@ fn default_capability_manifest_path(out_map: &Path) -> PathBuf {
 /// the voice setup table per SPEC §15.7, calls `pack_v2`, writes the
 /// image / map / capability manifest. Sequence data is left empty
 /// (M2.4 fills).
+#[allow(clippy::too_many_arguments)]
+fn build_sequence_compile_report(
+    project_name: &str,
+    active_sequence_id: Option<&str>,
+    seq_out: &sfc_atomizer_core::sequence_compiler::SequenceCompileOutput,
+    voice_setup_addr: u16,
+    sequence_addr: u16,
+    region_bytes: u32,
+    padding_bytes: u32,
+    manifest: &sfc_atomizer_core::capability_manifest::CapabilityManifest,
+) -> SequenceCompileReport {
+    use sfc_atomizer_core::report::SequenceStepLowering;
+    let per_step = seq_out
+        .per_step
+        .iter()
+        .map(|s| SequenceStepLowering {
+            step_index: s.step_index,
+            atom_id: s.atom_id.clone(),
+            voice: s.voice,
+            bytecode_offset_start: s.bytecode_offset_start,
+            bytecode_offset_end: s.bytecode_offset_end,
+            max_writes_in_step: s.max_writes_in_step,
+            tick_offset_start: s.tick_offset_start,
+            tick_offset_end: s.tick_offset_end,
+        })
+        .collect();
+    SequenceCompileReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: SequenceCompileReport::REPORT_TYPE.to_string(),
+        project_name: project_name.to_string(),
+        active_sequence_id: active_sequence_id.map(|s| s.to_string()),
+        bytecode_sha256: seq_out.bytecode_sha256.clone(),
+        bytecode_payload_bytes: seq_out.bytecode_payload_len as u32,
+        bytecode_total_bytes: seq_out.bytecode.len() as u32,
+        bytecode_region_bytes: region_bytes,
+        bytecode_padding_bytes: padding_bytes,
+        max_writes_per_tick_estimate: seq_out.max_writes_per_tick_estimate,
+        max_writes_per_tick_budget: manifest.limits.max_dsp_writes_per_tick,
+        max_simultaneous_volume_slides: manifest.limits.max_simultaneous_volume_slides as u32,
+        total_ticks: seq_out.total_ticks,
+        voice_setup_addr,
+        sequence_addr,
+        per_step,
+    }
+}
+
 fn cmd_pack_v2_multi_voice(
     project_path: &Path,
     v2: &sfc_atomizer_core::project_v2::ProjectV2,
@@ -2926,12 +3147,45 @@ fn cmd_pack_v2_multi_voice(
         }
     };
 
+    // M2.4: lower the active atom_sequence to SEQ2 bytecode if one
+    // is selected. No active sequence means voice 1 stays silent
+    // (its setup-table entry already has src_index=$FF or zeros);
+    // pack_v2 sees `sequence_data: None` and omits the region.
+    let manifest = sfc_atomizer_core::capability_manifest::CapabilityManifest::multi_voice_atom();
+    let (sequence_data, sequence_compile_output) = match v2
+        .m2
+        .active_sequence_id
+        .as_deref()
+        .and_then(|id| v2.atom_sequences.iter().find(|s| s.id == id))
+    {
+        Some(seq) => {
+            let source_directory =
+                sfc_atomizer_core::sequence_compiler::SourceDirectory::from_project(v2);
+            let out = match sfc_atomizer_core::sequence_compiler::compile_sequence(
+                sfc_atomizer_core::sequence_compiler::SequenceCompileInput {
+                    project: v2,
+                    manifest: &manifest,
+                    source_directory: &source_directory,
+                    sequence: seq,
+                },
+            ) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("pack: sequence compile: {e}");
+                    std::process::exit(3);
+                }
+            };
+            (Some(out.bytecode.clone()), Some(out))
+        }
+        None => (None, None),
+    };
+
     let result = sfc_atomizer_core::packer::pack_v2(sfc_atomizer_core::packer::PackInputV2 {
         project: v2.clone(),
         encoded_samples,
         encoded_atoms,
         driver_code,
-        sequence_data: None,
+        sequence_data,
         voice_setup_table,
     });
     let result = match result {
@@ -2953,12 +3207,57 @@ fn cmd_pack_v2_multi_voice(
         source,
     })?;
     write_json(out_map, &result.map_report)?;
-    let manifest = sfc_atomizer_core::capability_manifest::CapabilityManifest::multi_voice_atom();
     if let Err(e) = manifest.validate_dependencies() {
         eprintln!("pack: capability manifest dependency check failed: {e}");
         std::process::exit(3);
     }
     write_json(manifest_path, &manifest)?;
+
+    // M2.4: write the sequence-compile report alongside if a
+    // sequence was lowered. Pull the sequence_data region's start
+    // address + size from the AramMapReport.
+    if let Some(seq_out) = sequence_compile_output.as_ref() {
+        let (sequence_addr, region_bytes, padding_bytes) = result
+            .map_report
+            .regions
+            .iter()
+            .find(|r| r.name == "sequence_data")
+            .map(|r| {
+                let start =
+                    u32::from_str_radix(r.start.trim_start_matches("0x"), 16).unwrap_or(0) as u16;
+                let region = r.bytes;
+                let total = (seq_out.bytecode.len()) as u32;
+                let padding = region.saturating_sub(total);
+                (start, region, padding)
+            })
+            .unwrap_or((0, 0, 0));
+        let voice_setup_addr = result
+            .map_report
+            .regions
+            .iter()
+            .find(|r| r.name == "voice_setup_table")
+            .map(|r| u32::from_str_radix(r.start.trim_start_matches("0x"), 16).unwrap_or(0) as u16)
+            .unwrap_or(0);
+        let report = build_sequence_compile_report(
+            &v2.project.name,
+            v2.m2.active_sequence_id.as_deref(),
+            seq_out,
+            voice_setup_addr,
+            sequence_addr,
+            region_bytes,
+            padding_bytes,
+            &manifest,
+        );
+        let report_path = manifest_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(format!(
+                "{}.sequence-compile-report.json",
+                v2.m2.active_sequence_id.as_deref().unwrap_or("sequence")
+            ));
+        write_json(&report_path, &report)?;
+    }
 
     let image_sha = sfc_atomizer_core::asm::sha256_hex(&result.aram_image[..]);
     let sample_brr = result
