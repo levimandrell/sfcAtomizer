@@ -172,6 +172,56 @@ impl V2EditorModel {
             self.mark_dirty();
         }
     }
+
+    /// M2.8 (consultant #12): rename an atom's `id` and cascade the
+    /// change through every `atom_sequences[].steps[].atom_id`
+    /// reference that pointed at the old id. The raw `set_atom_id`
+    /// setter does NOT cascade (kept for tests / migrations / explicit
+    /// "I know what I'm doing" callers); the GUI rename UI wires
+    /// here.
+    ///
+    /// Refuses (returns `false` without mutating) when:
+    /// - `idx` is out of range
+    /// - `new_id` already exists in `atom_pool` (other than `idx`)
+    /// - `new_id` collides with any `sample_pool[].id` (cross-pool
+    ///   collision per SPEC §16.9 rule 30)
+    ///
+    /// On success the dirty flag fires, validation re-runs, and
+    /// callers can read `is_valid()` to confirm the cascade landed
+    /// the project in a valid state.
+    pub fn rename_atom_id_cascade(&mut self, idx: usize, new_id: String) -> bool {
+        let old_id = match self.project.atom_pool.get(idx) {
+            Some(a) => a.id.clone(),
+            None => return false,
+        };
+        if old_id == new_id {
+            return true; // no-op success
+        }
+        // Uniqueness — atom_pool (excluding self) + sample_pool.
+        if self
+            .project
+            .atom_pool
+            .iter()
+            .enumerate()
+            .any(|(i, a)| i != idx && a.id == new_id)
+        {
+            return false;
+        }
+        if self.project.sample_pool.iter().any(|s| s.id == new_id) {
+            return false;
+        }
+
+        self.project.atom_pool[idx].id = new_id.clone();
+        for seq in self.project.atom_sequences.iter_mut() {
+            for step in seq.steps.iter_mut() {
+                if step.atom_id == old_id {
+                    step.atom_id = new_id.clone();
+                }
+            }
+        }
+        self.mark_dirty();
+        true
+    }
     pub fn set_atom_name(&mut self, idx: usize, name: String) {
         if let Some(a) = self.project.atom_pool.get_mut(idx) {
             a.name = name;
@@ -270,8 +320,10 @@ impl V2EditorModel {
     pub fn add_sequence(&mut self) -> usize {
         let id = next_sequence_id(&self.project.atom_sequences);
         let seq = AtomSequence {
-            id,
-            name: String::new(),
+            id: id.clone(),
+            // Default the name to the id so validation rule
+            // 41 (name length 1..=64) passes; user can edit.
+            name: id,
             voice: 1,
             steps: vec![default_first_step(&self.project.atom_pool)],
             looped: false,
@@ -333,29 +385,68 @@ impl V2EditorModel {
         }
     }
     pub fn remove_step(&mut self, seq_idx: usize, step_idx: usize) {
+        let mut moved = false;
         if let Some(s) = self.project.atom_sequences.get_mut(seq_idx) {
             if step_idx < s.steps.len() && !s.steps.is_empty() {
                 s.steps.remove(step_idx);
-                self.mark_dirty();
+                moved = true;
             }
+        }
+        if moved {
+            self.normalize_step_transitions(seq_idx);
+            self.mark_dirty();
         }
     }
     pub fn move_step_up(&mut self, seq_idx: usize, step_idx: usize) {
         if step_idx == 0 {
             return;
         }
+        let mut moved = false;
         if let Some(s) = self.project.atom_sequences.get_mut(seq_idx) {
             if step_idx < s.steps.len() {
                 s.steps.swap(step_idx, step_idx - 1);
-                self.mark_dirty();
+                moved = true;
             }
+        }
+        if moved {
+            self.normalize_step_transitions(seq_idx);
+            self.mark_dirty();
         }
     }
     pub fn move_step_down(&mut self, seq_idx: usize, step_idx: usize) {
+        let mut moved = false;
         if let Some(s) = self.project.atom_sequences.get_mut(seq_idx) {
             if step_idx + 1 < s.steps.len() {
                 s.steps.swap(step_idx, step_idx + 1);
-                self.mark_dirty();
+                moved = true;
+            }
+        }
+        if moved {
+            self.normalize_step_transitions(seq_idx);
+            self.mark_dirty();
+        }
+    }
+
+    /// M2.8 (consultant #11): enforce SPEC §16.9 rules 47-48 after
+    /// a structural step edit (remove / reorder). Rule 47: step 0
+    /// must be `InitialKon`. Rule 48: steps 1+ must be
+    /// `FadeToZeroRetrigger`. Walk every step and rewrite mismatches;
+    /// preserves existing fade_out/fade_in params when a step is
+    /// already `FadeToZeroRetrigger`, falls back to (4, 4) when
+    /// promoting from `InitialKon`.
+    fn normalize_step_transitions(&mut self, seq_idx: usize) {
+        if let Some(s) = self.project.atom_sequences.get_mut(seq_idx) {
+            for (i, step) in s.steps.iter_mut().enumerate() {
+                if i == 0 {
+                    if !matches!(step.transition, AtomTransition::InitialKon) {
+                        step.transition = AtomTransition::InitialKon;
+                    }
+                } else if !matches!(step.transition, AtomTransition::FadeToZeroRetrigger { .. }) {
+                    step.transition = AtomTransition::FadeToZeroRetrigger {
+                        fade_out_ticks: 4,
+                        fade_in_ticks: 4,
+                    };
+                }
             }
         }
     }
@@ -1010,6 +1101,187 @@ mod tests {
     /// is between the migrated-then-saved-as-v2 bytes vs. the
     /// same migration done independently — both produce the same
     /// v2 JSON.
+    // ---- M2.8 Layer 2C: step reorder/remove auto-normalize ----
+
+    #[test]
+    fn remove_step_zero_promotes_step_one_to_initial_kon() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        // Canonical fixture has 1 step (initial_kon). Add a fade
+        // step so we can remove the original step 0.
+        model.add_step(0);
+        // Now step 0 = initial_kon, step 1 = fade_to_zero_retrigger.
+        model.remove_step(0, 0);
+        // After removal, step 0 must be InitialKon (was Fade).
+        let s = &model.project.atom_sequences[0].steps[0];
+        assert!(matches!(s.transition, AtomTransition::InitialKon));
+    }
+
+    #[test]
+    fn move_step_up_to_zero_normalizes_transition_to_initial_kon() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        model.add_step(0); // step 1 = fade
+        model.move_step_up(0, 1); // fade now at index 0
+        let s = &model.project.atom_sequences[0].steps[0];
+        assert!(
+            matches!(s.transition, AtomTransition::InitialKon),
+            "step at index 0 must be InitialKon after promotion"
+        );
+        // Step 1 (formerly index 0) was InitialKon; normalize
+        // promoted it to FadeToZeroRetrigger with default (4, 4).
+        let s1 = &model.project.atom_sequences[0].steps[1];
+        match &s1.transition {
+            AtomTransition::FadeToZeroRetrigger {
+                fade_out_ticks,
+                fade_in_ticks,
+            } => {
+                assert_eq!(*fade_out_ticks, 4);
+                assert_eq!(*fade_in_ticks, 4);
+            }
+            other => panic!("expected fade transition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn move_step_down_from_zero_normalizes_to_fade_to_zero_retrigger() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        model.add_step(0);
+        model.move_step_down(0, 0);
+        // Step 0 now = the originally-fade step (still fade).
+        // Step 1 = the originally-InitialKon step → must be normalized.
+        let s1 = &model.project.atom_sequences[0].steps[1];
+        assert!(
+            matches!(s1.transition, AtomTransition::FadeToZeroRetrigger { .. }),
+            "step at index 1 must be Fade after demotion"
+        );
+    }
+
+    #[test]
+    fn move_step_preserves_existing_fade_params_when_normalizing() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        // Add two fade steps with custom params.
+        model.add_step(0);
+        model.set_step_transition_fade(0, 1, 8, 12);
+        model.add_step(0);
+        model.set_step_transition_fade(0, 2, 16, 20);
+        // Reorder steps 1 and 2: their fade params must persist.
+        model.move_step_down(0, 1);
+        let s1 = &model.project.atom_sequences[0].steps[1];
+        let s2 = &model.project.atom_sequences[0].steps[2];
+        match &s1.transition {
+            AtomTransition::FadeToZeroRetrigger {
+                fade_out_ticks,
+                fade_in_ticks,
+            } => {
+                assert_eq!(*fade_out_ticks, 16);
+                assert_eq!(*fade_in_ticks, 20);
+            }
+            other => panic!("step 1 wrong: {other:?}"),
+        }
+        match &s2.transition {
+            AtomTransition::FadeToZeroRetrigger {
+                fade_out_ticks,
+                fade_in_ticks,
+            } => {
+                assert_eq!(*fade_out_ticks, 8);
+                assert_eq!(*fade_in_ticks, 12);
+            }
+            other => panic!("step 2 wrong: {other:?}"),
+        }
+    }
+
+    // ---- M2.8 Layer 2D: rename_atom_id_cascade ----
+
+    #[test]
+    fn rename_atom_id_cascade_updates_step_references() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        // Canonical references "sine_128" from a step.
+        let ok = model.rename_atom_id_cascade(0, "sine_128_renamed".to_string());
+        assert!(ok);
+        assert_eq!(model.project.atom_pool[0].id, "sine_128_renamed");
+        assert_eq!(
+            model.project.atom_sequences[0].steps[0].atom_id,
+            "sine_128_renamed"
+        );
+        assert!(model.is_valid(), "cascade must keep validation green");
+    }
+
+    #[test]
+    fn rename_atom_id_cascade_rejects_collision_with_sample_pool() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        // sample_pool already contains "lead".
+        let ok = model.rename_atom_id_cascade(0, "lead".to_string());
+        assert!(!ok, "cross-pool collision must reject");
+        assert_eq!(model.project.atom_pool[0].id, "sine_128", "no mutation");
+    }
+
+    #[test]
+    fn rename_atom_id_cascade_rejects_collision_with_other_atom() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        model.add_atom(); // pool = [sine_128, atom_0001]
+        let ok = model.rename_atom_id_cascade(0, "atom_0001".to_string());
+        assert!(!ok);
+        assert_eq!(model.project.atom_pool[0].id, "sine_128");
+        assert_eq!(model.project.atom_pool[1].id, "atom_0001");
+    }
+
+    #[test]
+    fn rename_atom_id_cascade_unchanged_when_idx_out_of_range() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        let ok = model.rename_atom_id_cascade(99, "anything".to_string());
+        assert!(!ok);
+        assert_eq!(model.project.atom_pool[0].id, "sine_128");
+    }
+
+    // ---- M2.8 Layer 2E: round-trip parity through nontrivial edits ----
+
+    /// Consultant #16: extend round-trip parity beyond
+    /// immediate-construction saves. Build a base v2 project, save
+    /// it through the JSON path, wrap in editor model, perform a
+    /// non-trivial mutation sequence (add atom + tweak fields, add
+    /// sequence + steps), save through the model, reload from
+    /// disk into a fresh `ProjectV2`, save again. Assert the two
+    /// model-saved bytes equal each other (edit-session round-trip
+    /// stability).
+    #[test]
+    fn round_trip_parity_after_nontrivial_mutation_sequence() {
+        let dir = TempDir::new().unwrap();
+        let p = canonical_v2();
+        let _baseline = dir.path().join("base.json");
+        p.save_to_path(&_baseline).unwrap();
+
+        let mut model = V2EditorModel::new(p);
+        // Non-trivial mutation cycle.
+        let atom_idx = model.add_atom();
+        model.set_atom_amplitude(atom_idx, 0.7);
+        model.set_atom_root_midi_note(atom_idx, 72);
+        let mut pb = model.project.atom_pool[atom_idx].playback.clone();
+        pb.pan = 0.5;
+        model.set_atom_playback(atom_idx, pb);
+        let seq_idx = model.add_sequence();
+        model.set_sequence_voice(seq_idx, 1);
+        // Sequence already has 1 step (default initial_kon).
+        // Add two more — they default to fade_to_zero_retrigger.
+        model.add_step(seq_idx);
+        model.add_step(seq_idx);
+        model.set_step_duration(seq_idx, 1, 60);
+
+        // Save through model.
+        let editor_path = dir.path().join("via_editor.json");
+        model.save_to(&editor_path).unwrap();
+
+        // Reload from disk into a fresh project, save again.
+        let reloaded = ProjectV2::load_from_path(&editor_path).unwrap();
+        let reload_path = dir.path().join("via_reload.json");
+        reloaded.save_to_path(&reload_path).unwrap();
+
+        let bytes_b = std::fs::read(&editor_path).unwrap();
+        let bytes_c = std::fs::read(&reload_path).unwrap();
+        assert_eq!(
+            bytes_b, bytes_c,
+            "edit-session round-trip stability — model save vs reload-and-save must match"
+        );
+    }
+
     #[test]
     fn loading_v1_through_editor_model_save_matches_independent_migration() {
         use sfc_atomizer_core::project::{M1Block, ProjectV1};
