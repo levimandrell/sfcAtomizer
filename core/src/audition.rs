@@ -93,6 +93,21 @@ pub fn write_oracle_pcm_to_mono_wav(
     write_pcm16_mono_wav(out_path, &mono, sample_rate_hz)
 }
 
+/// Public-API wrapper around the internal `write_pcm16_mono_wav`
+/// header writer. Used by `preview-atom` (M2.2) and any caller that
+/// already holds decoded mono PCM and needs to emit a byte-stable
+/// 32 kHz WAV. Same RIFF/WAVE shape as the internal writer.
+pub fn write_pcm16_mono_wav_pub(
+    out_path: &Path,
+    samples: &[i16],
+    sample_rate_hz: u32,
+) -> Result<(), AuditionError> {
+    if sample_rate_hz == 0 || sample_rate_hz > 192_000 {
+        return Err(AuditionError::SampleRateOutOfRange(sample_rate_hz));
+    }
+    write_pcm16_mono_wav(out_path, samples, sample_rate_hz)
+}
+
 fn write_pcm16_mono_wav(
     out_path: &Path,
     samples: &[i16],

@@ -11,6 +11,7 @@ use sfc_atomizer_core::aram::{map_from_image, ARAM_LEN};
 use sfc_atomizer_core::asm::{
     sha256_hex, sha256_hex_file, AsarBackend, AssembleError, AssembleInput, AssemblerBackend,
 };
+use sfc_atomizer_core::atom::{render_to_brr, AtomBrrOutput, AtomKind, AtomSlot};
 use sfc_atomizer_core::audio::{decode_to_mono_pcm, probe, AudioDecodeError, AudioFormat};
 use sfc_atomizer_core::audition::export_decoded_brr_wav;
 use sfc_atomizer_core::brr_encoder::{encode as brr_encode, encode_looped, EncodeOptions};
@@ -29,15 +30,16 @@ use sfc_atomizer_core::project_v2::{
     load_project_versioned, migrate_from_v1, LoadedProject, MigrationReport,
 };
 use sfc_atomizer_core::report::{
-    AramKind, AramMapReport, AssembleReport, AssembleStatus, AudibleStatus, AudibleThresholds,
-    AudibleVerificationReport, AuditionReport, BrrEncodeBlock, BrrEncodeReport, BrrFixtureReport,
-    BundleStatus, BundleSteps, BundleSummary, CalibrationReport, CalibrationStatus,
-    CompileSfcReport, CompileSpcReport, DoctorReport, DoctorStatus, DoctorTools, FixtureSetInfo,
-    LoopCandidateJson, LoopFinderReport, M0Manifest, M1BundleSteps, M1BundleSummary, M1Manifest,
-    ObservedAudio, ObservedInfo, OracleInfo, ProvisionalTolerances, RenderInfo, RustInfo,
-    SfcFinding, SfcHeaderSummary, SfcModuleSummary, SfcModulesAudibleReport, SfcStructureReport,
-    SfcStructureStatus, SpcExportReport, SpcInitialState, SpcStatus, StepStatus, ToolStatus,
-    ValidationErrorJson, ValidationReport, ValidationStatus, SCHEMA_VERSION,
+    AramKind, AramMapReport, AssembleReport, AssembleStatus, AtomRenderReport, AudibleStatus,
+    AudibleThresholds, AudibleVerificationReport, AuditionReport, BrrEncodeBlock, BrrEncodeReport,
+    BrrFixtureReport, BundleStatus, BundleSteps, BundleSummary, CalibrationReport,
+    CalibrationStatus, CompileSfcReport, CompileSpcReport, DoctorReport, DoctorStatus, DoctorTools,
+    FixtureSetInfo, LoopCandidateJson, LoopFinderReport, M0Manifest, M1BundleSteps,
+    M1BundleSummary, M1Manifest, ObservedAudio, ObservedInfo, OracleInfo, ProvisionalTolerances,
+    RenderInfo, RustInfo, SfcFinding, SfcHeaderSummary, SfcModuleSummary, SfcModulesAudibleReport,
+    SfcStructureReport, SfcStructureStatus, SpcExportReport, SpcInitialState, SpcStatus,
+    StepStatus, ToolStatus, ValidationErrorJson, ValidationReport, ValidationStatus,
+    SCHEMA_VERSION,
 };
 use sfc_atomizer_core::sfc_export::{
     export_sfc, SfcExportInput, LOROM_HEADER_BASE, LOROM_HEADER_CHECKSUM_COMPLEMENT_OFFSET,
@@ -403,6 +405,46 @@ enum Command {
         #[arg(long)]
         migration_report: Option<PathBuf>,
     },
+    /// Render a single atom from a v2 project to BRR (M2.2).
+    ///
+    /// Loads + validates the v2 project, finds the atom by id,
+    /// runs the SPEC §16.9 render formula, encodes through the M1
+    /// BRR encoder, writes the BRR bytes and a structured
+    /// `AtomRenderReport`. Optional `--out-pcm` writes the raw
+    /// pre-encode PCM as s16le bytes.
+    ///
+    /// Exit codes: 0 success, 1 IO/parse, 2 v1 project / atom not
+    /// found / project invalid, 3 render error (currently impossible).
+    RenderAtom {
+        #[arg(long)]
+        project: PathBuf,
+        /// Atom id to render (must exist in `atom_pool[]`).
+        #[arg(long)]
+        atom: String,
+        #[arg(long)]
+        out_brr: Option<PathBuf>,
+        #[arg(long)]
+        out_report: Option<PathBuf>,
+        /// Optional: write raw pre-encode PCM as s16le bytes.
+        #[arg(long)]
+        out_pcm: Option<PathBuf>,
+    },
+    /// Decode a rendered atom and write a looped audition WAV (M2.2).
+    ///
+    /// Renders the atom (same path as `render-atom`), decodes the
+    /// BRR bytes, repeats the cycle to fill `--duration-seconds` at
+    /// 32 kHz, writes a 32 kHz mono PCM16 WAV. Engineer-side audition
+    /// only; not committed to the repo.
+    PreviewAtom {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        atom: String,
+        #[arg(long, default_value_t = 2.0_f64)]
+        duration_seconds: f64,
+        #[arg(long)]
+        out_wav: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -601,6 +643,25 @@ fn run(cli: Cli) -> Result<(), CliError> {
             out,
             migration_report,
         } => cmd_migrate_project(&r#in, &out, migration_report.as_deref()),
+        Command::RenderAtom {
+            project,
+            atom,
+            out_brr,
+            out_report,
+            out_pcm,
+        } => cmd_render_atom(
+            &project,
+            &atom,
+            out_brr.as_deref(),
+            out_report.as_deref(),
+            out_pcm.as_deref(),
+        ),
+        Command::PreviewAtom {
+            project,
+            atom,
+            duration_seconds,
+            out_wav,
+        } => cmd_preview_atom(&project, &atom, duration_seconds, out_wav.as_deref()),
     }
 }
 
@@ -2118,6 +2179,257 @@ fn cmd_migrate_project(
         v1.sample_pool.len(),
         v1.m1.active_sample_id,
         report_path.display()
+    );
+    Ok(())
+}
+
+/// `sfcwc render-atom --project <v2> --atom <id>` — SPEC §16.9
+/// atom render → M1.3 BRR encode chain. Writes the BRR bytes and a
+/// structured `AtomRenderReport` so downstream M2.3 pack consumes
+/// the deterministic output. Optional `--out-pcm` writes the raw
+/// pre-encode PCM as s16le bytes for offline inspection.
+fn cmd_render_atom(
+    project_path: &Path,
+    atom_id: &str,
+    out_brr: Option<&Path>,
+    out_report: Option<&Path>,
+    out_pcm: Option<&Path>,
+) -> Result<(), CliError> {
+    let v2 = match load_project_versioned(project_path) {
+        Ok(LoadedProject::V1(_)) => {
+            eprintln!(
+                "render-atom: {} is a v1 project; render-atom requires v2. Run `sfcwc migrate-project --in {} --out <v2>` first.",
+                project_path.display(),
+                project_path.display()
+            );
+            std::process::exit(2);
+        }
+        Ok(LoadedProject::V2(p)) => p,
+        Err(e) => {
+            eprintln!("render-atom: {e}");
+            std::process::exit(match e {
+                ProjectIoError::Validation(_) => 2,
+                _ => 1,
+            });
+        }
+    };
+    if let Err(verrors) = v2.validate() {
+        eprintln!(
+            "render-atom: project invalid — {} ({} error{})",
+            project_path.display(),
+            verrors.len(),
+            if verrors.len() == 1 { "" } else { "s" }
+        );
+        for e in &verrors {
+            eprintln!("  {} : {}", e.path, e.kind);
+        }
+        std::process::exit(2);
+    }
+
+    let atom = match v2.atom_pool.iter().find(|a| a.id == atom_id) {
+        Some(a) => a.clone(),
+        None => {
+            let available: Vec<&str> = v2.atom_pool.iter().map(|a| a.id.as_str()).collect();
+            eprintln!(
+                "render-atom: atom id {atom_id:?} not found in atom_pool. available: [{}]",
+                available.join(", ")
+            );
+            std::process::exit(2);
+        }
+    };
+
+    let render = render_to_brr(&atom)
+        .expect("AtomRenderError is uninhabited at M2.2 — render is infallible");
+
+    let out_brr_owned = out_brr
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("build/m2/atoms").join(format!("{atom_id}.brr")));
+    let out_report_owned = out_report.map(|p| p.to_path_buf()).unwrap_or_else(|| {
+        PathBuf::from("build/m2/atoms").join(format!("{atom_id}.atom-render-report.json"))
+    });
+
+    if let Some(parent) = out_brr_owned.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir(parent)?;
+        }
+    }
+    std::fs::write(&out_brr_owned, &render.brr_bytes).map_err(|source| CliError::Io {
+        path: out_brr_owned.clone(),
+        source,
+    })?;
+
+    if let Some(p) = out_pcm {
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() {
+                create_dir(parent)?;
+            }
+        }
+        let mut bytes = Vec::with_capacity(render.pcm.len() * 2);
+        for s in &render.pcm {
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        std::fs::write(p, &bytes).map_err(|source| CliError::Io {
+            path: p.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let report = atom_render_report(&atom, &render);
+    write_json(&out_report_owned, &report)?;
+
+    let normalize_label = if atom.render.normalize {
+        "true"
+    } else {
+        "false"
+    };
+    let partial_count = match &atom.kind {
+        AtomKind::AdditiveSingleCycleV0 { partials } => partials.len(),
+    };
+    eprintln!(
+        "render-atom: {} ({}) — cycle={}, partials={}, normalize={}, brr={} B (sha={}); -> {}",
+        atom.id,
+        atom.name,
+        atom.cycle_len_samples,
+        partial_count,
+        normalize_label,
+        render.brr_bytes.len(),
+        &render.brr_sha256,
+        out_brr_owned.display(),
+    );
+    Ok(())
+}
+
+fn atom_render_report(atom: &AtomSlot, render: &AtomBrrOutput) -> AtomRenderReport {
+    let (kind_str, partial_count) = match &atom.kind {
+        AtomKind::AdditiveSingleCycleV0 { partials } => (
+            "additive_single_cycle_v0".to_string(),
+            partials.len() as u32,
+        ),
+    };
+    AtomRenderReport {
+        schema_version: SCHEMA_VERSION,
+        report_type: AtomRenderReport::REPORT_TYPE.to_string(),
+        atom_id: atom.id.clone(),
+        atom_name: atom.name.clone(),
+        atom_kind: kind_str,
+        cycle_len_samples: atom.cycle_len_samples as u32,
+        partial_count,
+        normalize: atom.render.normalize,
+        atom_amplitude: atom.amplitude,
+        root_midi_note: atom.root_midi_note,
+        pcm_sha256: render.pcm_sha256.clone(),
+        brr_sha256: render.brr_sha256.clone(),
+        brr_bytes: render.brr_bytes.len() as u32,
+        encode_summary: render.encode_summary,
+    }
+}
+
+/// `sfcwc preview-atom --project <v2> --atom <id>` — render the atom,
+/// decode BRR, repeat to fill `--duration-seconds` at 32 kHz, write a
+/// 32 kHz mono PCM16 WAV. Engineer-side audition; not committed.
+fn cmd_preview_atom(
+    project_path: &Path,
+    atom_id: &str,
+    duration_seconds: f64,
+    out_wav: Option<&Path>,
+) -> Result<(), CliError> {
+    let v2 = match load_project_versioned(project_path) {
+        Ok(LoadedProject::V1(_)) => {
+            eprintln!(
+                "preview-atom: {} is a v1 project; preview-atom requires v2. Run `sfcwc migrate-project` first.",
+                project_path.display()
+            );
+            std::process::exit(2);
+        }
+        Ok(LoadedProject::V2(p)) => p,
+        Err(e) => {
+            eprintln!("preview-atom: {e}");
+            std::process::exit(match e {
+                ProjectIoError::Validation(_) => 2,
+                _ => 1,
+            });
+        }
+    };
+    if let Err(verrors) = v2.validate() {
+        eprintln!(
+            "preview-atom: project invalid — {} ({} error{})",
+            project_path.display(),
+            verrors.len(),
+            if verrors.len() == 1 { "" } else { "s" }
+        );
+        for e in &verrors {
+            eprintln!("  {} : {}", e.path, e.kind);
+        }
+        std::process::exit(2);
+    }
+    let atom = match v2.atom_pool.iter().find(|a| a.id == atom_id) {
+        Some(a) => a.clone(),
+        None => {
+            let available: Vec<&str> = v2.atom_pool.iter().map(|a| a.id.as_str()).collect();
+            eprintln!(
+                "preview-atom: atom id {atom_id:?} not found in atom_pool. available: [{}]",
+                available.join(", ")
+            );
+            std::process::exit(2);
+        }
+    };
+    let render = render_to_brr(&atom)
+        .expect("AtomRenderError is uninhabited at M2.2 — render is infallible");
+
+    // Decode the BRR back to PCM (one cycle), then repeat to fill
+    // the requested duration at 32 kHz.
+    let blocks: Vec<[u8; 9]> = render
+        .brr_bytes
+        .chunks_exact(9)
+        .map(|c| {
+            let mut b = [0u8; 9];
+            b.copy_from_slice(c);
+            b
+        })
+        .collect();
+    let mut state = sfc_atomizer_core::brr::BrrDecoderState::default();
+    let cycle = sfc_atomizer_core::brr::decode_blocks(&blocks, &mut state);
+    let target_samples = (duration_seconds * 32000.0).round().max(0.0) as usize;
+    let mut out = Vec::with_capacity(target_samples);
+    while out.len() < target_samples {
+        let remaining = target_samples - out.len();
+        if remaining >= cycle.len() {
+            out.extend_from_slice(&cycle);
+        } else {
+            out.extend_from_slice(&cycle[..remaining]);
+        }
+    }
+
+    let project_dir = project_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let wav_path = out_wav.map(|p| p.to_path_buf()).unwrap_or_else(|| {
+        project_dir
+            .join(".sfcwc-preview")
+            .join("atoms")
+            .join(format!("{atom_id}.audition.wav"))
+    });
+    if let Some(parent) = wav_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir(parent)?;
+        }
+    }
+    sfc_atomizer_core::audition::write_pcm16_mono_wav_pub(&wav_path, &out, 32000).map_err(|e| {
+        CliError::Io {
+            path: wav_path.clone(),
+            source: std::io::Error::other(format!("{e}")),
+        }
+    })?;
+
+    eprintln!(
+        "preview-atom: {} ({}) -> {} ({} s, {} samples, cycle={})",
+        atom.id,
+        atom.name,
+        wav_path.display(),
+        duration_seconds,
+        out.len(),
+        cycle.len(),
     );
     Ok(())
 }
