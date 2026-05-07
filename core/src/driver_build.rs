@@ -36,10 +36,14 @@ use thiserror::Error;
 /// runtime.
 pub const DRIVER_ASM_SRC: &str = include_str!("../fixtures/asm/m1_sample_basic.asm");
 
+/// Embedded M2.5 `multi_voice_atom` driver source (SPEC §20.2).
+pub const DRIVER_ASM_SRC_M2: &str = include_str!("../fixtures/asm/m2_multi_voice_atom.asm");
+
 use crate::asm::{sha256_hex, AsarBackend, AssembleError, AssembleInput, AssemblerBackend};
 use crate::packer::DRIVER_CODE_BUDGET_M1;
 use crate::pitch::{pitch_register, split_pitch};
 use crate::project::{Envelope, ProjectV1};
+use crate::project_v2::ProjectV2;
 use crate::report::AramMapReport;
 
 /// Sentinel pattern emitted by `m1_sample_basic.asm` after the
@@ -433,6 +437,259 @@ pub fn workspace_driver_asm_path() -> PathBuf {
         .join("fixtures")
         .join("asm")
         .join("m1_sample_basic.asm")
+}
+
+// =============================================================================
+// M2.5 — multi_voice_atom driver build
+// =============================================================================
+
+/// Per-project constants consumed by `m2_multi_voice_atom.asm`.
+/// Mirrors the [`DriverConstants`] M1 set plus the M2 voice-setup-
+/// table and sequence addresses (filled by the packer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriverConstantsM2 {
+    pub master_voll: u8,
+    pub master_volr: u8,
+    pub src_dir_page: u8,
+    pub echo_efb: u8,
+    pub echo_evoll: u8,
+    pub echo_evolr: u8,
+    pub echo_eon: u8,
+    pub echo_esa: u8,
+    pub echo_edl: u8,
+    pub echo_fir: [u8; 8],
+    pub flg_running: u8,
+    pub status_flags_initial: u8,
+    pub voice_setup_addr: u16,
+    pub sequence_addr: u16,
+    /// Bit-per-voice mask of `sample_sustain` tracks. Issued by the
+    /// driver as a single KON write at end of init so sample voices
+    /// start playing without a bytecode KON. `atom_sequence` tracks
+    /// are KON'd by their bytecode's first opcode and are NOT in
+    /// this mask.
+    pub init_kon_mask: u8,
+}
+
+/// Inputs for `build_m2`. The packer's
+/// [`AramMapReport`] (post-`pack_v2`) carries the
+/// `voice_setup_table` + `sequence_data` regions; the addresses
+/// are extracted by the caller and threaded through here so the
+/// constants .inc can hard-code them.
+#[derive(Debug, Clone)]
+pub struct DriverBuildInputM2<'a> {
+    pub project: &'a ProjectV2,
+    pub map_report: &'a AramMapReport,
+    pub voice_setup_addr: u16,
+    pub sequence_addr: u16,
+    pub source_override: Option<&'a str>,
+    pub working_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct DriverBuildOutputM2 {
+    pub driver_code: Vec<u8>,
+    pub constants_inc_path: PathBuf,
+    pub backend_version: String,
+    pub driver_code_sha256: String,
+    pub voice_setup_addr: u16,
+    pub sequence_addr: u16,
+}
+
+/// Compute the M2 driver constants from the project + packed map.
+pub fn compute_constants_m2(
+    project: &ProjectV2,
+    map_report: &AramMapReport,
+    voice_setup_addr: u16,
+    sequence_addr: u16,
+) -> Result<DriverConstantsM2, DriverBuildError> {
+    let src_dir = map_report
+        .source_directory
+        .as_ref()
+        .ok_or(DriverBuildError::SourceDirectoryMissing)?;
+    let src_dir_page = (src_dir.start_addr >> 8) as u8;
+
+    let me = &project.master_echo;
+    // M2 echo policy mirrors M1: per-sample echo gating writes
+    // VxECHO via the SET_VOL/KON path; the master echo registers
+    // are programmed at init from the master_echo block.
+    let any_echo_voice = project.sample_pool.iter().any(|s| s.playback.echo);
+    let echo_eon = if any_echo_voice && me.enabled {
+        // bit per active echo voice; conservative and simple at M2.5.
+        let mut bits: u8 = 0;
+        for (i, s) in project.sample_pool.iter().enumerate() {
+            if s.playback.echo && i < 8 {
+                bits |= 1 << i;
+            }
+        }
+        bits
+    } else {
+        0
+    };
+    let echo_esa = match map_report.echo.as_ref() {
+        Some(e) if e.enabled => e.esa,
+        _ => 0,
+    };
+    let echo_edl = me.edl;
+    let echo_fir: [u8; 8] = [
+        me.fir[0] as u8,
+        me.fir[1] as u8,
+        me.fir[2] as u8,
+        me.fir[3] as u8,
+        me.fir[4] as u8,
+        me.fir[5] as u8,
+        me.fir[6] as u8,
+        me.fir[7] as u8,
+    ];
+    let flg_running = if me.enabled {
+        0x00
+    } else {
+        FLG_ECHO_WRITE_DISABLE
+    };
+    // M2 boots with both voice-active bits clear; the sequence's
+    // KON opcode flips them.
+    let mut status_flags_initial: u8 = 0x00;
+    if me.enabled {
+        status_flags_initial |= 0x04; // bit 2 = echo_enabled
+    }
+    // sample_sustain tracks need driver-init KON; atom_sequence
+    // voices are KON'd by their bytecode's first opcode.
+    let mut init_kon_mask: u8 = 0;
+    for t in &project.tracks {
+        if let crate::project_v2::TrackKind::SampleSustain { .. } = t.kind {
+            if t.voice < 2 {
+                init_kon_mask |= 1 << t.voice;
+            }
+        }
+    }
+    Ok(DriverConstantsM2 {
+        master_voll: MASTER_VOLUME_M1,
+        master_volr: MASTER_VOLUME_M1,
+        src_dir_page,
+        echo_efb: me.efb as u8,
+        echo_evoll: me.evol_l as u8,
+        echo_evolr: me.evol_r as u8,
+        echo_eon,
+        echo_esa,
+        echo_edl,
+        echo_fir,
+        flg_running,
+        status_flags_initial,
+        voice_setup_addr,
+        sequence_addr,
+        init_kon_mask,
+    })
+}
+
+/// Render the asar `.inc` file for the M2 driver. Format mirrors
+/// `m1_sample_basic.asm`'s `.inc` shape: one `<name> = $hh` per
+/// constant, with two-byte addresses split into `_lo` / `_hi`
+/// halves so the .asm can use them with `mov #` immediates.
+pub fn render_constants_inc_m2(c: &DriverConstantsM2, project: &ProjectV2) -> String {
+    let mut s = String::with_capacity(2048);
+    s.push_str("; Auto-generated by core::driver_build for project \"");
+    s.push_str(&project.project.name);
+    s.push_str("\" (M2 multi_voice_atom)\n\n");
+    push_eq(&mut s, "master_voll", c.master_voll);
+    push_eq(&mut s, "master_volr", c.master_volr);
+    push_eq(&mut s, "src_dir_page", c.src_dir_page);
+    push_eq(&mut s, "echo_efb", c.echo_efb);
+    push_eq(&mut s, "echo_evoll", c.echo_evoll);
+    push_eq(&mut s, "echo_evolr", c.echo_evolr);
+    push_eq(&mut s, "echo_eon", c.echo_eon);
+    push_eq(&mut s, "echo_esa", c.echo_esa);
+    push_eq(&mut s, "echo_edl", c.echo_edl);
+    for (i, f) in c.echo_fir.iter().enumerate() {
+        push_eq(&mut s, &format!("echo_fir_{i}"), *f);
+    }
+    push_eq(&mut s, "flg_running", c.flg_running);
+    push_eq(&mut s, "status_flags_initial", c.status_flags_initial);
+    push_eq(&mut s, "init_kon_mask", c.init_kon_mask);
+    push_eq(
+        &mut s,
+        "voice_setup_addr_lo",
+        (c.voice_setup_addr & 0xFF) as u8,
+    );
+    push_eq(
+        &mut s,
+        "voice_setup_addr_hi",
+        (c.voice_setup_addr >> 8) as u8,
+    );
+    // sequence_addr points at the SEQ2 region START (header included).
+    // Driver init wants to start reading at the payload byte, so the
+    // .inc emits `sequence_addr` shifted past the 8-byte header.
+    let payload = c.sequence_addr.wrapping_add(8);
+    push_eq(&mut s, "sequence_addr_lo", (payload & 0xFF) as u8);
+    push_eq(&mut s, "sequence_addr_hi", (payload >> 8) as u8);
+    s
+}
+
+/// Assemble the M2.5 driver. Same shape as [`build`] for M1 — the
+/// caller controls the working dir and may inject a source override.
+pub fn build_m2(input: DriverBuildInputM2<'_>) -> Result<DriverBuildOutputM2, DriverBuildError> {
+    let constants = compute_constants_m2(
+        input.project,
+        input.map_report,
+        input.voice_setup_addr,
+        input.sequence_addr,
+    )?;
+    let inc_text = render_constants_inc_m2(&constants, input.project);
+
+    let constants_inc_path = input.working_dir.join("m2_constants.inc");
+    std::fs::write(&constants_inc_path, &inc_text).map_err(|source| DriverBuildError::Io {
+        path: constants_inc_path.clone(),
+        source,
+    })?;
+
+    let asm_dest = input.working_dir.join("m2_multi_voice_atom.asm");
+    let asm_src_text = input.source_override.unwrap_or(DRIVER_ASM_SRC_M2);
+    std::fs::write(&asm_dest, asm_src_text).map_err(|source| DriverBuildError::Io {
+        path: asm_dest.clone(),
+        source,
+    })?;
+
+    let backend = AsarBackend::from_resolution()?;
+    let backend_version = backend.version().unwrap_or_else(|_| "unknown".to_string());
+    let image_path = input.working_dir.join("m2_driver.aram.bin");
+    let asm_input =
+        AssembleInput::for_spc700_aram(asm_dest, image_path.clone(), input.working_dir.clone());
+    backend.assemble(&asm_input)?;
+
+    let image = std::fs::read(&image_path).map_err(|source| DriverBuildError::Io {
+        path: image_path.clone(),
+        source,
+    })?;
+
+    let driver_start: usize = 0x0200;
+    let sentinel_offset = find_sentinel(&image, driver_start)
+        .ok_or(DriverBuildError::SentinelMissing(DRIVER_END_SENTINEL))?;
+    let driver_code = image[driver_start..sentinel_offset].to_vec();
+    if driver_code.len() as u32 > DRIVER_CODE_BUDGET_M1 {
+        return Err(DriverBuildError::OverBudget(
+            driver_code.len() as u32,
+            DRIVER_CODE_BUDGET_M1,
+        ));
+    }
+    // Sentinel collision scan past sentinel + 4 to scan_end.
+    let after_sentinel = sentinel_offset + DRIVER_END_SENTINEL.len();
+    let scan_end = 0xFFC0;
+    for (i, &b) in image[after_sentinel..scan_end].iter().enumerate() {
+        if b != 0 {
+            return Err(DriverBuildError::SentinelCollision(
+                DRIVER_END_SENTINEL,
+                after_sentinel + i,
+            ));
+        }
+    }
+
+    let driver_code_sha256 = sha256_hex(&driver_code);
+    Ok(DriverBuildOutputM2 {
+        driver_code,
+        constants_inc_path,
+        backend_version,
+        driver_code_sha256,
+        voice_setup_addr: input.voice_setup_addr,
+        sequence_addr: input.sequence_addr,
+    })
 }
 
 #[cfg(test)]
