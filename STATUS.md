@@ -2,33 +2,130 @@
 
 ## Current milestone
 
-**M2.1 — Project schema v2 implementation shipped.**
-`ProjectV2::validate` covers SPEC §16.9 rules 1–25 (carry
-forward from v1 via the new `validate_sample_slot` free
-function) plus 26–57 (schema_version, the
-`sample_basic`/`multi_voice_atom` profile coupling, atom
-pool, atom sequences, tracks, the m2 block, and the
-sample-only-vs-multi-voice cross-cuts). `migrate_from_v1`
-implements §16.10 as a pure transformation; load-time silent
-upgrades remain forbidden. ProjectV2 has its own
-load_from_path / save_to_path (with pre-save validation).
-A `LoadedProject` enum + `load_project_versioned` dispatcher
-routes by `schema_version`. The host CLI gains
-`sfcwc migrate-project --in <v1> --out <v2>` with a
-structured `MigrationReport` and exit codes 0/1/2/3. The
-GUI dispatches Open through the versioned loader, exposes a
-File → Migrate v1 → v2 menu item, and renders read-only
-v2 atom_pool / atom_sequences / tracks panels.
-Sample-only-equivalent v2 projects compile through the v1
-pipeline via an in-memory v1 shim and produce bit-identical
-ARAM / SPC / SFC output; v2 with atom data errors with the
-M2.5-pending message.
+**M2.2 — Synth atom v0 compiler shipped.** SPEC §16.9 render
+formula implemented in `core::atom::render_to_pcm` (f64 sin
++ round-half-away-from-zero rounding, distinct from the
+round-half-up used in pitch-register conversion). Chained
+through the existing M1.3 BRR encoder via
+`core::atom::render_to_brr`, which forces filter 0 on
+block 0 (= loop entry block for single-cycle atoms) for
+loop safety and emits SHA-256 over both the raw PCM bytes
+and the encoded BRR bytes. New `core::report::AtomRenderReport`
+captures the full encode summary plus PCM/BRR SHAs.
+Two new CLI commands: `sfcwc render-atom --project <v2>
+--atom <id>` writes the BRR bytes and structured report
+under `build/m2/atoms/`; `sfcwc preview-atom` decodes the
+BRR back through the M0.2 decoder and writes a 32 kHz mono
+PCM16 WAV looped to a configurable duration for engineer-
+side audition. M2 atom-render baselines locked: BRR SHAs
+for the canonical 64- and 128-sample sine atoms (amp=0.75,
+SPEC §16.9 example), and the loop-click scores at those
+cycle lengths (1197 and 2407 LSBs respectively — properties
+of the discrete-cycle wrap, not encoder defects).
 
-**M2.2 next.** Synth atom v0 compiler — render PCM cycle
-per SPEC §16.9 atom-render formula, encode through the
-existing M1 BRR encoder. PM to brief.
+**M2.3 next.** Multi-source ARAM packer + capability
+manifest — extend the M1.4 packer to consume
+`build/m2/atoms/*.brr` alongside the existing sample BRRs
+and emit a capability manifest. PM to brief.
 
 ## Last pass
+
+**Pass M2.2 — Synth atom v0 compiler.**
+
+- **Phase A (`render_to_pcm`):** SPEC §16.9 single-cycle
+  additive synth implemented in `core::atom`. f64 throughout
+  (f32 partial sums aren't deterministic across architectures).
+  Round-half-AWAY-from-zero per the spec — for `s = -0.5`,
+  rounds to `-1`, not `0` (the round-half-up the pitch
+  register uses). Module comments document the distinction.
+- **Phase B (`render_to_brr`):** Chains `render_to_pcm`
+  through `encode_looped` with `loop_entry_block_index =
+  Some(0)` so the BRR's loop-flag is set on the final block
+  and the S-DSP returns to block 0 on KOFF. Block 0 is also
+  the first block, so `force_filter_0_first_block` covers
+  both the kick-on safety and the loop-entry filter-0
+  requirement at once. SHA-256 over PCM bytes (interpreted as
+  s16 LE) and BRR bytes for downstream determinism gates.
+  `AtomRenderError` reserved as an empty enum (render is
+  pure-math infallible at M2; BRR encode is internally
+  well-formed for valid atoms; future variants land alongside
+  M3+ phase rotation / spectral scoring).
+- **Phase C (`AtomRenderReport`):** New report type in
+  `core::report` with the standard `{ schema_version,
+  report_type }` envelope plus PCM/BRR SHAs, the embedded
+  `EncodeSummary` (M1.3 type, now `Serialize/Deserialize`),
+  and atom metadata. Round-trip tests cover populated +
+  minimal shapes.
+- **Phase D (`sfcwc render-atom`):** New CLI command. Loads
+  the project via `load_project_versioned`, rejects v1 with
+  the migrate-project hint, validates v2, finds the atom by
+  `--atom <id>` (lists available IDs on miss), runs
+  `render_to_brr`, writes BRR bytes to `build/m2/atoms/<id>.brr`
+  and the structured report next to it. Optional `--out-pcm`
+  writes raw s16le PCM. Exit codes: 0 success, 1 IO/parse,
+  2 v1/atom-not-found/invalid, 3 render error (currently
+  impossible).
+- **Phase E (`sfcwc preview-atom`):** New CLI command.
+  Renders the atom (same path as `render-atom`), decodes the
+  BRR via `core::brr::decode_blocks`, repeats the cycle to
+  fill `--duration-seconds` at 32 kHz, writes a 32 kHz mono
+  PCM16 WAV under `<project_dir>/.sfcwc-preview/atoms/<id>.audition.wav`.
+  Engineer-side audition only; not committed to the repo.
+- **Phase F (tests):** 17 new core/lib unit tests covering
+  the SPEC §16.9 render formula (single fundamental, phase
+  offset, two-partial sum, normalize-then-scale, round-half-
+  away-from-zero on negative half-values, all three cycle
+  lengths, deterministic across calls), the BRR chain
+  (round-trip envelope at M1-reference amp, filter-0-forced
+  on block 0, encoded-byte-count = cycle/16*9, loop-click
+  baseline match for both 64- and 128-sample, render-to-BRR
+  determinism, distinct SHAs across cycle lengths, locked
+  PCM/BRR SHA baselines). 2 new `AtomRenderReport`
+  round-trip tests. 4 new core/integration tests in
+  `core/tests/atom_render.rs`. 6 new CLI integration tests
+  in `app/tests/cli.rs` (happy path, deterministic across
+  runs, distinct 64-vs-128 BRR, v1 project errors with
+  migrate hint, missing atom id lists available, preview
+  WAV writes). **422 tests across the workspace; all
+  green.** (was 395; +27, plus 1 ignored sentinel for
+  printing fresh baselines.)
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green.
+
+### M2 atom-render baselines (post-M2.2)
+
+Canonical sine atoms (`amplitude=0.75` per SPEC §16.9
+example, `partial.amplitude=1.0`, `phase_cycles=0.0`,
+`force_filter_0_first_block=true`):
+
+```
+M2_ATOM_128_SINE_PCM_SHA256       = 7f9b274e9fa1c7088ba4d125a2899293bae79115bdd20824b2afb54116f9789a
+M2_ATOM_128_SINE_BRR_SHA256       = 348c791449916e1f9169d0e229cd79bf97967b19e22db3c4a5be7dc9c69ac876
+M2_ATOM_128_SINE_BRR_BYTES        = 72                                ; 8 BRR blocks
+M2_ATOM_64_SINE_PCM_SHA256        = 0638ddfe8a2a8fb4c98ff6fed37ff3475c42dd257df893eca9e836d09d3e6565
+M2_ATOM_64_SINE_BRR_SHA256        = 78da253b65a6a8d067102fe30ed90353c25b6981a71e3cafc6dd4f3041822e96
+M2_ATOM_64_SINE_BRR_BYTES         = 36                                ; 4 BRR blocks
+M2_ATOM_128_SINE_LOOP_CLICK_SCORE = 1197                              ; |first_loop_decoded - last_decoded|,
+M2_ATOM_64_SINE_LOOP_CLICK_SCORE  = 2407                              ; M2.2 BRR encoder, force_filter_0_first_block
+```
+
+Loop-click scores are properties of the discrete-cycle wrap
+(sample N-1 of a discrete sine `sin(2πk/N)` is non-zero, so
+the wrap from N-1 back to 0 creates a non-zero
+discontinuity). Lower than the M1 sample baseline
+(`M1_LOOP_CLICK_SCORE = 795`) only because that fixture's
+last sample lands closer to zero by coincidence; not a
+quality-comparison baseline. M2.5/M2.6 oracle-loop-click
+metric will gate against these locked values.
+
+Locked by the in-module `m2_atom_render_baselines_locked`
+test plus `core/tests/atom_render.rs::render_canonical_atoms_match_locked_sha_baselines`.
+Any future change to the render formula, the M1 BRR encoder,
+or the rounding mode that alters these SHAs is a
+producer-side regression and must be flagged.
+
+## Previous passes
 
 **Pass M2.1 — Project schema v2 implementation + audition cleanup.**
 
@@ -1137,6 +1234,38 @@ these SHAs is a producer-side regression and must be flagged.
   migrated sample-only v2 produces the same ARAM / SPC SHAs as
   compile-spc on the original v1. Enforced by the
   `cli_migrate_project_then_compile_spc_matches_v1_baseline` test.
+- **Atom render uses round-half-AWAY-from-zero** (M2.2): SPEC §16.9
+  rounding mode for atom PCM quantisation. Differs from the
+  round-half-up used in pitch-register conversion (§16.7); for
+  `s = -0.5` the atom path rounds to `-1`, the pitch-register path
+  rounds to `0`. Both modes are correct in their context; the
+  distinction matters only when a future caller picks the wrong
+  one. Locked by the `render_round_half_away_from_zero_negative`
+  test.
+- **Single-cycle atoms have block 0 = first block = loop entry**
+  (M2.2): the `loop_entry_block_index` passed to the M1 BRR
+  encoder is `Some(0)`, and `force_filter_0_first_block` covers
+  both the kick-on safety AND the loop-entry filter-0 requirement
+  in one pass. Encoder runs at filter 0 on block 0 unconditionally
+  for atoms; the filter freedom on subsequent blocks is preserved.
+- **`render-atom` emits to `build/m2/atoms/<atom_id>.brr`** (M2.2):
+  default output path; M2.3 pack will consume these alongside
+  the existing M1 sample BRRs. `--out-brr` overrides; `--out-pcm`
+  writes raw s16le bytes for offline inspection.
+- **Audition WAVs under `<project_dir>/.sfcwc-preview/atoms/`**
+  (M2.2): not committed to the repo. PM doesn't audition this
+  pass — the deterministic SHAs are the primary gate.
+- **`AtomRenderError` is uninhabited at M2** (M2.2): atom render
+  is pure-math infallible (no NaN paths after validated input;
+  the optional normalise divide is guarded against zero-max), and
+  the M1 BRR encoder is internally well-formed at `loop_start=0`
+  for the validated 64/128/256 cycle lengths. Future M3+ work —
+  phase rotation, spectral scoring, pre-emphasis — may add
+  variants.
+- **`f64` throughout the atom render** (M2.2): `f32` accumulating
+  partial sums isn't precise enough to make the output deterministic
+  across architectures. Locked by the
+  `render_deterministic_across_calls` test.
 - **License model:** Apache-2.0 for the host application source; 0BSD for
   generated outputs (`.spc`, `.sfc`, driver/module blobs); snes_spc kept
   out-of-process to avoid LGPL propagation. See `LICENSING.md`.
