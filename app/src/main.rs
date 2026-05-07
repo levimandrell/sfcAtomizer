@@ -5559,7 +5559,6 @@ fn cmd_verify_spc_audible(
 /// difference is the report shape (left + right + optional pre/
 /// post windows for source-step observability).
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn cmd_verify_spc_stereo(
     spc_path: &Path,
     frames: u32,
@@ -5689,12 +5688,8 @@ fn cmd_verify_spc_stereo(
                 create_dir(parent)?;
             }
         }
-        sfc_atomizer_core::audition::write_oracle_pcm_to_stereo_wav(
-            wav_path,
-            &pcm_bytes,
-            32_000,
-        )
-        .map_err(|e| CliError::Io {
+        sfc_atomizer_core::audition::write_oracle_pcm_to_stereo_wav(wav_path, &pcm_bytes, 32_000)
+            .map_err(|e| CliError::Io {
             path: wav_path.to_path_buf(),
             source: std::io::Error::other(format!("write stereo WAV: {e}")),
         })?;

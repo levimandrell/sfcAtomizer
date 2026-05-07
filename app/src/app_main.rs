@@ -11,6 +11,8 @@
 //!
 //! Optional CLI: `sfcwc-app <path>` opens that project on launch.
 
+mod v2_editor;
+
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
@@ -59,13 +61,13 @@ fn main() -> Result<(), eframe::Error> {
 
 #[derive(Default)]
 struct SfcwcApp {
-    /// Loaded v1 project. Mutually exclusive with [`Self::loaded_v2`].
+    /// Loaded v1 project. Mutually exclusive with [`Self::v2_editor`].
     project: Option<ProjectV1>,
-    /// Loaded v2 project (M2.1). Mutually exclusive with
-    /// [`Self::project`]. The two-variant store keeps the v1 surface
-    /// untouched while letting v2 land in the same window; v2 atom /
-    /// sequence panels are read-only at M2.1 (editing arrives M2.7).
-    loaded_v2: Option<ProjectV2>,
+    /// Loaded v2 project + editor state (M2.7). Mutually exclusive
+    /// with [`Self::project`]. Wraps `ProjectV2` plus selection
+    /// bookkeeping + dirty flag + cached validation; the read-only
+    /// path uses `loaded_v2()` to peek at the inner project.
+    v2_editor: Option<v2_editor::V2EditorModel>,
     project_path: Option<PathBuf>,
     validation_errors: Vec<ValidationError>,
     selected_sample_id: Option<String>,
@@ -137,7 +139,7 @@ impl SfcwcApp {
             Ok(LoadedProject::V1(p)) => {
                 let errors = p.validate().err().unwrap_or_default();
                 self.project = Some(p);
-                self.loaded_v2 = None;
+                self.v2_editor = None;
                 self.project_path = Some(path.to_path_buf());
                 self.validation_errors = errors;
                 self.selected_sample_id = None;
@@ -146,7 +148,7 @@ impl SfcwcApp {
             }
             Ok(LoadedProject::V2(p)) => {
                 let errors = p.validate().err().unwrap_or_default();
-                self.loaded_v2 = Some(p);
+                self.v2_editor = Some(v2_editor::V2EditorModel::new(p));
                 self.project = None;
                 self.project_path = Some(path.to_path_buf());
                 self.validation_errors = errors;
@@ -156,7 +158,7 @@ impl SfcwcApp {
             }
             Err(e) => {
                 self.project = None;
-                self.loaded_v2 = None;
+                self.v2_editor = None;
                 self.project_path = None;
                 self.validation_errors = Vec::new();
                 self.status_message = Some(format!("load failed: {e}"));
@@ -174,7 +176,7 @@ impl SfcwcApp {
         if let Some(p) = &self.project {
             return Some(p.clone());
         }
-        let v2 = self.loaded_v2.as_ref()?;
+        let v2 = self.v2_editor.as_ref().map(|m| &m.project)?;
         let any_atom_data = !v2.atom_pool.is_empty() || !v2.atom_sequences.is_empty();
         let only_sample_voice_0 = !v2.tracks.is_empty()
             && v2
@@ -207,11 +209,18 @@ impl SfcwcApp {
     fn active_sample_pool(&self) -> &[SampleSlot] {
         if let Some(p) = &self.project {
             &p.sample_pool
-        } else if let Some(v2) = &self.loaded_v2 {
-            &v2.sample_pool
+        } else if let Some(m) = &self.v2_editor {
+            &m.project.sample_pool
         } else {
             &[]
         }
+    }
+
+    /// M2.7: read-only accessor for the active v2 project. Returns
+    /// the editor model's underlying [`ProjectV2`] when one is
+    /// loaded, otherwise `None`.
+    fn loaded_v2(&self) -> Option<&ProjectV2> {
+        self.v2_editor.as_ref().map(|m| &m.project)
     }
 
     /// Synchronously decode + encode every sample, run the packer, and
@@ -223,7 +232,7 @@ impl SfcwcApp {
             Some(p) => p,
             None => {
                 self.aram_meter = None;
-                self.aram_meter_error = if self.loaded_v2.is_some() {
+                self.aram_meter_error = if self.v2_editor.is_some() {
                     Some(
                         "ARAM meter requires a sample-only project; v2 with atom data \
                          needs M2.5 driver to compile."
@@ -309,7 +318,7 @@ impl SfcwcApp {
             }
             return;
         }
-        if let Some(v2) = self.loaded_v2.as_ref() {
+        if let Some(v2) = self.v2_editor.as_ref().map(|m| &m.project) {
             match v2.save_to_path(path) {
                 Ok(()) => {
                     self.project_path = Some(path.to_path_buf());
@@ -330,7 +339,7 @@ impl SfcwcApp {
                 self.project_path = Some(path.to_path_buf());
                 self.validation_errors = template.validate().err().unwrap_or_default();
                 self.project = Some(template);
-                self.loaded_v2 = None;
+                self.v2_editor = None;
                 self.selected_sample_id = None;
                 self.status_message = Some(format!("created {}", path.display()));
                 self.recompute_aram_meter();
@@ -383,12 +392,12 @@ impl SfcwcApp {
             let _ = std::fs::write(&report_path, format!("{json}\n"));
         }
         self.project = None;
-        self.loaded_v2 = Some(v2);
+        self.v2_editor = Some(v2_editor::V2EditorModel::new(v2));
         self.project_path = Some(out_path.to_path_buf());
         self.validation_errors = self
-            .loaded_v2
+            .v2_editor
             .as_ref()
-            .and_then(|v| v.validate().err())
+            .map(|m| m.validation.clone())
             .unwrap_or_default();
         self.selected_sample_id = None;
         self.status_message = Some(format!(
@@ -456,7 +465,7 @@ impl SfcwcApp {
                         self.open_modal.visible = true;
                         ui.close();
                     }
-                    let any_loaded = self.project.is_some() || self.loaded_v2.is_some();
+                    let any_loaded = self.project.is_some() || self.v2_editor.is_some();
                     let save_enabled = any_loaded && self.project_path.is_some();
                     if ui
                         .add_enabled(save_enabled, egui::Button::new("Save Project"))
@@ -563,7 +572,7 @@ impl SfcwcApp {
             .show(ctx, |ui| {
                 ui.heading("Sample Pool");
                 ui.separator();
-                let any_loaded = self.project.is_some() || self.loaded_v2.is_some();
+                let any_loaded = self.project.is_some() || self.v2_editor.is_some();
                 if !any_loaded {
                     ui.vertical_centered(|ui| {
                         ui.add_space(12.0);
@@ -576,7 +585,7 @@ impl SfcwcApp {
                     ui.vertical_centered(|ui| {
                         ui.add_space(12.0);
                         ui.label("No samples imported yet.");
-                        if self.loaded_v2.is_some() {
+                        if self.v2_editor.is_some() {
                             ui.label("(v2 sample-pool editing lands at M2.7.)");
                         } else {
                             ui.label("(Import via File → Import Audio…)");
@@ -608,7 +617,7 @@ impl SfcwcApp {
             ui.horizontal(|ui| {
                 let schema_label = if self.project.is_some() {
                     Some("Schema v1")
-                } else if self.loaded_v2.is_some() {
+                } else if self.v2_editor.is_some() {
                     Some("Schema v2")
                 } else {
                     None
@@ -657,8 +666,6 @@ impl SfcwcApp {
         let last_sfc_verify_summary = self.last_sfc_verify_summary.clone();
         let last_sfc_verify_ok = self.last_sfc_verify_ok;
         let has_compiled_sfc = self.last_compiled_sfc.is_some();
-        let has_v2 = self.loaded_v2.is_some();
-        let v2_clone = self.loaded_v2.clone();
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(project) = self.project.as_mut() {
                 match selected.as_deref() {
@@ -691,37 +698,36 @@ impl SfcwcApp {
                 }
                 return;
             }
-            if has_v2 {
-                if let Some(v2) = v2_clone.as_ref() {
-                    match selected.as_deref() {
-                        Some(id) => match v2.sample_pool.iter().find(|s| s.id == id) {
-                            Some(s) => draw_sample_detail_readonly(ui, s),
-                            None => {
-                                ui.weak(format!("(selected sample {id} not in pool)"));
-                            }
-                        },
+            if let Some(model) = self.v2_editor.as_mut() {
+                match selected.as_deref() {
+                    Some(id) => match model.project.sample_pool.iter().find(|s| s.id == id) {
+                        Some(s) => draw_sample_detail_readonly(ui, s),
                         None => {
-                            project_resp = draw_v2_project_detail(
-                                ui,
-                                V2ProjectDetailState {
-                                    project: v2,
-                                    aram_meter: aram_meter.as_ref(),
-                                    aram_meter_error: aram_meter_error.as_deref(),
-                                    last_compile_summary: last_compile_summary.as_deref(),
-                                    last_audible_summary: last_audible_summary.as_deref(),
-                                    last_audible_ok,
-                                    has_compiled_spc,
-                                    last_sfc_compile_summary: last_sfc_compile_summary.as_deref(),
-                                    last_sfc_verify_summary: last_sfc_verify_summary.as_deref(),
-                                    last_sfc_verify_ok,
-                                    has_compiled_sfc,
-                                },
-                            );
+                            ui.weak(format!("(selected sample {id} not in pool)"));
                         }
+                    },
+                    None => {
+                        project_resp = draw_v2_project_detail(
+                            ui,
+                            model,
+                            V2ProjectDetailState {
+                                aram_meter: aram_meter.as_ref(),
+                                aram_meter_error: aram_meter_error.as_deref(),
+                                last_compile_summary: last_compile_summary.as_deref(),
+                                last_audible_summary: last_audible_summary.as_deref(),
+                                last_audible_ok,
+                                has_compiled_spc,
+                                last_sfc_compile_summary: last_sfc_compile_summary.as_deref(),
+                                last_sfc_verify_summary: last_sfc_verify_summary.as_deref(),
+                                last_sfc_verify_ok,
+                                has_compiled_sfc,
+                            },
+                        );
                     }
                 }
                 return;
             }
+
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
                 ui.label("Open a project from the File menu.");
@@ -755,6 +761,119 @@ impl SfcwcApp {
         }
         if project_resp.verify_sfc {
             self.do_verify_sfc();
+        }
+        if project_resp.save_v2 {
+            self.do_save_v2();
+        }
+        if let Some(profile) = project_resp.requested_profile.clone() {
+            self.do_switch_profile(&profile);
+        }
+        if let Some(atom_idx) = project_resp.preview_atom {
+            self.do_preview_atom(atom_idx);
+        }
+    }
+
+    fn do_save_v2(&mut self) {
+        let Some(model) = self.v2_editor.as_mut() else {
+            return;
+        };
+        let Some(path) = self.project_path.clone() else {
+            self.status_message = Some("save: no project path".to_string());
+            return;
+        };
+        match model.save_to(&path) {
+            Ok(()) => {
+                self.validation_errors = model.validation.clone();
+                self.status_message = Some(format!("saved {}", path.display()));
+                self.recompute_aram_meter();
+            }
+            Err(e) => {
+                self.status_message = Some(format!("save failed: {e}"));
+            }
+        }
+    }
+
+    /// Profile switch handler. The brief calls for a confirmation
+    /// dialog when going to `sample_basic` with non-empty atom data.
+    /// M2.7 GUI implements the *effect* directly and surfaces the
+    /// destructive-clear summary in the status bar; a modal popup
+    /// can come at M2.8 if user feedback wants it.
+    fn do_switch_profile(&mut self, new_profile: &str) {
+        let Some(model) = self.v2_editor.as_mut() else {
+            return;
+        };
+        let effect = model.switch_profile(new_profile);
+        match effect {
+            v2_editor::SwitchProfileEffect::NoChange => {}
+            v2_editor::SwitchProfileEffect::Additive => {
+                self.status_message =
+                    Some(format!("driver.profile → {new_profile} (no data cleared)"));
+            }
+            v2_editor::SwitchProfileEffect::DestructiveClear {
+                atoms_cleared,
+                sequences_cleared,
+                atom_tracks_cleared,
+            } => {
+                self.status_message = Some(format!(
+                    "driver.profile → {new_profile} \
+                     (cleared {atoms_cleared} atom(s), {sequences_cleared} sequence(s), \
+                     {atom_tracks_cleared} atom_sequence track(s))"
+                ));
+            }
+        }
+        self.recompute_aram_meter();
+    }
+
+    /// M2.7 Phase F: preview an atom by rendering it through
+    /// `core::atom::render_to_brr` and writing a short looped WAV
+    /// audition through the existing `core::audition` machinery.
+    fn do_preview_atom(&mut self, atom_idx: usize) {
+        let Some(model) = self.v2_editor.as_ref() else {
+            return;
+        };
+        let Some(atom) = model.project.atom_pool.get(atom_idx) else {
+            return;
+        };
+        match sfc_atomizer_core::atom::render_to_brr(atom) {
+            Ok(out) => {
+                // Loop the cycle PCM to ~2 seconds at 32 kHz.
+                let target_frames = 64_000usize; // 2.0 s
+                let cycle_len = out.pcm.len();
+                if cycle_len == 0 {
+                    self.status_message = Some("preview: empty atom PCM".to_string());
+                    return;
+                }
+                let mut looped: Vec<i16> = Vec::with_capacity(target_frames);
+                while looped.len() < target_frames {
+                    looped.extend_from_slice(&out.pcm);
+                }
+                looped.truncate(target_frames);
+                let preview_dir = match self.project_path.as_ref().and_then(|p| p.parent()) {
+                    Some(p) => p.to_path_buf(),
+                    None => PathBuf::from("."),
+                };
+                let wav_path = preview_dir.join(format!("preview-{}.wav", atom.id));
+                match sfc_atomizer_core::audition::write_pcm16_mono_wav_pub(
+                    &wav_path, &looped, 32_000,
+                ) {
+                    Ok(()) => {
+                        self.status_message = Some(format!(
+                            "preview: rendered {} ({} frames) → {}",
+                            atom.id,
+                            looped.len(),
+                            wav_path.display()
+                        ));
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("preview write failed: {e}"));
+                    }
+                }
+            }
+            Err(_) => {
+                // AtomRenderError is currently uninhabited; this
+                // branch is a future-proofing placeholder.
+                self.status_message = Some("preview: render error".to_string());
+            }
         }
     }
 
@@ -1071,7 +1190,7 @@ impl SfcwcApp {
     /// path in `last_compiled_spc` so Verify Audible can run.
     fn do_compile_spc(&mut self) {
         let Some(project) = self.project_v1_for_compile() else {
-            self.last_compile_summary = Some(if self.loaded_v2.is_some() {
+            self.last_compile_summary = Some(if self.v2_editor.is_some() {
                 "compile-spc: v2 with atom data — atom rendering lands at M2.2; \
                  sequence compilation at M2.4; multi-voice driver at M2.5"
                     .to_string()
@@ -1313,7 +1432,7 @@ impl SfcwcApp {
         // sfc_export's v1-only loader keeps working. Mirrors the CLI's
         // prepare_v1_input path. v2 with atoms errors here.
         let shim_holder: Option<tempfile::TempDir>;
-        let project_a_path = if self.loaded_v2.is_some() {
+        let project_a_path = if self.v2_editor.is_some() {
             let Some(v1) = self.project_v1_for_compile() else {
                 self.last_sfc_compile_summary = Some(
                     "compile-sfc: v2 with atom data — atom rendering lands at M2.2; \
@@ -1361,7 +1480,7 @@ impl SfcwcApp {
             .unwrap_or_else(|| PathBuf::from("."));
         let stem_source = if let Some(p) = &self.project {
             p.project.name.clone()
-        } else if let Some(v) = &self.loaded_v2 {
+        } else if let Some(v) = self.loaded_v2() {
             v.project.name.clone()
         } else {
             "project".to_string()
@@ -1602,13 +1721,22 @@ impl SfcwcApp {
     }
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 struct ProjectDetailResponse {
     refresh_meter: bool,
     compile_spc: bool,
     verify_audible: bool,
     compile_sfc: bool,
     verify_sfc: bool,
+    /// M2.7: user clicked the v2 Save button.
+    save_v2: bool,
+    /// M2.7: profile dropdown picked a new value. The caller
+    /// arbitrates the destructive vs. additive side and either
+    /// calls `model.switch_profile` or pops a confirmation modal.
+    requested_profile: Option<String>,
+    /// M2.7: user clicked the per-atom Preview button. Carries the
+    /// atom_pool index to render.
+    preview_atom: Option<usize>,
 }
 
 /// State the project-detail panel reads from `SfcwcApp`. Cloned
@@ -1633,7 +1761,6 @@ struct ProjectDetailState<'a> {
 /// equivalent v2 compiles via the in-memory v1 shim per SPEC §16.10);
 /// editing of atom_pool / atom_sequences / tracks lands at M2.7.
 struct V2ProjectDetailState<'a> {
-    project: &'a ProjectV2,
     aram_meter: Option<&'a AramMapReport>,
     aram_meter_error: Option<&'a str>,
     last_compile_summary: Option<&'a str>,
@@ -1646,9 +1773,12 @@ struct V2ProjectDetailState<'a> {
     has_compiled_sfc: bool,
 }
 
-fn draw_v2_project_detail(ui: &mut egui::Ui, s: V2ProjectDetailState<'_>) -> ProjectDetailResponse {
+fn draw_v2_project_detail(
+    ui: &mut egui::Ui,
+    model: &mut v2_editor::V2EditorModel,
+    s: V2ProjectDetailState<'_>,
+) -> ProjectDetailResponse {
     let V2ProjectDetailState {
-        project,
         aram_meter,
         aram_meter_error,
         last_compile_summary,
@@ -1662,139 +1792,139 @@ fn draw_v2_project_detail(ui: &mut egui::Ui, s: V2ProjectDetailState<'_>) -> Pro
     } = s;
     let mut resp = ProjectDetailResponse::default();
     egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.heading("Project (v2)");
+        ui.horizontal(|ui| {
+            ui.heading("Project (v2)");
+            let dirty = model.dirty;
+            let valid = model.is_valid();
+            let save_label = if dirty { "Save *" } else { "Save" };
+            if ui
+                .add_enabled(valid && dirty, egui::Button::new(save_label))
+                .on_hover_text(if !valid {
+                    "fix validation errors first"
+                } else if !dirty {
+                    "no changes"
+                } else {
+                    "save to disk"
+                })
+                .clicked()
+            {
+                resp.save_v2 = true;
+            }
+            ui.label(format!(
+                "bytecode_v={}",
+                model.project.driver.bytecode_version
+            ));
+            // Profile selector — switching to sample_basic with
+            // non-empty atom data triggers the destructive-clear
+            // confirmation flow via a side channel.
+            let mut chosen = model.project.driver.profile.clone();
+            egui::ComboBox::from_id_salt("profile_combo")
+                .selected_text(&chosen)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut chosen, "sample_basic".to_string(), "sample_basic");
+                    ui.selectable_value(
+                        &mut chosen,
+                        "multi_voice_atom".to_string(),
+                        "multi_voice_atom",
+                    );
+                });
+            if chosen != model.project.driver.profile {
+                resp.requested_profile = Some(chosen);
+            }
+        });
         ui.separator();
+
+        // Project header grid (editable name + read-only summary).
+        let mut header_changed = false;
         egui::Grid::new("project_grid_v2")
             .num_columns(2)
             .show(ui, |ui| {
                 ui.label("name");
-                ui.monospace(&project.project.name);
+                if ui
+                    .text_edit_singleline(&mut model.project.project.name)
+                    .changed()
+                {
+                    header_changed = true;
+                }
                 ui.end_row();
                 ui.label("tick_rate_hz");
-                ui.monospace(project.project.tick_rate_hz.to_string());
-                ui.end_row();
-                ui.label("driver.profile");
-                ui.monospace(&project.driver.profile);
-                ui.end_row();
-                ui.label("driver.bytecode_version");
-                ui.monospace(project.driver.bytecode_version.to_string());
+                ui.monospace(model.project.project.tick_rate_hz.to_string());
                 ui.end_row();
                 ui.label("master_echo.enabled");
-                ui.monospace(project.master_echo.enabled.to_string());
+                ui.monospace(model.project.master_echo.enabled.to_string());
                 ui.end_row();
                 ui.label("sample_pool.len");
-                ui.monospace(project.sample_pool.len().to_string());
+                ui.monospace(model.project.sample_pool.len().to_string());
                 ui.end_row();
-                ui.label("atom_pool.len");
-                ui.monospace(project.atom_pool.len().to_string());
-                ui.end_row();
-                ui.label("atom_sequences.len");
-                ui.monospace(project.atom_sequences.len().to_string());
-                ui.end_row();
-                ui.label("tracks.len");
-                ui.monospace(project.tracks.len().to_string());
-                ui.end_row();
+                // m2.active_sequence_id dropdown.
                 ui.label("m2.active_sequence_id");
-                ui.monospace(project.m2.active_sequence_id.as_deref().unwrap_or("(none)"));
+                let mut selected = model
+                    .project
+                    .m2
+                    .active_sequence_id
+                    .clone()
+                    .unwrap_or_default();
+                let display = if selected.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    selected.clone()
+                };
+                egui::ComboBox::from_id_salt("active_sequence_combo")
+                    .selected_text(display)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selected, String::new(), "(none)");
+                        for sq in &model.project.atom_sequences {
+                            ui.selectable_value(&mut selected, sq.id.clone(), &sq.id);
+                        }
+                    });
+                let new_active = if selected.is_empty() {
+                    None
+                } else {
+                    Some(selected)
+                };
+                if new_active != model.project.m2.active_sequence_id {
+                    model.set_active_sequence_id(new_active);
+                }
                 ui.end_row();
             });
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.heading("Atom Pool (read-only — editing lands M2.7)");
-        if project.atom_pool.is_empty() {
-            ui.weak("(empty)");
-        } else {
-            egui::Grid::new("atom_pool_grid")
-                .num_columns(4)
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.strong("id");
-                    ui.strong("name");
-                    ui.strong("cycle_len");
-                    ui.strong("partials");
-                    ui.end_row();
-                    for a in &project.atom_pool {
-                        ui.monospace(&a.id);
-                        ui.monospace(&a.name);
-                        ui.monospace(a.cycle_len_samples.to_string());
-                        let partials_count = match &a.kind {
-                            sfc_atomizer_core::atom::AtomKind::AdditiveSingleCycleV0 {
-                                partials,
-                            } => partials.len(),
-                        };
-                        ui.monospace(partials_count.to_string());
-                        ui.end_row();
-                    }
-                });
+        if header_changed {
+            model.mark_dirty();
         }
 
+        // ---- Atom pool ----
         ui.add_space(8.0);
         ui.separator();
-        ui.heading("Atom Sequences (read-only)");
-        if project.atom_sequences.is_empty() {
-            ui.weak("(empty)");
-        } else {
-            for sq in &project.atom_sequences {
-                ui.label(format!(
-                    "{} (voice {}): {} step(s){}",
-                    sq.id,
-                    sq.voice,
-                    sq.steps.len(),
-                    if sq.looped { ", loop" } else { "" }
-                ));
-                for (j, step) in sq.steps.iter().enumerate() {
-                    let trans = match &step.transition {
-                        sfc_atomizer_core::project_v2::AtomTransition::InitialKon => {
-                            "initial_kon".to_string()
-                        }
-                        sfc_atomizer_core::project_v2::AtomTransition::FadeToZeroRetrigger {
-                            fade_out_ticks,
-                            fade_in_ticks,
-                        } => format!(
-                            "fade_to_zero_retrigger(out={}, in={})",
-                            fade_out_ticks, fade_in_ticks
-                        ),
-                    };
-                    ui.weak(format!(
-                        "  step {j}: atom={}, dur={}, vol={:.2}, trans={}",
-                        step.atom_id, step.duration_ticks, step.target_volume, trans,
-                    ));
-                }
+        let preview_idx = ui
+            .collapsing("Atom Pool", |ui| draw_atom_pool_editor(ui, model))
+            .body_returned
+            .flatten();
+        if let Some(idx) = preview_idx {
+            resp.preview_atom = Some(idx);
+        }
+
+        // ---- Atom sequences ----
+        ui.add_space(4.0);
+        ui.collapsing("Atom Sequences", |ui| {
+            draw_sequences_editor(ui, model);
+        });
+
+        // ---- Tracks ----
+        ui.add_space(4.0);
+        ui.collapsing("Tracks", |ui| {
+            draw_tracks_editor(ui, model);
+        });
+
+        // ---- Validation summary ----
+        if !model.validation.is_empty() {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 80, 80),
+                format!("⚠ {} validation issue(s):", model.validation.len()),
+            );
+            for e in &model.validation {
+                ui.weak(format!("  {}: {}", e.path, e.kind));
             }
-        }
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.heading("Tracks (read-only)");
-        if project.tracks.is_empty() {
-            ui.weak("(empty)");
-        } else {
-            egui::Grid::new("tracks_grid")
-                .num_columns(4)
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.strong("id");
-                    ui.strong("voice");
-                    ui.strong("kind");
-                    ui.strong("ref");
-                    ui.end_row();
-                    for t in &project.tracks {
-                        ui.monospace(&t.id);
-                        ui.monospace(t.voice.to_string());
-                        match &t.kind {
-                            TrackKind::SampleSustain { sample_id } => {
-                                ui.monospace("sample_sustain");
-                                ui.monospace(sample_id);
-                            }
-                            TrackKind::AtomSequence { atom_sequence_id } => {
-                                ui.monospace("atom_sequence");
-                                ui.monospace(atom_sequence_id);
-                            }
-                        }
-                        ui.end_row();
-                    }
-                });
         }
 
         ui.add_space(12.0);
@@ -1871,6 +2001,592 @@ fn draw_v2_project_detail(ui: &mut egui::Ui, s: V2ProjectDetailState<'_>) -> Pro
         }
     });
     resp
+}
+
+// =============================================================================
+// M2.7 — atom / sequence / track editors
+// =============================================================================
+
+fn draw_atom_pool_editor(ui: &mut egui::Ui, model: &mut v2_editor::V2EditorModel) -> Option<usize> {
+    let mut preview_clicked: Option<usize> = None;
+    ui.horizontal(|ui| {
+        if ui.button("Add atom").clicked() {
+            model.add_atom();
+        }
+        let has_sel = model.selected_atom.is_some();
+        if ui
+            .add_enabled(has_sel, egui::Button::new("Duplicate"))
+            .clicked()
+        {
+            if let Some(idx) = model.selected_atom {
+                model.duplicate_atom(idx);
+            }
+        }
+        if ui
+            .add_enabled(has_sel, egui::Button::new("Remove"))
+            .clicked()
+        {
+            if let Some(idx) = model.selected_atom {
+                model.remove_atom(idx);
+            }
+        }
+        if ui
+            .add_enabled(has_sel, egui::Button::new("Preview"))
+            .on_hover_text("render this atom to a 2 s looped mono WAV next to the project")
+            .clicked()
+        {
+            preview_clicked = model.selected_atom;
+        }
+    });
+    ui.separator();
+    let n = model.project.atom_pool.len();
+    let mut clicked: Option<usize> = None;
+    for i in 0..n {
+        let label = {
+            let a = &model.project.atom_pool[i];
+            let partials_count = match &a.kind {
+                sfc_atomizer_core::atom::AtomKind::AdditiveSingleCycleV0 { partials } => {
+                    partials.len()
+                }
+            };
+            format!(
+                "{}  cycle_len={}, partials={}",
+                a.id, a.cycle_len_samples, partials_count
+            )
+        };
+        let is_selected = model.selected_atom == Some(i);
+        if ui.selectable_label(is_selected, label).clicked() {
+            clicked = Some(i);
+        }
+    }
+    if let Some(i) = clicked {
+        model.selected_atom = Some(i);
+    }
+    if let Some(idx) = model.selected_atom {
+        if idx < model.project.atom_pool.len() {
+            ui.separator();
+            draw_atom_edit_panel(ui, model, idx);
+        }
+    }
+    preview_clicked
+}
+
+fn draw_atom_edit_panel(ui: &mut egui::Ui, model: &mut v2_editor::V2EditorModel, idx: usize) {
+    let mut changed = false;
+    egui::Grid::new(format!("atom_edit_{idx}"))
+        .num_columns(2)
+        .show(ui, |ui| {
+            ui.label("id");
+            if ui
+                .text_edit_singleline(&mut model.project.atom_pool[idx].id)
+                .changed()
+            {
+                changed = true;
+            }
+            ui.end_row();
+            ui.label("name");
+            if ui
+                .text_edit_singleline(&mut model.project.atom_pool[idx].name)
+                .changed()
+            {
+                changed = true;
+            }
+            ui.end_row();
+            ui.label("cycle_len_samples");
+            let mut cycle = model.project.atom_pool[idx].cycle_len_samples;
+            egui::ComboBox::from_id_salt(format!("atom_cycle_{idx}"))
+                .selected_text(cycle.to_string())
+                .show_ui(ui, |ui| {
+                    for v in [64u16, 128, 256] {
+                        ui.selectable_value(&mut cycle, v, v.to_string());
+                    }
+                });
+            if cycle != model.project.atom_pool[idx].cycle_len_samples {
+                model.project.atom_pool[idx].cycle_len_samples = cycle;
+                changed = true;
+            }
+            ui.end_row();
+            ui.label("root_midi_note");
+            let mut root = model.project.atom_pool[idx].root_midi_note;
+            if ui.add(egui::Slider::new(&mut root, 0..=127)).changed() {
+                model.project.atom_pool[idx].root_midi_note = root;
+                changed = true;
+            }
+            ui.end_row();
+            ui.label("amplitude");
+            let mut amp = model.project.atom_pool[idx].amplitude;
+            let resp = ui.add(egui::Slider::new(&mut amp, 0.0..=1.0).fixed_decimals(4));
+            if resp.changed() || resp.drag_stopped() {
+                let snapped = v2_editor::snap_f64_4dp(amp);
+                if snapped != model.project.atom_pool[idx].amplitude {
+                    model.project.atom_pool[idx].amplitude = snapped;
+                    changed = true;
+                }
+            }
+            ui.end_row();
+            ui.label("normalize");
+            let mut normalize = model.project.atom_pool[idx].render.normalize;
+            if ui.checkbox(&mut normalize, "").changed() {
+                model.project.atom_pool[idx].render.normalize = normalize;
+                changed = true;
+            }
+            ui.end_row();
+            ui.label("force_filter_0_first_block");
+            let mut fb = model.project.atom_pool[idx]
+                .render
+                .force_filter_0_first_block;
+            if ui.checkbox(&mut fb, "").changed() {
+                model.project.atom_pool[idx]
+                    .render
+                    .force_filter_0_first_block = fb;
+                changed = true;
+            }
+            ui.end_row();
+            ui.label("force_filter_0_loop_entry");
+            let mut le = model.project.atom_pool[idx]
+                .render
+                .force_filter_0_loop_entry;
+            if ui.checkbox(&mut le, "").changed() {
+                model.project.atom_pool[idx]
+                    .render
+                    .force_filter_0_loop_entry = le;
+                changed = true;
+            }
+            ui.end_row();
+        });
+
+    // Partials
+    ui.add_space(4.0);
+    ui.label("partials");
+    let partials_len = match &model.project.atom_pool[idx].kind {
+        sfc_atomizer_core::atom::AtomKind::AdditiveSingleCycleV0 { partials } => partials.len(),
+    };
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(partials_len < 8, egui::Button::new("+ partial"))
+            .clicked()
+        {
+            model.add_partial(idx);
+        }
+    });
+    let mut to_remove: Option<usize> = None;
+    for p_idx in 0..partials_len {
+        ui.horizontal(|ui| {
+            ui.label(format!("  [{p_idx}]"));
+            // harmonic
+            let mut h = match &model.project.atom_pool[idx].kind {
+                sfc_atomizer_core::atom::AtomKind::AdditiveSingleCycleV0 { partials } => {
+                    partials[p_idx].harmonic
+                }
+            };
+            if ui
+                .add(egui::Slider::new(&mut h, 1..=16).text("h"))
+                .changed()
+            {
+                model.set_partial_harmonic(idx, p_idx, h);
+            }
+            // amplitude
+            let mut amp = match &model.project.atom_pool[idx].kind {
+                sfc_atomizer_core::atom::AtomKind::AdditiveSingleCycleV0 { partials } => {
+                    partials[p_idx].amplitude
+                }
+            };
+            if ui
+                .add(
+                    egui::Slider::new(&mut amp, 0.0..=1.0)
+                        .fixed_decimals(4)
+                        .text("a"),
+                )
+                .changed()
+            {
+                model.set_partial_amplitude(idx, p_idx, amp);
+            }
+            // phase
+            let mut ph = match &model.project.atom_pool[idx].kind {
+                sfc_atomizer_core::atom::AtomKind::AdditiveSingleCycleV0 { partials } => {
+                    partials[p_idx].phase_cycles
+                }
+            };
+            if ui
+                .add(
+                    egui::Slider::new(&mut ph, 0.0..=0.9999)
+                        .fixed_decimals(4)
+                        .text("φ"),
+                )
+                .changed()
+            {
+                model.set_partial_phase_cycles(idx, p_idx, ph);
+            }
+            if partials_len > 1 && ui.button("✕").clicked() {
+                to_remove = Some(p_idx);
+            }
+        });
+    }
+    if let Some(p_idx) = to_remove {
+        model.remove_partial(idx, p_idx);
+    }
+    if changed {
+        model.mark_dirty();
+    }
+}
+
+fn draw_sequences_editor(ui: &mut egui::Ui, model: &mut v2_editor::V2EditorModel) {
+    ui.horizontal(|ui| {
+        if ui.button("Add sequence").clicked() {
+            model.add_sequence();
+        }
+        let has_sel = model.selected_sequence.is_some();
+        if ui
+            .add_enabled(has_sel, egui::Button::new("Remove"))
+            .clicked()
+        {
+            if let Some(idx) = model.selected_sequence {
+                model.remove_sequence(idx);
+            }
+        }
+    });
+    ui.separator();
+    let n = model.project.atom_sequences.len();
+    let mut clicked: Option<usize> = None;
+    for i in 0..n {
+        let label = {
+            let s = &model.project.atom_sequences[i];
+            format!(
+                "{} (voice {}, {} step(s){})",
+                s.id,
+                s.voice,
+                s.steps.len(),
+                if s.looped { ", loop" } else { "" }
+            )
+        };
+        let is_selected = model.selected_sequence == Some(i);
+        if ui.selectable_label(is_selected, label).clicked() {
+            clicked = Some(i);
+        }
+    }
+    if let Some(i) = clicked {
+        model.selected_sequence = Some(i);
+    }
+    if let Some(idx) = model.selected_sequence {
+        if idx < model.project.atom_sequences.len() {
+            ui.separator();
+            draw_sequence_edit_panel(ui, model, idx);
+        }
+    }
+}
+
+fn draw_sequence_edit_panel(ui: &mut egui::Ui, model: &mut v2_editor::V2EditorModel, idx: usize) {
+    let mut changed = false;
+    egui::Grid::new(format!("seq_edit_{idx}"))
+        .num_columns(2)
+        .show(ui, |ui| {
+            ui.label("id");
+            if ui
+                .text_edit_singleline(&mut model.project.atom_sequences[idx].id)
+                .changed()
+            {
+                changed = true;
+            }
+            ui.end_row();
+            ui.label("name");
+            if ui
+                .text_edit_singleline(&mut model.project.atom_sequences[idx].name)
+                .changed()
+            {
+                changed = true;
+            }
+            ui.end_row();
+            ui.label("voice");
+            let mut voice = model.project.atom_sequences[idx].voice;
+            egui::ComboBox::from_id_salt(format!("seq_voice_{idx}"))
+                .selected_text(voice.to_string())
+                .show_ui(ui, |ui| {
+                    for v in [0u8, 1] {
+                        ui.selectable_value(&mut voice, v, v.to_string());
+                    }
+                });
+            if voice != model.project.atom_sequences[idx].voice {
+                model.set_sequence_voice(idx, voice);
+            }
+            ui.end_row();
+            ui.label("loop");
+            let mut looped = model.project.atom_sequences[idx].looped;
+            if ui.checkbox(&mut looped, "").changed() {
+                model.set_sequence_loop(idx, looped);
+            }
+            ui.end_row();
+        });
+
+    ui.add_space(4.0);
+    ui.label("steps");
+    let n_steps = model.project.atom_sequences[idx].steps.len();
+    let atom_ids: Vec<String> = model
+        .project
+        .atom_pool
+        .iter()
+        .map(|a| a.id.clone())
+        .collect();
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(n_steps < 32, egui::Button::new("+ step"))
+            .clicked()
+        {
+            model.add_step(idx);
+        }
+    });
+    let mut step_to_remove: Option<usize> = None;
+    let mut step_to_move_up: Option<usize> = None;
+    let mut step_to_move_down: Option<usize> = None;
+    for st_idx in 0..n_steps {
+        ui.horizontal(|ui| {
+            ui.label(format!("  [{st_idx}]"));
+            // atom_id dropdown
+            let mut atom_id = model.project.atom_sequences[idx].steps[st_idx]
+                .atom_id
+                .clone();
+            egui::ComboBox::from_id_salt(format!("step_atom_{idx}_{st_idx}"))
+                .selected_text(&atom_id)
+                .show_ui(ui, |ui| {
+                    for id in &atom_ids {
+                        ui.selectable_value(&mut atom_id, id.clone(), id);
+                    }
+                });
+            if atom_id != model.project.atom_sequences[idx].steps[st_idx].atom_id {
+                model.set_step_atom_id(idx, st_idx, atom_id);
+            }
+            // duration
+            let mut dur = model.project.atom_sequences[idx].steps[st_idx].duration_ticks;
+            if ui
+                .add(egui::Slider::new(&mut dur, 1..=255).text("ticks"))
+                .changed()
+            {
+                model.set_step_duration(idx, st_idx, dur);
+            }
+            // target_volume
+            let mut vol = model.project.atom_sequences[idx].steps[st_idx].target_volume;
+            if ui
+                .add(
+                    egui::Slider::new(&mut vol, 0.0..=1.0)
+                        .fixed_decimals(4)
+                        .text("vol"),
+                )
+                .changed()
+            {
+                model.set_step_target_volume(idx, st_idx, vol);
+            }
+            // transition
+            if st_idx == 0 {
+                ui.label("(initial_kon)");
+            } else {
+                let cur = model.project.atom_sequences[idx].steps[st_idx]
+                    .transition
+                    .clone();
+                let (mut fade_out, mut fade_in) = match cur {
+                    sfc_atomizer_core::project_v2::AtomTransition::FadeToZeroRetrigger {
+                        fade_out_ticks,
+                        fade_in_ticks,
+                    } => (fade_out_ticks, fade_in_ticks),
+                    _ => (4, 4),
+                };
+                let mut tr_changed = false;
+                if ui
+                    .add(egui::Slider::new(&mut fade_out, 1..=255).text("fade_out"))
+                    .changed()
+                {
+                    tr_changed = true;
+                }
+                if ui
+                    .add(egui::Slider::new(&mut fade_in, 1..=255).text("fade_in"))
+                    .changed()
+                {
+                    tr_changed = true;
+                }
+                if tr_changed {
+                    model.set_step_transition_fade(idx, st_idx, fade_out, fade_in);
+                }
+            }
+            // up/down/remove buttons
+            if ui.add_enabled(st_idx > 0, egui::Button::new("↑")).clicked() {
+                step_to_move_up = Some(st_idx);
+            }
+            if ui
+                .add_enabled(st_idx + 1 < n_steps, egui::Button::new("↓"))
+                .clicked()
+            {
+                step_to_move_down = Some(st_idx);
+            }
+            if n_steps > 1 && ui.button("✕").clicked() {
+                step_to_remove = Some(st_idx);
+            }
+        });
+    }
+    if let Some(s) = step_to_remove {
+        model.remove_step(idx, s);
+    }
+    if let Some(s) = step_to_move_up {
+        model.move_step_up(idx, s);
+    }
+    if let Some(s) = step_to_move_down {
+        model.move_step_down(idx, s);
+    }
+    if changed {
+        model.mark_dirty();
+    }
+}
+
+fn draw_tracks_editor(ui: &mut egui::Ui, model: &mut v2_editor::V2EditorModel) {
+    ui.horizontal(|ui| {
+        if ui.button("Add track").clicked() {
+            model.add_track();
+        }
+        let has_sel = model.selected_track.is_some();
+        if ui
+            .add_enabled(has_sel, egui::Button::new("Remove"))
+            .clicked()
+        {
+            if let Some(idx) = model.selected_track {
+                model.remove_track(idx);
+            }
+        }
+    });
+    ui.separator();
+    let n = model.project.tracks.len();
+    let mut clicked: Option<usize> = None;
+    for i in 0..n {
+        let label = {
+            let t = &model.project.tracks[i];
+            let kind_label = match &t.kind {
+                TrackKind::SampleSustain { sample_id } => format!("sample_sustain → {sample_id}"),
+                TrackKind::AtomSequence { atom_sequence_id } => {
+                    format!("atom_sequence → {atom_sequence_id}")
+                }
+            };
+            format!("{} (voice {}, {})", t.id, t.voice, kind_label)
+        };
+        let is_selected = model.selected_track == Some(i);
+        if ui.selectable_label(is_selected, label).clicked() {
+            clicked = Some(i);
+        }
+    }
+    if let Some(i) = clicked {
+        model.selected_track = Some(i);
+    }
+    if let Some(idx) = model.selected_track {
+        if idx < model.project.tracks.len() {
+            ui.separator();
+            draw_track_edit_panel(ui, model, idx);
+        }
+    }
+}
+
+fn draw_track_edit_panel(ui: &mut egui::Ui, model: &mut v2_editor::V2EditorModel, idx: usize) {
+    let mut changed = false;
+    let sample_ids: Vec<String> = model
+        .project
+        .sample_pool
+        .iter()
+        .map(|s| s.id.clone())
+        .collect();
+    let seq_ids: Vec<String> = model
+        .project
+        .atom_sequences
+        .iter()
+        .map(|s| s.id.clone())
+        .collect();
+    egui::Grid::new(format!("track_edit_{idx}"))
+        .num_columns(2)
+        .show(ui, |ui| {
+            ui.label("id");
+            if ui
+                .text_edit_singleline(&mut model.project.tracks[idx].id)
+                .changed()
+            {
+                changed = true;
+            }
+            ui.end_row();
+            ui.label("name");
+            if ui
+                .text_edit_singleline(&mut model.project.tracks[idx].name)
+                .changed()
+            {
+                changed = true;
+            }
+            ui.end_row();
+            ui.label("voice");
+            let mut voice = model.project.tracks[idx].voice;
+            egui::ComboBox::from_id_salt(format!("track_voice_{idx}"))
+                .selected_text(voice.to_string())
+                .show_ui(ui, |ui| {
+                    for v in [0u8, 1] {
+                        ui.selectable_value(&mut voice, v, v.to_string());
+                    }
+                });
+            if voice != model.project.tracks[idx].voice {
+                model.set_track_voice(idx, voice);
+            }
+            ui.end_row();
+            ui.label("kind");
+            let cur_kind_label = match &model.project.tracks[idx].kind {
+                TrackKind::SampleSustain { .. } => "sample_sustain",
+                TrackKind::AtomSequence { .. } => "atom_sequence",
+            };
+            let mut new_kind_label: &str = cur_kind_label;
+            egui::ComboBox::from_id_salt(format!("track_kind_{idx}"))
+                .selected_text(cur_kind_label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut new_kind_label, "sample_sustain", "sample_sustain");
+                    ui.selectable_value(&mut new_kind_label, "atom_sequence", "atom_sequence");
+                });
+            if new_kind_label != cur_kind_label {
+                match new_kind_label {
+                    "sample_sustain" => {
+                        let sid = sample_ids.first().cloned().unwrap_or_default();
+                        model.set_track_kind_sample(idx, sid);
+                    }
+                    "atom_sequence" => {
+                        let sid = seq_ids.first().cloned().unwrap_or_default();
+                        model.set_track_kind_atom_sequence(idx, sid);
+                    }
+                    _ => {}
+                }
+            }
+            ui.end_row();
+            // Reference dropdown for the active kind.
+            match &model.project.tracks[idx].kind {
+                TrackKind::SampleSustain { sample_id } => {
+                    ui.label("sample_id");
+                    let mut chosen = sample_id.clone();
+                    egui::ComboBox::from_id_salt(format!("track_sample_{idx}"))
+                        .selected_text(&chosen)
+                        .show_ui(ui, |ui| {
+                            for id in &sample_ids {
+                                ui.selectable_value(&mut chosen, id.clone(), id);
+                            }
+                        });
+                    if chosen != *sample_id {
+                        model.set_track_kind_sample(idx, chosen);
+                    }
+                }
+                TrackKind::AtomSequence { atom_sequence_id } => {
+                    ui.label("atom_sequence_id");
+                    let mut chosen = atom_sequence_id.clone();
+                    egui::ComboBox::from_id_salt(format!("track_seq_{idx}"))
+                        .selected_text(&chosen)
+                        .show_ui(ui, |ui| {
+                            for id in &seq_ids {
+                                ui.selectable_value(&mut chosen, id.clone(), id);
+                            }
+                        });
+                    if chosen != *atom_sequence_id {
+                        model.set_track_kind_atom_sequence(idx, chosen);
+                    }
+                }
+            }
+            ui.end_row();
+        });
+    if changed {
+        model.mark_dirty();
+    }
 }
 
 fn draw_sample_detail_readonly(ui: &mut egui::Ui, s: &SampleSlot) {
