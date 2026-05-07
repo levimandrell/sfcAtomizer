@@ -1,0 +1,133 @@
+{
+  "schema_version": 2,
+  "project": {
+    "name": "canonical_m2",
+    "tick_rate_hz": 60
+  },
+  "driver": {
+    "profile": "multi_voice_atom",
+    "bytecode_version": 2
+  },
+  "master_echo": {
+    "enabled": false,
+    "edl": 0,
+    "efb": 0,
+    "evol_l": 0,
+    "evol_r": 0,
+    "fir": [127, 0, 0, 0, 0, 0, 0, 0]
+  },
+  "sample_pool": [
+    {
+      "id": "lead",
+      "name": "lead",
+      "source": {
+        "path": "audio/lead.wav",
+        "sha256": "b42397b85a8788c2563fd0f2c35dc345b9957130d543fc7e82aa846387ce5b61",
+        "format": "wav",
+        "sample_rate_hz": 32000,
+        "channels": 1,
+        "frames": 8192
+      },
+      "root_midi_note": 60,
+      "loop": {
+        "enabled": true,
+        "start_sample": 0,
+        "end_sample": 8192,
+        "snap": "brr_block_16"
+      },
+      "playback": {
+        "volume": 1.0,
+        "pan": -1.0,
+        "echo": false,
+        "envelope": { "type": "gain_raw", "gain_byte": 127 }
+      }
+    }
+  ],
+  "atom_pool": [
+    {
+      "id": "atom_a",
+      "name": "atom_a",
+      "kind": "additive_single_cycle_v0",
+      "root_midi_note": 60,
+      "cycle_len_samples": 128,
+      "amplitude": 0.75,
+      "partials": [
+        { "harmonic": 1, "amplitude": 1.0, "phase_cycles": 0.0 }
+      ],
+      "render": {
+        "normalize": true,
+        "force_filter_0_first_block": true,
+        "force_filter_0_loop_entry": true
+      },
+      "playback": {
+        "volume": 1.0,
+        "pan": 1.0,
+        "echo": false,
+        "envelope": { "type": "gain_raw", "gain_byte": 127 }
+      }
+    },
+    {
+      "id": "atom_b",
+      "name": "atom_b",
+      "kind": "additive_single_cycle_v0",
+      "root_midi_note": 60,
+      "cycle_len_samples": 64,
+      "amplitude": 0.75,
+      "partials": [
+        { "harmonic": 1, "amplitude": 1.0, "phase_cycles": 0.0 }
+      ],
+      "render": {
+        "normalize": true,
+        "force_filter_0_first_block": true,
+        "force_filter_0_loop_entry": true
+      },
+      "playback": {
+        "volume": 1.0,
+        "pan": 1.0,
+        "echo": false,
+        "envelope": { "type": "gain_raw", "gain_byte": 127 }
+      }
+    }
+  ],
+  "atom_sequences": [
+    {
+      "id": "atomseq_0001",
+      "name": "two_step_demo",
+      "voice": 1,
+      "steps": [
+        {
+          "atom_id": "atom_a",
+          "duration_ticks": 120,
+          "target_volume": 0.8,
+          "transition": { "type": "initial_kon" }
+        },
+        {
+          "atom_id": "atom_b",
+          "duration_ticks": 120,
+          "target_volume": 0.8,
+          "transition": {
+            "type": "fade_to_zero_retrigger",
+            "fade_out_ticks": 4,
+            "fade_in_ticks": 4
+          }
+        }
+      ],
+      "loop": false
+    }
+  ],
+  "tracks": [
+    {
+      "id": "track_sample_0",
+      "voice": 0,
+      "kind": "sample_sustain",
+      "sample_id": "lead"
+    },
+    {
+      "id": "track_atom_1",
+      "voice": 1,
+      "kind": "atom_sequence",
+      "atom_sequence_id": "atomseq_0001"
+    }
+  ],
+  "m2": { "active_sequence_id": "atomseq_0001" }
+}

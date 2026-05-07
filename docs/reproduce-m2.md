@@ -15,8 +15,9 @@ Linux and macOS with the obvious path-separator adjustments.
   `rust-toolchain.toml` at the repo root. `rustup` will install
   the right toolchain on first `cargo` invocation. No specific
   version pin yet.
-- **`asar` SPC700 / 65816 assembler**: 1.81 or later. Engineer's
-  machine ships with 1.91. Build from
+- **`asar` SPC700 / 65816 assembler**: tested with 1.91. asar
+  1.81+ is expected to work; older versions are unsupported
+  unless verified. Build from
   https://github.com/RPGHacker/asar or download a release binary.
   Place on `PATH` or set the `SFCWC_ASAR` env var to the executable.
 - **`snes_spc` oracle**: vendored under `tools/snes_spc_oracle/`.
@@ -74,14 +75,18 @@ present for the full suite to run.
 
 ## Run `m2-acceptance` against the canonical fixture
 
-The canonical M2 fixture is synthesized by the test
-`app/tests/cli.rs::write_v2_combined_for_m25_gate`. To run
-`m2-acceptance` outside a test, point at any v2 multi_voice_atom
-project:
+The canonical M2 fixture is committed at
+[`fixtures/projects/canonical_m2/`](../fixtures/projects/canonical_m2/) —
+a deterministic 32 kHz mono PCM16 WAV at `audio/lead.wav` plus a
+v2 multi_voice_atom project file referencing it with the WAV's
+SHA. Same shape as the
+`core/tests/sequence_compile.rs::canonical_project()` helper that
+pins the canonical SEQ2 bytecode SHA in
+`baselines/m2_canonical_fixtures.md`.
 
 ```bash
 cargo run --release --bin sfcwc -- m2-acceptance \
-    --project-a path/to/canonical_m2.sfcproj.json \
+    --project-a fixtures/projects/canonical_m2/canonical_m2.sfcproj.json \
     --out build/m2/acceptance/canonical \
     --frames 160000
 ```
