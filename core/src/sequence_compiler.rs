@@ -113,9 +113,27 @@ pub struct SequenceCompileOutput {
     pub bytecode_sha256: String,
     pub max_writes_per_tick_estimate: u32,
     pub per_step: Vec<StepLowering>,
-    /// Sum of all `WAIT` durations + transition ticks. Excludes
-    /// final-tick KON/KOFF cycles past the last WAIT.
+    /// Sum of every `WAIT` opcode's operand value across the
+    /// compiled bytecode. This is *not* the wall-elapsed tick count
+    /// — it ignores the +1 "resume tick" each WAIT consumes per
+    /// SPEC §14.3 (slide-advance → wait-decrement → opcode-read
+    /// per-tick order means a `WAIT n` opcode read on tick T means
+    /// the next opcode reads on tick T+n+1, not T+n).
+    ///
+    /// This field is the M2.4 baseline (`M2_CANONICAL_SEQUENCE_TOTAL_TICKS = 249`)
+    /// and stays semantically identical for back-compat. For the
+    /// wall-elapsed tick count (used by oracle frame selection and
+    /// the §21 source-step window math) see `total_elapsed_ticks`.
     pub total_ticks: u32,
+    /// M2.8: wall-elapsed tick count under SPEC §14.3 semantics —
+    /// the tick on which the END opcode reads. Computed as the
+    /// sum-of-WAIT-operands plus one resume tick per WAIT. For the
+    /// canonical fixture this is 254 (= 249 + 5 WAITs).
+    ///
+    /// This is the field oracle frame selection should consume
+    /// when computing windows; `total_ticks` remains the locked
+    /// M2.4 baseline.
+    pub total_elapsed_ticks: u32,
     pub active_slides: Vec<ActiveSlideInterval>,
 }
 
@@ -247,7 +265,16 @@ pub fn compile_sequence(
     let mut payload: Vec<u8> = Vec::new();
     let mut per_step: Vec<StepLowering> = Vec::with_capacity(sequence.steps.len());
     let mut active_slides: Vec<ActiveSlideInterval> = Vec::new();
+    // `tick_cursor` tracks the tick on which the *next* opcode
+    // would be read under SPEC §14.3 semantics — wait-decrement
+    // runs strictly before opcode-read, so a `WAIT n` opcode read
+    // on tick T leaves the next opcode reading on tick T+n+1.
     let mut tick_cursor: u32 = 0;
+    // Sum of every WAIT opcode's operand. Reported as
+    // `total_ticks` for back-compat with the M2.4 baseline. The
+    // elapsed tick count (`total_elapsed_ticks`) is `tick_cursor`
+    // at end-of-sequence.
+    let mut wait_operand_sum: u32 = 0;
 
     for (step_index, step) in sequence.steps.iter().enumerate() {
         let bytecode_offset_start = payload.len() as u32;
@@ -278,7 +305,8 @@ pub fn compile_sequence(
                 emit_kon(&mut payload, voice_mask);
                 writes_in_step += 1;
                 emit_wait(&mut payload, step.duration_ticks);
-                tick_cursor += step.duration_ticks as u32;
+                wait_operand_sum += step.duration_ticks as u32;
+                tick_cursor += step.duration_ticks as u32 + 1;
             }
             (0, AtomTransition::FadeToZeroRetrigger { .. }) => {
                 return Err(SequenceCompileError::FirstStepNotInitialKon {
@@ -319,13 +347,15 @@ pub fn compile_sequence(
                     tick_end: tick_cursor + 1 + (*fade_out_ticks as u32),
                 });
                 emit_wait(&mut payload, *fade_out_ticks);
-                tick_cursor += *fade_out_ticks as u32;
+                wait_operand_sum += *fade_out_ticks as u32;
+                tick_cursor += *fade_out_ticks as u32 + 1;
 
                 // KOFF + 1-tick gap.
                 emit_koff(&mut payload, voice_mask);
                 writes_in_step += 1;
                 emit_wait(&mut payload, 1);
-                tick_cursor += 1;
+                wait_operand_sum += 1;
+                tick_cursor += 1 + 1;
 
                 // Re-trigger.
                 emit_set_src(&mut payload, voice, src_index)?;
@@ -343,11 +373,13 @@ pub fn compile_sequence(
                     tick_end: tick_cursor + 1 + (*fade_in_ticks as u32),
                 });
                 emit_wait(&mut payload, *fade_in_ticks);
-                tick_cursor += *fade_in_ticks as u32;
+                wait_operand_sum += *fade_in_ticks as u32;
+                tick_cursor += *fade_in_ticks as u32 + 1;
 
                 // Sustain.
                 emit_wait(&mut payload, step.duration_ticks);
-                tick_cursor += step.duration_ticks as u32;
+                wait_operand_sum += step.duration_ticks as u32;
+                tick_cursor += step.duration_ticks as u32 + 1;
             }
             (_, AtomTransition::InitialKon) => {
                 return Err(SequenceCompileError::NonFirstStepWrongTransition {
@@ -403,7 +435,8 @@ pub fn compile_sequence(
         bytecode_sha256,
         max_writes_per_tick_estimate,
         per_step,
-        total_ticks: tick_cursor,
+        total_ticks: wait_operand_sum,
+        total_elapsed_ticks: tick_cursor,
         active_slides,
     })
 }
@@ -497,9 +530,12 @@ fn walk_writes_per_tick(
                     if writes_this_tick > max_observed {
                         max_observed = writes_this_tick;
                     }
-                    // Walk the WAIT-driven ticks: each one only
-                    // accrues active-slide writes (no opcodes are
-                    // read mid-WAIT).
+                    // SPEC §14.3 tick order: slide-advance →
+                    // wait-decrement → opcode-read. A `WAIT n`
+                    // opcode read on tick T sets wait_counter=n;
+                    // ticks T+1..=T+n decrement (slide-only writes);
+                    // tick T+n+1 is the resume tick where the next
+                    // opcode reads. Walk all `n+1` ticks here.
                     for _ in 0..ticks {
                         tick_index += 1;
                         let w = active_writes_at_tick(active_slides, tick_index);
@@ -514,6 +550,11 @@ fn walk_writes_per_tick(
                             max_observed = w;
                         }
                     }
+                    // Advance to the resume tick. Slide-advance still
+                    // runs first, so the resume tick's "writes_this_tick"
+                    // starts with whatever active slides contribute,
+                    // and subsequent opcode reads add on top.
+                    tick_index += 1;
                     writes_this_tick = active_writes_at_tick(active_slides, tick_index);
                 }
                 BytecodeOpcode::SetSrc => {
@@ -888,8 +929,49 @@ mod tests {
     #[test]
     fn total_ticks_matches_lowering() {
         let out = compile_canonical();
-        // Step 0 sustain 120; step 1 transition (4 + 1 + 4) + sustain 120 = 129.
+        // M2.4 baseline (`M2_CANONICAL_SEQUENCE_TOTAL_TICKS = 249`):
+        // sum-of-WAIT-operands across all five WAITs in the canonical
+        // 2-step sequence — step 0 sustain 120; step 1 fade-out 4 +
+        // gap 1 + fade-in 4 + sustain 120 = 129.
         assert_eq!(out.total_ticks, 120 + 4 + 1 + 4 + 120);
+    }
+
+    /// M2.8 (consultant #1): wall-elapsed tick count under SPEC §14.3
+    /// semantics. Each WAIT k consumes one extra "resume tick" past
+    /// the k decrement ticks (the next opcode reads on tick T+k+1,
+    /// not T+k). Canonical fixture has 5 WAITs → elapsed = 249 + 5 = 254.
+    /// END opcode reads on tick 254.
+    #[test]
+    fn total_elapsed_ticks_includes_resume_tick_per_wait() {
+        let out = compile_canonical();
+        assert_eq!(out.total_ticks, 249);
+        assert_eq!(
+            out.total_elapsed_ticks,
+            254,
+            "elapsed = sum-of-waits + n_waits = 249 + 5"
+        );
+    }
+
+    /// M2.8 (consultant #1, Phase 1C): the canonical fixture's
+    /// slide intervals must match the M2.5 driver's actual write
+    /// ticks. Pre-fix walker registered slides on the wrong ticks
+    /// by 1; this test pins the new (correct) windows.
+    #[test]
+    fn canonical_slide_intervals_match_driver_under_spec_14_3() {
+        let out = compile_canonical();
+        assert_eq!(out.active_slides.len(), 2, "canonical has 2 slides");
+        // Fade-out: VOL_SLIDE read on tick 121 (post step-0 WAIT 120
+        // resume); first slide write on tick 122, last on tick 125
+        // (= [122..126) under half-open convention).
+        let fade_out = &out.active_slides[0];
+        assert_eq!(fade_out.tick_start, 122);
+        assert_eq!(fade_out.tick_end, 126);
+        // Fade-in: VOL_SLIDE read on tick 128 (after KOFF on tick 126
+        // + WAIT 1 → resume tick 128). First slide write on tick 129,
+        // last on tick 132 (= [129..133)).
+        let fade_in = &out.active_slides[1];
+        assert_eq!(fade_in.tick_start, 129);
+        assert_eq!(fade_in.tick_end, 133);
     }
 
     #[test]

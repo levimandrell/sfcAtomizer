@@ -794,7 +794,17 @@ pub struct SequenceCompileReport {
     pub max_writes_per_tick_estimate: u32,
     pub max_writes_per_tick_budget: u32,
     pub max_simultaneous_volume_slides: u32,
+    /// Sum of every WAIT opcode's operand. M2.4-locked baseline
+    /// (`M2_CANONICAL_SEQUENCE_TOTAL_TICKS = 249`).
     pub total_ticks: u32,
+    /// M2.8: wall-elapsed tick count under SPEC §14.3 semantics
+    /// (sum-of-WAIT-operands + 1 resume tick per WAIT). The tick
+    /// on which the END opcode reads. For the canonical fixture
+    /// this is 254 (= 249 + 5 WAITs). Optional in serialization
+    /// for back-compat with M2.4-era reports that pre-date the
+    /// field.
+    #[serde(default)]
+    pub total_elapsed_ticks: u32,
     /// ARAM start address of the voice setup table; populated by
     /// pack. `0` when this report is emitted standalone.
     pub voice_setup_addr: u16,
@@ -2034,6 +2044,7 @@ mod tests {
             max_writes_per_tick_budget: 24,
             max_simultaneous_volume_slides: 1,
             total_ticks: 249,
+            total_elapsed_ticks: 254,
             voice_setup_addr: 0x13FC,
             sequence_addr: 0x1300,
             per_step: vec![SequenceStepLowering {
@@ -2066,6 +2077,7 @@ mod tests {
             max_writes_per_tick_budget: 24,
             max_simultaneous_volume_slides: 1,
             total_ticks: 0,
+            total_elapsed_ticks: 0,
             voice_setup_addr: 0,
             sequence_addr: 0,
             per_step: Vec::new(),

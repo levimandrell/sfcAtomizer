@@ -3284,6 +3284,7 @@ fn build_sequence_compile_report(
         max_writes_per_tick_budget: manifest.limits.max_dsp_writes_per_tick,
         max_simultaneous_volume_slides: manifest.limits.max_simultaneous_volume_slides as u32,
         total_ticks: seq_out.total_ticks,
+        total_elapsed_ticks: seq_out.total_elapsed_ticks,
         voice_setup_addr,
         sequence_addr,
         per_step,
@@ -5696,14 +5697,19 @@ fn cmd_verify_spc_stereo(
     }
 
     if with_source_step_windows {
-        // SPEC §21 windows: pre=ticks 80..=120, post=ticks 130..=249.
-        // Convert ticks to frames at 60.150 Hz nominal:
+        // SPEC §21 windows under the M2.8 elapsed-tick semantics
+        // (consultant #1; SPEC §14.3 wait-decrement-before-opcode-
+        // read alignment): pre = ticks 80..=120 (atom_a sustains
+        // until VOL_SLIDE reads on tick 121), post = ticks 133..=254
+        // (atom_b sustains starting tick 133; sequence END reads
+        // on tick 254). Source-step transition itself spans ticks
+        // 121..=132. Convert ticks to frames at 60.150 Hz nominal:
         //   frames_per_tick = 32000 / 60.150 ≈ 532.0
         let fpt = 32_000.0 / 60.150;
         let pre_start = (80.0 * fpt) as u32;
         let pre_end = (120.0 * fpt) as u32;
-        let post_start = (130.0 * fpt) as u32;
-        let post_end = (249.0 * fpt) as u32;
+        let post_start = (133.0 * fpt) as u32;
+        let post_end = (254.0 * fpt) as u32;
         let (pre_l, pre_r) = per_channel_metrics(&pcm_bytes, 32_000, pre_start, pre_end);
         let (post_l, post_r) = per_channel_metrics(&pcm_bytes, 32_000, post_start, post_end);
         report.source_step_pre_window = Some(StereoWindow {
