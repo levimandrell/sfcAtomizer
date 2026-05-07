@@ -204,10 +204,8 @@ pub fn compile_sequence(
     // is structurally impossible at runtime. Surface as
     // CapabilityMissing so direct + transitive failures share one
     // error type.
-    if let Err(crate::capability_manifest::CapabilityDepError::MissingDep {
-        feature,
-        missing,
-    }) = manifest.validate_dependencies()
+    if let Err(crate::capability_manifest::CapabilityDepError::MissingDep { feature, missing }) =
+        manifest.validate_dependencies()
     {
         return Err(SequenceCompileError::CapabilityMissing {
             feature: format!("{missing} (transitive dep of {feature})"),

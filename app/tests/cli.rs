@@ -977,7 +977,12 @@ fn validate_project_with_template_reports_pre_import_errors() {
     assert_eq!(v["report_type"], "validation");
     assert_eq!(v["status"], "invalid");
     let errors = v["errors"].as_array().unwrap();
-    assert!(errors.iter().any(|e| e["path"] == "/sample_pool"));
+    // M2.5: empty sample_pool is no longer an error per SPEC §16.6;
+    // the unset active_sample_id still triggers a rule-66 failure.
+    assert!(
+        !errors.iter().any(|e| e["path"] == "/sample_pool"),
+        "/sample_pool no longer errors on empty pool (M2.5 relaxation)"
+    );
     assert!(errors.iter().any(|e| e["path"] == "/m1/active_sample_id"));
 }
 
@@ -2572,7 +2577,10 @@ fn cli_migrate_project_then_compile_spc_matches_v1_baseline() {
 }
 
 #[test]
-fn cli_compile_spc_on_v2_with_atoms_errors_with_m25_pending() {
+fn cli_compile_spc_on_v2_with_atoms_succeeds_at_m25() {
+    // M2.5 implements the multi_voice_atom compile path. The same
+    // fixture that errored at M2.4 with "M2.5 pending" now produces
+    // a 66 048-byte .spc and a non-empty ARAM image.
     let dir = TempDir::new().unwrap();
     let v2_path = dir.path().join("v2_atoms.json");
     let v2 = serde_json::json!({
@@ -2597,7 +2605,7 @@ fn cli_compile_spc_on_v2_with_atoms_errors_with_m25_pending() {
                 "force_filter_0_loop_entry": true
             },
             "playback": {
-                "volume": 0.8, "pan": 0.0, "echo": false,
+                "volume": 0.8, "pan": 1.0, "echo": false,
                 "envelope": { "type": "gain_raw", "gain_byte": 127 }
             }
         }],
@@ -2622,23 +2630,34 @@ fn cli_compile_spc_on_v2_with_atoms_errors_with_m25_pending() {
     });
     std::fs::write(&v2_path, serde_json::to_string(&v2).unwrap()).unwrap();
 
+    let spc = dir.path().join("a.spc");
+    let img = dir.path().join("a.bin");
     let out = Command::new(bin())
         .args(["compile-spc", "--project"])
         .arg(&v2_path)
         .args(["--out-spc"])
-        .arg(dir.path().join("a.spc"))
+        .arg(&spc)
         .args(["--out-image"])
-        .arg(dir.path().join("a.bin"))
+        .arg(&img)
         .args(["--out-map"])
         .arg(dir.path().join("a.map.json"))
+        .args(["--out-report"])
+        .arg(dir.path().join("a.compile.json"))
         .output()
         .expect("run sfcwc");
-    assert_ne!(out.status.code(), Some(0), "expected non-zero exit");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("M2.5") || stderr.contains("atom") || stderr.contains("v2 project"),
-        "expected M2.5-pending or atom-related error; got: {stderr}"
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "expected exit 0; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    let spc_bytes = std::fs::read(&spc).unwrap();
+    assert_eq!(spc_bytes.len(), 66_048, ".spc must be 66 048 bytes");
+    let img_bytes = std::fs::read(&img).unwrap();
+    assert_eq!(img_bytes.len(), 65_536, "ARAM image must be 64 KiB");
+    // Driver code starts at $0200; first byte should be the first
+    // init opcode `mov $f2, #$6c` (8F 6C F2), not zeroes.
+    assert_eq!(&img_bytes[0x0200..0x0203], &[0x8F, 0x6C, 0xF2]);
 }
 
 // =============================================================================
@@ -3211,4 +3230,356 @@ fn cli_pack_v2_multi_voice_with_sequence_emits_sequence_region() {
     .unwrap() as usize;
     let img = std::fs::read(&image).unwrap();
     assert_eq!(&img[start..start + 4], b"SEQ2");
+}
+
+// =============================================================================
+// M2.5 — verify-spc-stereo + per-channel oracle gates (SPEC §21)
+// =============================================================================
+
+/// Synthesize a v2 multi_voice_atom project with one looped sine
+/// sample on voice 0 (hard left) and one sine_128 atom step on
+/// voice 1 (hard right). Returns the project path. The sample WAV
+/// is created in-tree at `<dir>/audio/lead.wav` and its SHA is
+/// embedded in the project JSON so the validator passes.
+fn write_v2_combined_for_m25_gate(dir: &Path) -> PathBuf {
+    use sfc_atomizer_core::asm::sha256_hex_file;
+    let audio_dir = dir.join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let wav = audio_dir.join("lead.wav");
+    // 8 192 frames at 32 kHz = 256 ms. Looped — playback will hold
+    // through the oracle's 32 000-frame render (1 s).
+    let pcm = synth_sine_pcm(8_192, 64.0, 8000.0);
+    write_pcm16_wav_with_samples(&wav, 32_000, 1, &pcm);
+    let sha = sha256_hex_file(&wav).unwrap();
+
+    let proj = dir.join("combined.sfcproj.json");
+    let v2 = serde_json::json!({
+        "schema_version": 2,
+        "project": { "name": "combined_m25", "tick_rate_hz": 60 },
+        "driver": { "profile": "multi_voice_atom", "bytecode_version": 2 },
+        "master_echo": {
+            "enabled": false, "edl": 0, "efb": 0,
+            "evol_l": 0, "evol_r": 0, "fir": [127, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "sample_pool": [{
+            "id": "lead", "name": "lead",
+            "source": {
+                "path": "audio/lead.wav",
+                "sha256": sha,
+                "format": "wav", "sample_rate_hz": 32000,
+                "channels": 1, "frames": 8192
+            },
+            "root_midi_note": 60,
+            "loop": { "enabled": true, "start_sample": 0, "end_sample": 8192, "snap": "brr_block_16" },
+            "playback": {
+                "volume": 1.0, "pan": -1.0, "echo": false,
+                "envelope": { "type": "gain_raw", "gain_byte": 127 }
+            }
+        }],
+        "atom_pool": [{
+            "id": "sine_128", "name": "sine_128",
+            "kind": "additive_single_cycle_v0",
+            "root_midi_note": 60,
+            "cycle_len_samples": 128,
+            "amplitude": 0.75,
+            "partials": [{ "harmonic": 1, "amplitude": 1.0, "phase_cycles": 0.0 }],
+            "render": {
+                "normalize": true,
+                "force_filter_0_first_block": true,
+                "force_filter_0_loop_entry": true
+            },
+            "playback": {
+                "volume": 1.0, "pan": 1.0, "echo": false,
+                "envelope": { "type": "gain_raw", "gain_byte": 127 }
+            }
+        }],
+        "atom_sequences": [{
+            "id": "atomseq_0001", "name": "single", "voice": 1,
+            "steps": [{
+                "atom_id": "sine_128",
+                "duration_ticks": 60,
+                "target_volume": 1.0,
+                "transition": { "type": "initial_kon" }
+            }],
+            "loop": false
+        }],
+        "tracks": [
+            { "id": "track_sample_0", "voice": 0, "kind": "sample_sustain", "sample_id": "lead" },
+            { "id": "track_atom_1", "voice": 1, "kind": "atom_sequence", "atom_sequence_id": "atomseq_0001" }
+        ],
+        "m2": { "active_sequence_id": "atomseq_0001" }
+    });
+    std::fs::write(&proj, serde_json::to_string_pretty(&v2).unwrap()).unwrap();
+    proj
+}
+
+/// M2.5 canonical: compile a v2 multi_voice_atom project, render
+/// through the oracle in stereo mode, and assert SPEC §21 per-channel
+/// audibility / silence gates. Skipped when asar or oracle missing.
+#[test]
+fn cli_verify_spc_stereo_combined_passes_spec_21_thresholds() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    if !oracle_resolved_for_test() {
+        eprintln!("skip: oracle wrapper not built");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = write_v2_combined_for_m25_gate(dir.path());
+
+    let spc = dir.path().join("combined.spc");
+    let aram = dir.path().join("combined.aram.bin");
+    let map = dir.path().join("combined.map.json");
+    let creport = dir.path().join("combined.compile.json");
+    let oracle = oracle_wrapper_path();
+
+    let out = Command::new(bin())
+        .env("SFCWC_SNES_SPC_ORACLE", &oracle)
+        .args(["compile-spc", "--project"])
+        .arg(&proj)
+        .args(["--out-spc"])
+        .arg(&spc)
+        .args(["--out-image"])
+        .arg(&aram)
+        .args(["--out-map"])
+        .arg(&map)
+        .args(["--out-report"])
+        .arg(&creport)
+        .output()
+        .expect("run compile-spc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "compile-spc stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stereo_report = dir.path().join("combined.stereo.json");
+    let pcm = dir.path().join("combined.pcm");
+    let frames = 32_000_u32;
+    let out = Command::new(bin())
+        .env("SFCWC_SNES_SPC_ORACLE", &oracle)
+        .args(["verify-spc-stereo", "--spc"])
+        .arg(&spc)
+        .args(["--frames", &frames.to_string()])
+        .args(["--out-report"])
+        .arg(&stereo_report)
+        .args(["--out-pcm"])
+        .arg(&pcm)
+        .output()
+        .expect("run verify-spc-stereo");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "verify-spc-stereo stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let r = read_json(&stereo_report);
+    assert_eq!(r["report_type"], "oracle_stereo");
+    assert_eq!(r["frames_rendered"].as_u64(), Some(frames as u64));
+    let l_max = r["left"]["max_abs"].as_u64().unwrap();
+    let l_rms = r["left"]["rms"].as_f64().unwrap();
+    let r_max = r["right"]["max_abs"].as_u64().unwrap();
+    let r_rms = r["right"]["rms"].as_f64().unwrap();
+    // SPEC §21 thresholds: max_abs >= 1000, rms >= 200 per audible channel.
+    assert!(l_max >= 1000, "L max_abs {l_max} below 1000");
+    assert!(l_rms >= 200.0, "L rms {l_rms} below 200");
+    assert!(r_max >= 1000, "R max_abs {r_max} below 1000");
+    assert!(r_rms >= 200.0, "R rms {r_rms} below 200");
+}
+
+/// M2.5: m2-channel-acceptance suite ties three projects together
+/// (sample_only / atom_only / combined). All §21 gates green when
+/// the driver is healthy. Skipped when asar/oracle missing.
+#[test]
+fn cli_m2_channel_acceptance_canonical_suite() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    if !oracle_resolved_for_test() {
+        eprintln!("skip: oracle wrapper not built");
+        return;
+    }
+    use sfc_atomizer_core::asm::sha256_hex_file;
+    let dir = TempDir::new().unwrap();
+    let audio_dir = dir.path().join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let wav = audio_dir.join("lead.wav");
+    let pcm = synth_sine_pcm(8_192, 64.0, 8000.0);
+    write_pcm16_wav_with_samples(&wav, 32_000, 1, &pcm);
+    let sha = sha256_hex_file(&wav).unwrap();
+
+    let sample_only = dir.path().join("sample_only.sfcproj.json");
+    let atom_only = dir.path().join("atom_only.sfcproj.json");
+    let combined = dir.path().join("combined.sfcproj.json");
+
+    let sample_only_v1 = serde_json::json!({
+        "schema_version": 1,
+        "project": { "name": "sample_only", "tick_rate_hz": 60 },
+        "driver": { "profile": "sample_basic", "bytecode_version": 1 },
+        "master_echo": {
+            "enabled": false, "edl": 0, "efb": 0,
+            "evol_l": 0, "evol_r": 0, "fir": [127, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "sample_pool": [{
+            "id": "lead", "name": "lead",
+            "source": {
+                "path": "audio/lead.wav",
+                "sha256": sha,
+                "format": "wav", "sample_rate_hz": 32000,
+                "channels": 1, "frames": 8192
+            },
+            "root_midi_note": 60,
+            "loop": { "enabled": true, "start_sample": 0, "end_sample": 8192, "snap": "brr_block_16" },
+            "playback": {
+                "volume": 1.0, "pan": -1.0, "echo": false,
+                "envelope": { "type": "gain_raw", "gain_byte": 127 }
+            }
+        }],
+        "m1": { "active_sample_id": "lead" }
+    });
+    let atom_only_v2 = serde_json::json!({
+        "schema_version": 2,
+        "project": { "name": "atom_only", "tick_rate_hz": 60 },
+        "driver": { "profile": "multi_voice_atom", "bytecode_version": 2 },
+        "master_echo": {
+            "enabled": false, "edl": 0, "efb": 0,
+            "evol_l": 0, "evol_r": 0, "fir": [127, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "sample_pool": [],
+        "atom_pool": [{
+            "id": "sine_128", "name": "sine_128",
+            "kind": "additive_single_cycle_v0",
+            "root_midi_note": 60, "cycle_len_samples": 128, "amplitude": 0.75,
+            "partials": [{ "harmonic": 1, "amplitude": 1.0, "phase_cycles": 0.0 }],
+            "render": { "normalize": true,
+                        "force_filter_0_first_block": true,
+                        "force_filter_0_loop_entry": true },
+            "playback": { "volume": 1.0, "pan": 1.0, "echo": false,
+                          "envelope": { "type": "gain_raw", "gain_byte": 127 } }
+        }],
+        "atom_sequences": [{
+            "id": "atomseq_0001", "name": "single", "voice": 1,
+            "steps": [{ "atom_id": "sine_128", "duration_ticks": 60,
+                        "target_volume": 1.0,
+                        "transition": { "type": "initial_kon" } }],
+            "loop": false
+        }],
+        "tracks": [
+            { "id": "track_atom_1", "voice": 1, "kind": "atom_sequence",
+              "atom_sequence_id": "atomseq_0001" }
+        ],
+        "m2": { "active_sequence_id": "atomseq_0001" }
+    });
+    // Combined: same as the helper but with two atoms (sine_128 → sine_64)
+    // so the source-step zcr ratio gate has signal.
+    let combined_v2 = serde_json::json!({
+        "schema_version": 2,
+        "project": { "name": "combined", "tick_rate_hz": 60 },
+        "driver": { "profile": "multi_voice_atom", "bytecode_version": 2 },
+        "master_echo": {
+            "enabled": false, "edl": 0, "efb": 0,
+            "evol_l": 0, "evol_r": 0, "fir": [127, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "sample_pool": [{
+            "id": "lead", "name": "lead",
+            "source": { "path": "audio/lead.wav", "sha256": sha,
+                        "format": "wav", "sample_rate_hz": 32000,
+                        "channels": 1, "frames": 8192 },
+            "root_midi_note": 60,
+            "loop": { "enabled": true, "start_sample": 0,
+                      "end_sample": 8192, "snap": "brr_block_16" },
+            "playback": { "volume": 1.0, "pan": -1.0, "echo": false,
+                          "envelope": { "type": "gain_raw", "gain_byte": 127 } }
+        }],
+        "atom_pool": [
+            { "id": "sine_128", "name": "sine_128",
+              "kind": "additive_single_cycle_v0",
+              "root_midi_note": 60, "cycle_len_samples": 128, "amplitude": 0.75,
+              "partials": [{ "harmonic": 1, "amplitude": 1.0, "phase_cycles": 0.0 }],
+              "render": { "normalize": true,
+                          "force_filter_0_first_block": true,
+                          "force_filter_0_loop_entry": true },
+              "playback": { "volume": 1.0, "pan": 1.0, "echo": false,
+                            "envelope": { "type": "gain_raw", "gain_byte": 127 } } },
+            { "id": "sine_64", "name": "sine_64",
+              "kind": "additive_single_cycle_v0",
+              "root_midi_note": 60, "cycle_len_samples": 64, "amplitude": 0.75,
+              "partials": [{ "harmonic": 1, "amplitude": 1.0, "phase_cycles": 0.0 }],
+              "render": { "normalize": true,
+                          "force_filter_0_first_block": true,
+                          "force_filter_0_loop_entry": true },
+              "playback": { "volume": 1.0, "pan": 1.0, "echo": false,
+                            "envelope": { "type": "gain_raw", "gain_byte": 127 } } }
+        ],
+        "atom_sequences": [{
+            "id": "atomseq_0001", "name": "two_step", "voice": 1,
+            "steps": [
+                { "atom_id": "sine_128", "duration_ticks": 120,
+                  "target_volume": 1.0,
+                  "transition": { "type": "initial_kon" } },
+                { "atom_id": "sine_64", "duration_ticks": 120,
+                  "target_volume": 1.0,
+                  "transition": { "type": "fade_to_zero_retrigger",
+                                  "fade_out_ticks": 4, "fade_in_ticks": 4 } }
+            ],
+            "loop": false
+        }],
+        "tracks": [
+            { "id": "track_sample_0", "voice": 0, "kind": "sample_sustain", "sample_id": "lead" },
+            { "id": "track_atom_1", "voice": 1, "kind": "atom_sequence",
+              "atom_sequence_id": "atomseq_0001" }
+        ],
+        "m2": { "active_sequence_id": "atomseq_0001" }
+    });
+    std::fs::write(
+        &sample_only,
+        serde_json::to_string_pretty(&sample_only_v1).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &atom_only,
+        serde_json::to_string_pretty(&atom_only_v2).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &combined,
+        serde_json::to_string_pretty(&combined_v2).unwrap(),
+    )
+    .unwrap();
+
+    let out_dir = dir.path().join("m2acc");
+    let oracle = oracle_wrapper_path();
+    let out = Command::new(bin())
+        .env("SFCWC_SNES_SPC_ORACLE", &oracle)
+        .args(["m2-channel-acceptance"])
+        .args(["--sample-only-project"])
+        .arg(&sample_only)
+        .args(["--atom-only-project"])
+        .arg(&atom_only)
+        .args(["--combined-project"])
+        .arg(&combined)
+        .args(["--out"])
+        .arg(&out_dir)
+        .args(["--frames", "160000"])
+        .output()
+        .expect("run m2-channel-acceptance");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "m2-channel-acceptance stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let report = read_json(&out_dir.join("m2-channel-acceptance.json"));
+    assert_eq!(report["report_type"], "m2_channel_acceptance");
+    assert_eq!(report["gate"], "ok", "findings: {:?}", report["findings"]);
+    let ratio = report["source_step_zcr_ratio"].as_f64().unwrap();
+    assert!(ratio >= 1.5, "source-step zcr ratio {ratio} below 1.5");
 }
