@@ -135,6 +135,58 @@ fn build_driver_for_minimal_project() {
     assert_eq!(out.driver_code, out2.driver_code);
 }
 
+/// M2.8.1 (consultant M2 close-out #16): the M2.4 release-baseline
+/// table classified `M1_DRIVER_CODE_SHA256` as identity-gated, but
+/// the only test pinning it (`build_driver_for_minimal_project`)
+/// asserted byte-equality across two consecutive builds — not
+/// against the locked literal. Drift in the loader / asar / driver
+/// asm would slip through. This test pulls the locked value from
+/// `baselines/m2.json` (the single source of truth) and asserts
+/// the build produces the same SHA.
+///
+/// `baselines/m2.json` is included via `include_str!` so the test
+/// fails to compile when the file is missing, rather than skipping
+/// silently. asar resolution gates the runtime build (skips with
+/// stderr note when asar isn't present, same as
+/// `build_driver_for_minimal_project`).
+#[test]
+fn m1_driver_code_sha_matches_locked_baseline() {
+    if skip_if_no_asar() {
+        return;
+    }
+    const BASELINES_JSON: &str =
+        include_str!("../../baselines/m2.json");
+    let baselines: serde_json::Value =
+        serde_json::from_str(BASELINES_JSON).expect("baselines/m2.json must parse");
+    let identity_gated = baselines["identity_gated"]
+        .as_array()
+        .expect("baselines.identity_gated must be an array");
+    let entry = identity_gated
+        .iter()
+        .find(|e| e["name"].as_str() == Some("M1_DRIVER_CODE_SHA256"))
+        .expect("baselines/m2.json must have M1_DRIVER_CODE_SHA256");
+    let locked_sha = entry["value"]
+        .as_str()
+        .expect("M1_DRIVER_CODE_SHA256 value must be a string");
+
+    let project = minimal_project();
+    let map = map_for(0x1200);
+    let dir = TempDir::new().unwrap();
+    let out = build(DriverBuildInput {
+        project: &project,
+        map_report: &map,
+        source_override: None,
+        working_dir: dir.path().to_path_buf(),
+    })
+    .expect("build ok");
+
+    assert_eq!(
+        out.driver_code_sha256, locked_sha,
+        "M1 driver SHA drift vs baselines/m2.json — investigate before \
+         updating the baseline (locked at M2.0 rebase)."
+    );
+}
+
 #[test]
 fn build_driver_active_sample_missing_errors() {
     let mut project = minimal_project();

@@ -3,7 +3,7 @@
   "report_type": "release_baselines",
   "release": "v0.2-rc",
   "milestone": "M2.8",
-  "_doc": "Machine-readable baselines (consultant #23, #25). Three classifications: identity_gated (any drift = regression), behavior_gated (numeric thresholds documenting policy), documentary_snapshot (informational; expected to shift on declared milestones). Retired baselines kept for archaeology under `retired`.",
+  "_doc": "Machine-readable release baselines for v0.2-rc (M2.8 / M2.8.1). Contains current locked / snapshot values; `retired` section captures M2.x ARAM SHA evolutions only. Not a complete historical baseline registry — pre-M2 retired baselines live in docs/history/M0-M2-passes.md. Three current classifications: identity_gated (any drift = regression), behavior_gated (numeric thresholds documenting policy), documentary_snapshot (informational; expected to shift on declared milestones).",
   "identity_gated": [
     {
       "name": "M1_LOADER_SIZE_BYTES",
@@ -21,10 +21,11 @@
     },
     {
       "name": "M1_DRIVER_CODE_SHA256",
-      "value": "671ee21ebb207302940075519e1ad0de557a97280038ab12aef7a22994b2bcfe",
+      "value": "22c5335e2dd889af14aec03e1792484ac71e13fb327d66431c712cdbcd826250",
       "kind": "sha256",
-      "locked_at": "M2.0 (rebase)",
-      "test": "core/tests/driver_build.rs::build_driver_for_minimal_project (deterministic)"
+      "locked_at": "M2.8.1",
+      "test": "core/tests/driver_build.rs::m1_driver_code_sha_matches_locked_baseline",
+      "_note": "Originally locked at M2.0 with value 671ee21eb...4b2bcfe but no test asserted the literal value — the M2.0 bootstrap-token fix (`fix(driver): seed dp_last_token from $F4 at init`, consultant M2.0 #1) added bytes to the M1 driver and the SHA shifted unobserved. M2.8.1 added `m1_driver_code_sha_matches_locked_baseline` to pin the current value via this entry; further drift now fails the test."
     },
     {
       "name": "M2_CANONICAL_SEQUENCE_BYTECODE_SHA256",
@@ -47,7 +48,16 @@
       "value": 249,
       "kind": "tick_count",
       "locked_at": "M2.4",
-      "_note": "sum-of-WAIT-operands; semantic locked at M2.4. Wall-elapsed tick count is `total_elapsed_ticks` = 254 (consultant #1, M2.8)."
+      "test": "core/src/sequence_compiler.rs::tests::total_ticks_matches_lowering",
+      "_note": "sum-of-WAIT-operands; semantic locked at M2.4. Wall-elapsed tick count is `M2_CANONICAL_SEQUENCE_ELAPSED_TICKS` = 254."
+    },
+    {
+      "name": "M2_CANONICAL_SEQUENCE_ELAPSED_TICKS",
+      "value": 254,
+      "kind": "tick_count",
+      "locked_at": "M2.8",
+      "test": "core/src/sequence_compiler.rs::tests::total_elapsed_ticks_includes_resume_tick_per_wait",
+      "rule": "wall-elapsed tick count under SPEC §14.3 wait-decrement-before-opcode-read; END opcode reads on tick 254 for canonical fixture (= 249 + 5 WAITs)."
     }
   ],
   "behavior_gated": [
