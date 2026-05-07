@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::atom::{AtomKind, AtomSlot, AtomPartial};
+use crate::atom::{AtomKind, AtomPartial, AtomSlot};
 use crate::project::{
     is_valid_id, validate_sample_slot, validate_string_field, Driver, Envelope, MasterEcho,
     Project, ProjectIoError, ProjectV1, SampleSlot, ValidationError, ValidationErrorKind,
@@ -925,17 +925,19 @@ pub fn load_project_versioned(path: &Path) -> Result<LoadedProject, ProjectIoErr
         .ok_or(ProjectIoError::MalformedValue)?;
     match version {
         1 => {
-            let p: ProjectV1 = serde_json::from_value(v).map_err(|source| ProjectIoError::Parse {
-                path: path.to_path_buf(),
-                source,
-            })?;
+            let p: ProjectV1 =
+                serde_json::from_value(v).map_err(|source| ProjectIoError::Parse {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
             Ok(LoadedProject::V1(p))
         }
         2 => {
-            let p: ProjectV2 = serde_json::from_value(v).map_err(|source| ProjectIoError::Parse {
-                path: path.to_path_buf(),
-                source,
-            })?;
+            let p: ProjectV2 =
+                serde_json::from_value(v).map_err(|source| ProjectIoError::Parse {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
             Ok(LoadedProject::V2(p))
         }
         other => Err(ProjectIoError::UnsupportedSchemaVersion {
@@ -1038,9 +1040,7 @@ impl MigrationReport {
                 Transformation {
                     path: "/m1".to_string(),
                     kind: "dropped".to_string(),
-                    note: Some(
-                        "active_sample_id mapped to /tracks/0/sample_id".to_string(),
-                    ),
+                    note: Some("active_sample_id mapped to /tracks/0/sample_id".to_string()),
                 },
             ],
         }
@@ -1552,10 +1552,7 @@ mod tests {
     fn rule_39_atom_playback_volume_range() {
         let mut p = valid_v2_multi_voice_atom();
         p.atom_pool[0].playback.volume = 1.5;
-        assert_has_path(
-            &p.validate().unwrap_err(),
-            "/atom_pool/0/playback/volume",
-        );
+        assert_has_path(&p.validate().unwrap_err(), "/atom_pool/0/playback/volume");
     }
 
     // Rule 40: atom_sequence id pattern.
@@ -1761,7 +1758,8 @@ mod tests {
     fn rule_57_multi_voice_atom_requires_atom_track() {
         let mut p = valid_v2_multi_voice_atom();
         // Drop the atom-track and the now-orphan atom_sequence.
-        p.tracks.retain(|t| !matches!(t.kind, TrackKind::AtomSequence { .. }));
+        p.tracks
+            .retain(|t| !matches!(t.kind, TrackKind::AtomSequence { .. }));
         p.atom_sequences.clear();
         p.atom_pool.clear();
         p.m2.active_sequence_id = None;
@@ -1918,7 +1916,10 @@ mod tests {
         std::fs::write(&path, br#"{"schema_version":99}"#).unwrap();
         let err = load_project_versioned(&path).unwrap_err();
         assert!(
-            matches!(err, ProjectIoError::UnsupportedSchemaVersion { actual: 99, .. }),
+            matches!(
+                err,
+                ProjectIoError::UnsupportedSchemaVersion { actual: 99, .. }
+            ),
             "got: {err:?}"
         );
     }

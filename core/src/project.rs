@@ -879,22 +879,15 @@ pub enum ValidationErrorKind {
     TrackSampleIdNotFound(String),
     #[error("track atom_sequence_id {0:?} not found in atom_sequences")]
     TrackAtomSequenceIdNotFound(String),
-    #[error(
-        "track voice {track_voice} doesn't match its atom_sequence voice {sequence_voice}"
-    )]
-    TrackAtomSequenceVoiceMismatch {
-        track_voice: u8,
-        sequence_voice: u8,
-    },
+    #[error("track voice {track_voice} doesn't match its atom_sequence voice {sequence_voice}")]
+    TrackAtomSequenceVoiceMismatch { track_voice: u8, sequence_voice: u8 },
     #[error("m2.active_sequence_id {0:?} not found in atom_sequences")]
     ActiveAtomSequenceNotFound(String),
     #[error(
         "driver.profile=\"sample_basic\" forbids non-empty atom_pool / atom_sequences / atom_sequence tracks / voice-1 tracks"
     )]
     SampleBasicForbidsAtomData,
-    #[error(
-        "driver.profile=\"multi_voice_atom\" requires at least one atom_sequence track"
-    )]
+    #[error("driver.profile=\"multi_voice_atom\" requires at least one atom_sequence track")]
     MultiVoiceAtomRequiresAtomSequenceTrack,
 }
 

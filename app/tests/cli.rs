@@ -2447,7 +2447,10 @@ fn cli_migrate_project_already_v2_exits_2() {
         stderr.contains("already at schema_version 2"),
         "expected explicit already-v2 error; got: {stderr}"
     );
-    assert!(!v2_out.exists(), "must not write output for already-v2 input");
+    assert!(
+        !v2_out.exists(),
+        "must not write output for already-v2 input"
+    );
 }
 
 #[test]
@@ -2479,7 +2482,10 @@ fn cli_migrate_project_corrupted_v1_exits_2() {
         .output()
         .expect("run sfcwc");
     assert_eq!(out.status.code(), Some(2));
-    assert!(!v2.exists(), "must not write output when v1 fails validation");
+    assert!(
+        !v2.exists(),
+        "must not write output when v1 fails validation"
+    );
 }
 
 #[test]

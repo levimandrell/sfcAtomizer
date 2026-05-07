@@ -1937,9 +1937,10 @@ fn v1_shim_from_sample_only_v2(
     // track. Anything else routes to the M2.5-pending error.
     let any_atom_data = !v2.atom_pool.is_empty() || !v2.atom_sequences.is_empty();
     let only_sample_voice_0 = !v2.tracks.is_empty()
-        && v2.tracks.iter().all(|t| {
-            t.voice == 0 && matches!(t.kind, TrackKind::SampleSustain { .. })
-        });
+        && v2
+            .tracks
+            .iter()
+            .all(|t| t.voice == 0 && matches!(t.kind, TrackKind::SampleSustain { .. }));
     if any_atom_data || !only_sample_voice_0 {
         eprintln!(
             "{label}: v2 project {} has atoms or atom sequences. atom rendering lands at M2.2; sequence compilation at M2.4; multi-voice driver at M2.5. v2 projects with atoms or sequences cannot yet be compiled. Use a sample-only v2 project, or stay on v1 until M2.5 ships.",
@@ -2092,8 +2093,7 @@ fn cmd_migrate_project(
         Some(p) => p.to_path_buf(),
         None => default_migration_report_path(out_path),
     };
-    let report =
-        MigrationReport::for_v1_to_v2(in_path.to_path_buf(), out_path.to_path_buf(), &v1);
+    let report = MigrationReport::for_v1_to_v2(in_path.to_path_buf(), out_path.to_path_buf(), &v1);
     if let Err(e) = write_json(&report_path, &report) {
         eprintln!(
             "migrate-project: writing migration report {}: {e}",
@@ -2410,13 +2410,8 @@ fn cmd_pack(
         None => None,
     };
     let v1_input = prepare_v1_input("pack", project_path);
-    let outcome = compile_aram_image(
-        "pack",
-        &v1_input.path,
-        driver_override,
-        refresh_source_hash,
-    )
-    .expect("compile_aram_image returns via exit on error");
+    let outcome = compile_aram_image("pack", &v1_input.path, driver_override, refresh_source_hash)
+        .expect("compile_aram_image returns via exit on error");
     let project = outcome.project;
     let result_image = outcome.image;
     let map_report = outcome.map_report;
@@ -3778,13 +3773,8 @@ fn cmd_compile_spc(
     refresh_source_hash: bool,
 ) -> Result<(), CliError> {
     let v1_input = prepare_v1_input("compile-spc", project_path);
-    let outcome = compile_aram_image(
-        "compile-spc",
-        &v1_input.path,
-        None,
-        refresh_source_hash,
-    )
-    .expect("compile_aram_image returns via exit on error");
+    let outcome = compile_aram_image("compile-spc", &v1_input.path, None, refresh_source_hash)
+        .expect("compile_aram_image returns via exit on error");
     let project = &outcome.project;
 
     let stem = project_path

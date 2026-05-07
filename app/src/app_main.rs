@@ -25,6 +25,9 @@ use sfc_atomizer_core::module_writer::{
 };
 use sfc_atomizer_core::packer::{pack as packer_pack, EncodedSample, PackInput};
 use sfc_atomizer_core::project::{ProjectV1, SampleSlot, ValidationError};
+use sfc_atomizer_core::project_v2::{
+    load_project_versioned, migrate_from_v1, LoadedProject, MigrationReport, ProjectV2, TrackKind,
+};
 use sfc_atomizer_core::report::{AramKind, AramMapReport};
 use sfc_atomizer_core::sfc_export::{export_sfc, SfcExportInput, MODULE_A_FILE_OFFSET};
 use sfc_atomizer_core::spc::build_m1_image;
@@ -56,7 +59,13 @@ fn main() -> Result<(), eframe::Error> {
 
 #[derive(Default)]
 struct SfcwcApp {
+    /// Loaded v1 project. Mutually exclusive with [`Self::loaded_v2`].
     project: Option<ProjectV1>,
+    /// Loaded v2 project (M2.1). Mutually exclusive with
+    /// [`Self::project`]. The two-variant store keeps the v1 surface
+    /// untouched while letting v2 land in the same window; v2 atom /
+    /// sequence panels are read-only at M2.1 (editing arrives M2.7).
+    loaded_v2: Option<ProjectV2>,
     project_path: Option<PathBuf>,
     validation_errors: Vec<ValidationError>,
     selected_sample_id: Option<String>,
@@ -65,6 +74,7 @@ struct SfcwcApp {
     open_modal: ModalState,
     save_as_modal: ModalState,
     new_modal: NewModalState,
+    migrate_modal: ModalState,
     show_errors_modal: bool,
     loop_candidates_modal: LoopCandidatesModalState,
 
@@ -123,18 +133,30 @@ struct NewModalState {
 
 impl SfcwcApp {
     fn try_open(&mut self, path: &Path) {
-        match ProjectV1::load_from_path(path) {
-            Ok(p) => {
+        match load_project_versioned(path) {
+            Ok(LoadedProject::V1(p)) => {
                 let errors = p.validate().err().unwrap_or_default();
                 self.project = Some(p);
+                self.loaded_v2 = None;
                 self.project_path = Some(path.to_path_buf());
                 self.validation_errors = errors;
                 self.selected_sample_id = None;
-                self.status_message = Some(format!("loaded {}", path.display()));
+                self.status_message = Some(format!("loaded {} (schema v1)", path.display()));
+                self.recompute_aram_meter();
+            }
+            Ok(LoadedProject::V2(p)) => {
+                let errors = p.validate().err().unwrap_or_default();
+                self.loaded_v2 = Some(p);
+                self.project = None;
+                self.project_path = Some(path.to_path_buf());
+                self.validation_errors = errors;
+                self.selected_sample_id = None;
+                self.status_message = Some(format!("loaded {} (schema v2)", path.display()));
                 self.recompute_aram_meter();
             }
             Err(e) => {
                 self.project = None;
+                self.loaded_v2 = None;
                 self.project_path = None;
                 self.validation_errors = Vec::new();
                 self.status_message = Some(format!("load failed: {e}"));
@@ -144,16 +166,76 @@ impl SfcwcApp {
         }
     }
 
+    /// Build a v1-equivalent project for compile / preview paths from
+    /// whatever schema is currently loaded. Returns None when only v2
+    /// with atom data is loaded — atom rendering / sequence
+    /// compilation / multi-voice driver land at M2.2 / M2.4 / M2.5.
+    fn project_v1_for_compile(&self) -> Option<ProjectV1> {
+        if let Some(p) = &self.project {
+            return Some(p.clone());
+        }
+        let v2 = self.loaded_v2.as_ref()?;
+        let any_atom_data = !v2.atom_pool.is_empty() || !v2.atom_sequences.is_empty();
+        let only_sample_voice_0 = !v2.tracks.is_empty()
+            && v2
+                .tracks
+                .iter()
+                .all(|t| t.voice == 0 && matches!(t.kind, TrackKind::SampleSustain { .. }));
+        if any_atom_data || !only_sample_voice_0 {
+            return None;
+        }
+        let active_sample_id = v2
+            .tracks
+            .iter()
+            .find_map(|t| match &t.kind {
+                TrackKind::SampleSustain { sample_id } => Some(sample_id.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        Some(ProjectV1 {
+            schema_version: ProjectV1::SCHEMA_VERSION_M1,
+            project: v2.project.clone(),
+            driver: v2.driver.clone(),
+            master_echo: v2.master_echo.clone(),
+            sample_pool: v2.sample_pool.clone(),
+            m1: sfc_atomizer_core::project::M1Block { active_sample_id },
+        })
+    }
+
+    /// Active sample pool for sample-pool listing / editing actions.
+    /// Editable when v1 is loaded; read-only mirror when v2 is loaded.
+    fn active_sample_pool(&self) -> &[SampleSlot] {
+        if let Some(p) = &self.project {
+            &p.sample_pool
+        } else if let Some(v2) = &self.loaded_v2 {
+            &v2.sample_pool
+        } else {
+            &[]
+        }
+    }
+
     /// Synchronously decode + encode every sample, run the packer, and
     /// stash the resulting [`AramMapReport`] for the meter view. On
     /// any failure (missing audio, decode error, pack overflow), leave
     /// the previous meter untouched and stash an error string.
     fn recompute_aram_meter(&mut self) {
-        let Some(project) = self.project.as_ref() else {
-            self.aram_meter = None;
-            self.aram_meter_error = None;
-            return;
+        let project = match self.project_v1_for_compile() {
+            Some(p) => p,
+            None => {
+                self.aram_meter = None;
+                self.aram_meter_error = if self.loaded_v2.is_some() {
+                    Some(
+                        "ARAM meter requires a sample-only project; v2 with atom data \
+                         needs M2.5 driver to compile."
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
+                return;
+            }
         };
+        let project = &project;
         if !self.validation_errors.is_empty() {
             self.aram_meter = None;
             self.aram_meter_error = Some("project has validation errors".to_string());
@@ -216,23 +298,29 @@ impl SfcwcApp {
     }
 
     fn try_save(&mut self, path: &Path) {
-        let Some(project) = self.project.as_ref() else {
-            self.status_message = Some("no project loaded".to_string());
+        if let Some(v1) = self.project.as_ref() {
+            match v1.save_to_path(path) {
+                Ok(()) => {
+                    self.project_path = Some(path.to_path_buf());
+                    self.validation_errors = v1.validate().err().unwrap_or_default();
+                    self.status_message = Some(format!("saved {} (schema v1)", path.display()));
+                }
+                Err(e) => self.status_message = Some(format!("save failed: {e}")),
+            }
             return;
-        };
-        match project.save_to_path(path) {
-            Ok(()) => {
-                self.project_path = Some(path.to_path_buf());
-                // Re-validate after save (file content may equal what
-                // was already in memory, but the spec also requires
-                // validation on Save As).
-                self.validation_errors = project.validate().err().unwrap_or_default();
-                self.status_message = Some(format!("saved {}", path.display()));
-            }
-            Err(e) => {
-                self.status_message = Some(format!("save failed: {e}"));
-            }
         }
+        if let Some(v2) = self.loaded_v2.as_ref() {
+            match v2.save_to_path(path) {
+                Ok(()) => {
+                    self.project_path = Some(path.to_path_buf());
+                    self.validation_errors = v2.validate().err().unwrap_or_default();
+                    self.status_message = Some(format!("saved {} (schema v2)", path.display()));
+                }
+                Err(e) => self.status_message = Some(format!("save failed: {e}")),
+            }
+            return;
+        }
+        self.status_message = Some("no project loaded".to_string());
     }
 
     fn try_new(&mut self, path: &Path, name: &str) {
@@ -242,6 +330,7 @@ impl SfcwcApp {
                 self.project_path = Some(path.to_path_buf());
                 self.validation_errors = template.validate().err().unwrap_or_default();
                 self.project = Some(template);
+                self.loaded_v2 = None;
                 self.selected_sample_id = None;
                 self.status_message = Some(format!("created {}", path.display()));
                 self.recompute_aram_meter();
@@ -251,6 +340,73 @@ impl SfcwcApp {
             }
         }
     }
+
+    /// File → Migrate v1 → v2: explicit one-way migration per SPEC
+    /// §16.10. Validates v1, runs migrate_from_v1, validates v2,
+    /// writes both the migrated project and a sibling
+    /// `<stem>.migration-report.json`, then hot-reloads as v2.
+    fn try_migrate_v1_to_v2(&mut self, out_path: &Path) {
+        let Some(v1) = self.project.as_ref().cloned() else {
+            self.status_message =
+                Some("migrate: no v1 project loaded (Migrate is enabled only for v1)".to_string());
+            return;
+        };
+        if let Err(verrors) = v1.validate() {
+            self.status_message = Some(format!(
+                "migrate: v1 input fails validation ({} error(s)) — fix before migrating",
+                verrors.len()
+            ));
+            return;
+        }
+        let v2 = migrate_from_v1(&v1);
+        if let Err(verrors) = v2.validate() {
+            self.status_message = Some(format!(
+                "migrate: post-migration v2 fails validation ({} error(s)) — this is a real bug",
+                verrors.len()
+            ));
+            return;
+        }
+        if let Err(e) = v2.save_to_path(out_path) {
+            self.status_message = Some(format!("migrate: writing {}: {e}", out_path.display()));
+            return;
+        }
+        let report_path = default_migration_report_path(out_path);
+        let in_path = self
+            .project_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("<unknown>"));
+        let report = MigrationReport::for_v1_to_v2(in_path, out_path.to_path_buf(), &v1);
+        if let Ok(json) = serde_json::to_string_pretty(&report) {
+            // Append a trailing newline to match the v1/v2 save_to_path
+            // formatting; nothing relies on it but it keeps `git diff`
+            // tidy if the user tracks the report.
+            let _ = std::fs::write(&report_path, format!("{json}\n"));
+        }
+        self.project = None;
+        self.loaded_v2 = Some(v2);
+        self.project_path = Some(out_path.to_path_buf());
+        self.validation_errors = self
+            .loaded_v2
+            .as_ref()
+            .and_then(|v| v.validate().err())
+            .unwrap_or_default();
+        self.selected_sample_id = None;
+        self.status_message = Some(format!(
+            "migrated v1 → v2: {} (report → {})",
+            out_path.display(),
+            report_path.display()
+        ));
+        self.recompute_aram_meter();
+    }
+}
+
+fn default_migration_report_path(out: &Path) -> PathBuf {
+    let stem = out
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".to_string());
+    let parent = out.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!("{stem}.migration-report.json"))
 }
 
 impl eframe::App for SfcwcApp {
@@ -270,6 +426,7 @@ impl eframe::App for SfcwcApp {
         self.draw_open_modal(ctx);
         self.draw_save_as_modal(ctx);
         self.draw_new_modal(ctx);
+        self.draw_migrate_modal(ctx);
         self.draw_errors_modal(ctx);
         self.draw_loop_candidates_modal(ctx);
     }
@@ -299,7 +456,8 @@ impl SfcwcApp {
                         self.open_modal.visible = true;
                         ui.close();
                     }
-                    let save_enabled = self.project.is_some() && self.project_path.is_some();
+                    let any_loaded = self.project.is_some() || self.loaded_v2.is_some();
+                    let save_enabled = any_loaded && self.project_path.is_some();
                     if ui
                         .add_enabled(save_enabled, egui::Button::new("Save Project"))
                         .clicked()
@@ -310,10 +468,7 @@ impl SfcwcApp {
                         ui.close();
                     }
                     if ui
-                        .add_enabled(
-                            self.project.is_some(),
-                            egui::Button::new("Save Project As…"),
-                        )
+                        .add_enabled(any_loaded, egui::Button::new("Save Project As…"))
                         .clicked()
                     {
                         self.save_as_modal.path_input = self
@@ -324,7 +479,32 @@ impl SfcwcApp {
                         self.save_as_modal.visible = true;
                         ui.close();
                     }
+                    // Migrate v1 → v2: enabled only when a v1 is loaded.
+                    let migrate_enabled = self.project.is_some();
+                    if ui
+                        .add_enabled(migrate_enabled, egui::Button::new("Migrate v1 → v2…"))
+                        .clicked()
+                    {
+                        let stem = self
+                            .project_path
+                            .as_ref()
+                            .and_then(|p| p.file_stem())
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "project".to_string());
+                        let dir = self
+                            .project_path
+                            .as_ref()
+                            .and_then(|p| p.parent())
+                            .map(|p| p.to_path_buf())
+                            .unwrap_or_else(|| PathBuf::from("."));
+                        self.migrate_modal.path_input =
+                            dir.join(format!("{stem}.v2.json")).display().to_string();
+                        self.migrate_modal.visible = true;
+                        ui.close();
+                    }
                     ui.separator();
+                    // Import is v1-only at M2.1 (sample-pool editing for
+                    // v2 lands at M2.7).
                     let import_enabled = self.project.is_some() && self.project_path.is_some();
                     if ui
                         .add_enabled(import_enabled, egui::Button::new("Import Audio…"))
@@ -383,24 +563,30 @@ impl SfcwcApp {
             .show(ctx, |ui| {
                 ui.heading("Sample Pool");
                 ui.separator();
-                let Some(project) = self.project.as_ref() else {
+                let any_loaded = self.project.is_some() || self.loaded_v2.is_some();
+                if !any_loaded {
                     ui.vertical_centered(|ui| {
                         ui.add_space(12.0);
                         ui.label("(no project loaded)");
                     });
                     return;
-                };
-                if project.sample_pool.is_empty() {
+                }
+                let pool: Vec<SampleSlot> = self.active_sample_pool().to_vec();
+                if pool.is_empty() {
                     ui.vertical_centered(|ui| {
                         ui.add_space(12.0);
                         ui.label("No samples imported yet.");
-                        ui.label("(Import lands at M1.2.)");
+                        if self.loaded_v2.is_some() {
+                            ui.label("(v2 sample-pool editing lands at M2.7.)");
+                        } else {
+                            ui.label("(Import via File → Import Audio…)");
+                        }
                     });
                     return;
                 }
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let selected = self.selected_sample_id.clone();
-                    for s in &project.sample_pool {
+                    for s in &pool {
                         let is_selected = selected.as_deref() == Some(s.id.as_str());
                         let label = format!(
                             "{} ({})\n  {} — {} frames",
@@ -420,9 +606,18 @@ impl SfcwcApp {
     fn draw_bottom_status(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                match (&self.project_path, &self.project) {
-                    (Some(path), Some(_)) => {
+                let schema_label = if self.project.is_some() {
+                    Some("Schema v1")
+                } else if self.loaded_v2.is_some() {
+                    Some("Schema v2")
+                } else {
+                    None
+                };
+                match (&self.project_path, schema_label) {
+                    (Some(path), Some(label)) => {
                         ui.label(format!("Loaded: {}", path.display()));
+                        ui.separator();
+                        ui.label(label);
                         ui.separator();
                         if self.validation_errors.is_empty() {
                             ui.label("Valid: ✓");
@@ -462,44 +657,77 @@ impl SfcwcApp {
         let last_sfc_verify_summary = self.last_sfc_verify_summary.clone();
         let last_sfc_verify_ok = self.last_sfc_verify_ok;
         let has_compiled_sfc = self.last_compiled_sfc.is_some();
+        let has_v2 = self.loaded_v2.is_some();
+        let v2_clone = self.loaded_v2.clone();
         egui::CentralPanel::default().show(ctx, |ui| {
-            let Some(project) = self.project.as_mut() else {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(40.0);
-                    ui.label("Open a project from the File menu.");
-                    ui.add_space(8.0);
-                    ui.weak("File → Open Project…");
-                });
-                return;
-            };
-            match selected.as_deref() {
-                Some(id) => match project.sample_pool.iter_mut().find(|s| s.id == id) {
-                    Some(s) => {
-                        response = draw_sample_detail(ui, s);
-                    }
+            if let Some(project) = self.project.as_mut() {
+                match selected.as_deref() {
+                    Some(id) => match project.sample_pool.iter_mut().find(|s| s.id == id) {
+                        Some(s) => {
+                            response = draw_sample_detail(ui, s);
+                        }
+                        None => {
+                            ui.weak(format!("(selected sample {id} not in pool)"));
+                        }
+                    },
                     None => {
-                        ui.weak(format!("(selected sample {id} not in pool)"));
+                        project_resp = draw_project_detail(
+                            ui,
+                            ProjectDetailState {
+                                project,
+                                aram_meter: aram_meter.as_ref(),
+                                aram_meter_error: aram_meter_error.as_deref(),
+                                last_compile_summary: last_compile_summary.as_deref(),
+                                last_audible_summary: last_audible_summary.as_deref(),
+                                last_audible_ok,
+                                has_compiled_spc,
+                                last_sfc_compile_summary: last_sfc_compile_summary.as_deref(),
+                                last_sfc_verify_summary: last_sfc_verify_summary.as_deref(),
+                                last_sfc_verify_ok,
+                                has_compiled_sfc,
+                            },
+                        );
                     }
-                },
-                None => {
-                    project_resp = draw_project_detail(
-                        ui,
-                        ProjectDetailState {
-                            project,
-                            aram_meter: aram_meter.as_ref(),
-                            aram_meter_error: aram_meter_error.as_deref(),
-                            last_compile_summary: last_compile_summary.as_deref(),
-                            last_audible_summary: last_audible_summary.as_deref(),
-                            last_audible_ok,
-                            has_compiled_spc,
-                            last_sfc_compile_summary: last_sfc_compile_summary.as_deref(),
-                            last_sfc_verify_summary: last_sfc_verify_summary.as_deref(),
-                            last_sfc_verify_ok,
-                            has_compiled_sfc,
-                        },
-                    );
                 }
+                return;
             }
+            if has_v2 {
+                if let Some(v2) = v2_clone.as_ref() {
+                    match selected.as_deref() {
+                        Some(id) => match v2.sample_pool.iter().find(|s| s.id == id) {
+                            Some(s) => draw_sample_detail_readonly(ui, s),
+                            None => {
+                                ui.weak(format!("(selected sample {id} not in pool)"));
+                            }
+                        },
+                        None => {
+                            project_resp = draw_v2_project_detail(
+                                ui,
+                                V2ProjectDetailState {
+                                    project: v2,
+                                    aram_meter: aram_meter.as_ref(),
+                                    aram_meter_error: aram_meter_error.as_deref(),
+                                    last_compile_summary: last_compile_summary.as_deref(),
+                                    last_audible_summary: last_audible_summary.as_deref(),
+                                    last_audible_ok,
+                                    has_compiled_spc,
+                                    last_sfc_compile_summary: last_sfc_compile_summary.as_deref(),
+                                    last_sfc_verify_summary: last_sfc_verify_summary.as_deref(),
+                                    last_sfc_verify_ok,
+                                    has_compiled_sfc,
+                                },
+                            );
+                        }
+                    }
+                }
+                return;
+            }
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.label("Open a project from the File menu.");
+                ui.add_space(8.0);
+                ui.weak("File → Open Project…");
+            });
         });
         if response.edited {
             if let Some(p) = self.project.as_ref() {
@@ -589,6 +817,42 @@ impl SfcwcApp {
             self.save_as_modal.visible = false;
         } else if close {
             self.save_as_modal.visible = false;
+        }
+    }
+
+    fn draw_migrate_modal(&mut self, ctx: &egui::Context) {
+        if !self.migrate_modal.visible {
+            return;
+        }
+        let mut close = false;
+        let mut do_migrate = false;
+        egui::Window::new("Migrate v1 → v2")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Write migrated v2 project to:");
+                ui.text_edit_singleline(&mut self.migrate_modal.path_input);
+                ui.weak("A sibling .migration-report.json is written next to this file.");
+                ui.weak(
+                    "After migration, the v2 project hot-reloads in this window. The v1 \
+                     file is untouched.",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Migrate").clicked() {
+                        do_migrate = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if do_migrate {
+            let p = PathBuf::from(self.migrate_modal.path_input.trim());
+            self.try_migrate_v1_to_v2(&p);
+            self.migrate_modal.visible = false;
+        } else if close {
+            self.migrate_modal.visible = false;
         }
     }
 
@@ -806,8 +1070,14 @@ impl SfcwcApp {
     /// Synchronous in-process compile-spc. On success stores the
     /// path in `last_compiled_spc` so Verify Audible can run.
     fn do_compile_spc(&mut self) {
-        let Some(project) = self.project.as_ref().cloned() else {
-            self.last_compile_summary = Some("compile-spc: no project loaded".to_string());
+        let Some(project) = self.project_v1_for_compile() else {
+            self.last_compile_summary = Some(if self.loaded_v2.is_some() {
+                "compile-spc: v2 with atom data — atom rendering lands at M2.2; \
+                 sequence compilation at M2.4; multi-voice driver at M2.5"
+                    .to_string()
+            } else {
+                "compile-spc: no project loaded".to_string()
+            });
             return;
         };
         if !self.validation_errors.is_empty() {
@@ -1039,15 +1309,64 @@ impl SfcwcApp {
                 Some("compile-sfc: project has validation errors".to_string());
             return;
         }
+        // v2 dispatch: if v2 is loaded, write a synthetic v1 shim so
+        // sfc_export's v1-only loader keeps working. Mirrors the CLI's
+        // prepare_v1_input path. v2 with atoms errors here.
+        let shim_holder: Option<tempfile::TempDir>;
+        let project_a_path = if self.loaded_v2.is_some() {
+            let Some(v1) = self.project_v1_for_compile() else {
+                self.last_sfc_compile_summary = Some(
+                    "compile-sfc: v2 with atom data — atom rendering lands at M2.2; \
+                     sequence compilation at M2.4; multi-voice driver at M2.5"
+                        .to_string(),
+                );
+                return;
+            };
+            let dir = match tempfile::tempdir() {
+                Ok(d) => d,
+                Err(e) => {
+                    self.last_sfc_compile_summary =
+                        Some(format!("compile-sfc: v2 shim tempdir: {e}"));
+                    return;
+                }
+            };
+            // Use absolute audio paths so the shim, sitting in a
+            // tempdir, still resolves the user's audio files.
+            let project_dir = project_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let mut v1 = v1;
+            for s in &mut v1.sample_pool {
+                let raw = Path::new(&s.source.path);
+                if !raw.is_absolute() {
+                    s.source.path = project_dir.join(raw).display().to_string();
+                }
+            }
+            let shim = dir.path().join("project.v1-shim.json");
+            if let Err(e) = v1.save_to_path(&shim) {
+                self.last_sfc_compile_summary = Some(format!("compile-sfc: v2 shim write: {e}"));
+                return;
+            }
+            shim_holder = Some(dir);
+            shim
+        } else {
+            shim_holder = None;
+            project_path.clone()
+        };
+        let _shim_holder = shim_holder; // keep tempdir alive
         let project_dir = project_path
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
-        let stem = self
-            .project
-            .as_ref()
-            .map(|p| p.project.name.as_str())
-            .unwrap_or("project")
+        let stem_source = if let Some(p) = &self.project {
+            p.project.name.clone()
+        } else if let Some(v) = &self.loaded_v2 {
+            v.project.name.clone()
+        } else {
+            "project".to_string()
+        };
+        let stem = stem_source
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
             .collect::<String>();
@@ -1071,7 +1390,7 @@ impl SfcwcApp {
             }
         };
         match export_sfc(SfcExportInput {
-            project_a_path: project_path.clone(),
+            project_a_path: project_a_path.clone(),
             project_b_path: None,
             loader_source_override: None,
             working_dir: work.path().to_path_buf(),
@@ -1307,6 +1626,315 @@ struct ProjectDetailState<'a> {
     last_sfc_verify_summary: Option<&'a str>,
     last_sfc_verify_ok: Option<bool>,
     has_compiled_sfc: bool,
+}
+
+/// State for the v2 read-only project detail panel. v2 shares the
+/// same compile/audible/SFC button surface as v1 (sample-only-
+/// equivalent v2 compiles via the in-memory v1 shim per SPEC §16.10);
+/// editing of atom_pool / atom_sequences / tracks lands at M2.7.
+struct V2ProjectDetailState<'a> {
+    project: &'a ProjectV2,
+    aram_meter: Option<&'a AramMapReport>,
+    aram_meter_error: Option<&'a str>,
+    last_compile_summary: Option<&'a str>,
+    last_audible_summary: Option<&'a str>,
+    last_audible_ok: Option<bool>,
+    has_compiled_spc: bool,
+    last_sfc_compile_summary: Option<&'a str>,
+    last_sfc_verify_summary: Option<&'a str>,
+    last_sfc_verify_ok: Option<bool>,
+    has_compiled_sfc: bool,
+}
+
+fn draw_v2_project_detail(ui: &mut egui::Ui, s: V2ProjectDetailState<'_>) -> ProjectDetailResponse {
+    let V2ProjectDetailState {
+        project,
+        aram_meter,
+        aram_meter_error,
+        last_compile_summary,
+        last_audible_summary,
+        last_audible_ok,
+        has_compiled_spc,
+        last_sfc_compile_summary,
+        last_sfc_verify_summary,
+        last_sfc_verify_ok,
+        has_compiled_sfc,
+    } = s;
+    let mut resp = ProjectDetailResponse::default();
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.heading("Project (v2)");
+        ui.separator();
+        egui::Grid::new("project_grid_v2")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("name");
+                ui.monospace(&project.project.name);
+                ui.end_row();
+                ui.label("tick_rate_hz");
+                ui.monospace(project.project.tick_rate_hz.to_string());
+                ui.end_row();
+                ui.label("driver.profile");
+                ui.monospace(&project.driver.profile);
+                ui.end_row();
+                ui.label("driver.bytecode_version");
+                ui.monospace(project.driver.bytecode_version.to_string());
+                ui.end_row();
+                ui.label("master_echo.enabled");
+                ui.monospace(project.master_echo.enabled.to_string());
+                ui.end_row();
+                ui.label("sample_pool.len");
+                ui.monospace(project.sample_pool.len().to_string());
+                ui.end_row();
+                ui.label("atom_pool.len");
+                ui.monospace(project.atom_pool.len().to_string());
+                ui.end_row();
+                ui.label("atom_sequences.len");
+                ui.monospace(project.atom_sequences.len().to_string());
+                ui.end_row();
+                ui.label("tracks.len");
+                ui.monospace(project.tracks.len().to_string());
+                ui.end_row();
+                ui.label("m2.active_sequence_id");
+                ui.monospace(project.m2.active_sequence_id.as_deref().unwrap_or("(none)"));
+                ui.end_row();
+            });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.heading("Atom Pool (read-only — editing lands M2.7)");
+        if project.atom_pool.is_empty() {
+            ui.weak("(empty)");
+        } else {
+            egui::Grid::new("atom_pool_grid")
+                .num_columns(4)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("id");
+                    ui.strong("name");
+                    ui.strong("cycle_len");
+                    ui.strong("partials");
+                    ui.end_row();
+                    for a in &project.atom_pool {
+                        ui.monospace(&a.id);
+                        ui.monospace(&a.name);
+                        ui.monospace(a.cycle_len_samples.to_string());
+                        let partials_count = match &a.kind {
+                            sfc_atomizer_core::atom::AtomKind::AdditiveSingleCycleV0 {
+                                partials,
+                            } => partials.len(),
+                        };
+                        ui.monospace(partials_count.to_string());
+                        ui.end_row();
+                    }
+                });
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.heading("Atom Sequences (read-only)");
+        if project.atom_sequences.is_empty() {
+            ui.weak("(empty)");
+        } else {
+            for sq in &project.atom_sequences {
+                ui.label(format!(
+                    "{} (voice {}): {} step(s){}",
+                    sq.id,
+                    sq.voice,
+                    sq.steps.len(),
+                    if sq.looped { ", loop" } else { "" }
+                ));
+                for (j, step) in sq.steps.iter().enumerate() {
+                    let trans = match &step.transition {
+                        sfc_atomizer_core::project_v2::AtomTransition::InitialKon => {
+                            "initial_kon".to_string()
+                        }
+                        sfc_atomizer_core::project_v2::AtomTransition::FadeToZeroRetrigger {
+                            fade_out_ticks,
+                            fade_in_ticks,
+                        } => format!(
+                            "fade_to_zero_retrigger(out={}, in={})",
+                            fade_out_ticks, fade_in_ticks
+                        ),
+                    };
+                    ui.weak(format!(
+                        "  step {j}: atom={}, dur={}, vol={:.2}, trans={}",
+                        step.atom_id, step.duration_ticks, step.target_volume, trans,
+                    ));
+                }
+            }
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.heading("Tracks (read-only)");
+        if project.tracks.is_empty() {
+            ui.weak("(empty)");
+        } else {
+            egui::Grid::new("tracks_grid")
+                .num_columns(4)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("id");
+                    ui.strong("voice");
+                    ui.strong("kind");
+                    ui.strong("ref");
+                    ui.end_row();
+                    for t in &project.tracks {
+                        ui.monospace(&t.id);
+                        ui.monospace(t.voice.to_string());
+                        match &t.kind {
+                            TrackKind::SampleSustain { sample_id } => {
+                                ui.monospace("sample_sustain");
+                                ui.monospace(sample_id);
+                            }
+                            TrackKind::AtomSequence { atom_sequence_id } => {
+                                ui.monospace("atom_sequence");
+                                ui.monospace(atom_sequence_id);
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("ARAM meter");
+            if ui.button("Refresh").clicked() {
+                resp.refresh_meter = true;
+            }
+        });
+        if let Some(err) = aram_meter_error {
+            ui.colored_label(egui::Color32::from_rgb(220, 80, 80), format!("⚠ {err}"));
+        }
+        if let Some(report) = aram_meter {
+            draw_aram_meter(ui, report);
+        } else if aram_meter_error.is_none() {
+            ui.weak("(meter unavailable — open a valid project)");
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.heading("Compile + verify (M1.5)");
+        ui.weak(
+            "Sample-only v2 compiles via the v1-equivalent path; v2 with atom data \
+             is rejected pending M2.5.",
+        );
+        ui.horizontal(|ui| {
+            if ui.button("Compile SPC").clicked() {
+                resp.compile_spc = true;
+            }
+            if ui
+                .add_enabled(has_compiled_spc, egui::Button::new("Verify Audible"))
+                .clicked()
+            {
+                resp.verify_audible = true;
+            }
+        });
+        if let Some(s) = last_compile_summary {
+            ui.weak(s);
+        }
+        if let Some(s) = last_audible_summary {
+            let color = match last_audible_ok {
+                Some(true) => egui::Color32::from_rgb(80, 180, 100),
+                Some(false) => egui::Color32::from_rgb(220, 80, 80),
+                None => egui::Color32::from_gray(180),
+            };
+            ui.colored_label(color, s);
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.heading("Compile + verify (M1.6 .sfc)");
+        ui.horizontal(|ui| {
+            if ui.button("Compile SFC").clicked() {
+                resp.compile_sfc = true;
+            }
+            if ui
+                .add_enabled(has_compiled_sfc, egui::Button::new("Verify SFC"))
+                .clicked()
+            {
+                resp.verify_sfc = true;
+            }
+        });
+        if let Some(s) = last_sfc_compile_summary {
+            ui.weak(s);
+        }
+        if let Some(s) = last_sfc_verify_summary {
+            let color = match last_sfc_verify_ok {
+                Some(true) => egui::Color32::from_rgb(80, 180, 100),
+                Some(false) => egui::Color32::from_rgb(220, 80, 80),
+                None => egui::Color32::from_gray(180),
+            };
+            ui.colored_label(color, s);
+        }
+    });
+    resp
+}
+
+fn draw_sample_detail_readonly(ui: &mut egui::Ui, s: &SampleSlot) {
+    ui.heading(format!("Sample — {} (read-only, v2)", s.id));
+    ui.separator();
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::Grid::new("sample_grid_ro")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("name");
+                ui.monospace(&s.name);
+                ui.end_row();
+                ui.label("source.path");
+                ui.monospace(&s.source.path);
+                ui.end_row();
+                ui.label("source.format");
+                ui.monospace(format_format(&s.source.format));
+                ui.end_row();
+                ui.label("source.sample_rate_hz");
+                ui.monospace(s.source.sample_rate_hz.to_string());
+                ui.end_row();
+                ui.label("source.channels");
+                ui.monospace(s.source.channels.to_string());
+                ui.end_row();
+                ui.label("source.frames");
+                ui.monospace(s.source.frames.to_string());
+                ui.end_row();
+                ui.label("root_midi_note");
+                ui.monospace(s.root_midi_note.to_string());
+                ui.end_row();
+                ui.label("loop.enabled");
+                ui.monospace(s.looped.enabled.to_string());
+                ui.end_row();
+                if s.looped.enabled {
+                    ui.label("loop.start_sample");
+                    ui.monospace(
+                        s.looped
+                            .start_sample
+                            .map(|n| n.to_string())
+                            .unwrap_or_default(),
+                    );
+                    ui.end_row();
+                    ui.label("loop.end_sample");
+                    ui.monospace(
+                        s.looped
+                            .end_sample
+                            .map(|n| n.to_string())
+                            .unwrap_or_default(),
+                    );
+                    ui.end_row();
+                }
+                ui.label("playback.volume");
+                ui.monospace(format!("{:.3}", s.playback.volume));
+                ui.end_row();
+                ui.label("playback.pan");
+                ui.monospace(format!("{:.3}", s.playback.pan));
+                ui.end_row();
+                ui.label("playback.echo");
+                ui.monospace(s.playback.echo.to_string());
+                ui.end_row();
+            });
+        ui.add_space(8.0);
+        ui.weak("v2 sample editing lands at M2.7. Migrate v2 → v1 isn't supported (one-way).");
+    });
 }
 
 fn draw_project_detail(ui: &mut egui::Ui, s: ProjectDetailState<'_>) -> ProjectDetailResponse {
