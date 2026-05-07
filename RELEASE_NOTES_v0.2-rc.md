@@ -47,12 +47,16 @@ See `baselines/m2.json` for the full classification. Summary:
 - **Identity-gated** (any drift = regression): M1 loader
   (588 bytes, SHA pinned), M1 driver SHA, M2 canonical SEQ2
   bytecode SHA, M2 canonical voice setup table SHA,
-  `M2_CANONICAL_SEQUENCE_TOTAL_TICKS = 249`
-  (sum-of-WAIT-operands semantic).
+  `M2_CANONICAL_SEQUENCE_TOTAL_TICKS = 249` (sum-of-WAIT-operands
+  semantic), `M2_CANONICAL_SEQUENCE_ELAPSED_TICKS = 254`
+  (wall-elapsed under SPEC §14.3 wait-decrement-before-opcode-read).
 - **Behavior-gated**: M1 + M2 audibility floors, silence
   ceilings, source-step zero-crossing ratio, 32 KiB module cap.
-- **Documentary snapshot** (expected to shift at M3): M2 driver
-  code size (1158 B), atom BRR / PCM SHAs, loop click scores.
+- **Documentary snapshot** (expected to shift at M3): atom BRR
+  SHAs, M2 driver code size (1158 B), loop-click scores. Atom
+  PCM SHAs are M3-stable IF the atom render formula is
+  unchanged (M3 is BRR encoder quality work; the host-side
+  atom render formula is reserved).
 
 `baselines/m2_canonical_fixtures.md` carries the canonical SEQ2
 bytecode + voice setup table hex dumps with per-byte breakdowns.
@@ -100,9 +104,13 @@ This release-candidate is recorded as `v0.2-rc` in
 `baselines/m2.json::release`. Tag in git when ready to publish:
 
 ```bash
-git tag v0.2-rc1 <m2.8-close-commit>
+git tag -a v0.2-rc1 <m2.8.1-close-commit> -m "v0.2-rc1: M2 release candidate"
 git push origin v0.2-rc1
 ```
 
-PM's call on whether to tag — recommend tagging at the M2.8
-close commit so the release is verifiable from-tag.
+Annotated tag (`-a`) carries the message + tagger metadata so the
+release is fully self-describing from `git show v0.2-rc1`. Tag the
+M2.8.1 close commit (final release-prep patches) rather than
+M2.8 — the M2.8.1 patches narrow scope claims, add the
+elapsed-ticks identity-gate, and pin the M1 driver SHA literally,
+all of which the release-candidate label depends on.
