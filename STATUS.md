@@ -2,24 +2,159 @@
 
 ## Current milestone
 
-**M2 contracts frozen; M1 baselines rebased.** M1 driver
-token-bootstrap and loader ack-verify hotfixes (consultant
-findings #1 and #10) shifted every M1 baseline SHA — driver
-324 → 325 bytes, loader 581 → 588 bytes; audible output
-unchanged (`max_abs=11072`, `rms=5519.6`). All 8 SPEC
-promotions from STATUS landed; 7 M2 architectural contract
-sections from Appendix A landed (capability manifest M2,
-sequence bytecode v2, schema v2, driver `multi_voice_atom`,
-voice setup table, ARAM region order, M2 acceptance
-thresholds). Cheap M2 type skeletons (`core::bytecode`,
-`core::atom`, `core::project_v2`) landed; validation +
-migration bodies are `todo!()` for M2.1.
+**M2.1 — Project schema v2 implementation shipped.**
+`ProjectV2::validate` covers SPEC §16.9 rules 1–25 (carry
+forward from v1 via the new `validate_sample_slot` free
+function) plus 26–57 (schema_version, the
+`sample_basic`/`multi_voice_atom` profile coupling, atom
+pool, atom sequences, tracks, the m2 block, and the
+sample-only-vs-multi-voice cross-cuts). `migrate_from_v1`
+implements §16.10 as a pure transformation; load-time silent
+upgrades remain forbidden. ProjectV2 has its own
+load_from_path / save_to_path (with pre-save validation).
+A `LoadedProject` enum + `load_project_versioned` dispatcher
+routes by `schema_version`. The host CLI gains
+`sfcwc migrate-project --in <v1> --out <v2>` with a
+structured `MigrationReport` and exit codes 0/1/2/3. The
+GUI dispatches Open through the versioned loader, exposes a
+File → Migrate v1 → v2 menu item, and renders read-only
+v2 atom_pool / atom_sequences / tracks panels.
+Sample-only-equivalent v2 projects compile through the v1
+pipeline via an in-memory v1 shim and produce bit-identical
+ARAM / SPC / SFC output; v2 with atom data errors with the
+M2.5-pending message.
 
-**M2.1 next.** Project schema v2 implementation:
-`ProjectV2::validate` body, `migrate_from_v1` body, host
-load/save plumbing. PM to brief.
+**M2.2 next.** Synth atom v0 compiler — render PCM cycle
+per SPEC §16.9 atom-render formula, encode through the
+existing M1 BRR encoder. PM to brief.
 
 ## Last pass
+
+**Pass M2.1 — Project schema v2 implementation + audition cleanup.**
+
+- **Phase 0 (audition cleanup):** PM auditioned all three
+  M2.0-postlude WAVs and the underlying `.spc` / `.sfc`
+  artifacts on real Mesen2; M1 driver bootstrap-token fix
+  (consultant #1) and loader ack-token + ack-code fix
+  (consultant #10) confirmed working in real-hardware
+  emulation. Audible periodic loop click at the fundamental
+  cycle rate (~4 Hz for 8192-sample loops at 32 kHz)
+  observed and expected per consultant finding #9. Locked
+  `M1_LOOP_CLICK_SCORE = 795` in the post-M2.0 baselines
+  block as the future M2.5/M2.6 oracle-loop-click metric
+  baseline. Removed `audition/m2.0-postlude/` (audit
+  artifact, not part of the long-term repo).
+- **Phase A (`ProjectV2::validate`):** SPEC §16.9 rules
+  26–57 implemented in `core::project_v2`. Carry-forward
+  rules 1–25 reuse a new free function
+  `core::project::validate_sample_slot` (extracted from the
+  previous `ProjectV1::validate` method) so v1 + v2 share
+  one source of truth for sample-slot rules. The
+  `ValidationErrorKind` enum extended with v2-specific
+  variants (atom partials, transitions, tracks, the
+  cross-pool ID collision, profile / bytecode coupling,
+  sample-basic-vs-multi-voice cross-cuts).
+- **Phase B (`migrate_from_v1`):** Pure transformation per
+  SPEC §16.10. schema_version 1 → 2; project / driver /
+  master_echo / sample_pool carried forward; atom_pool +
+  atom_sequences added empty; a single voice-0
+  sample_sustain track `track_sample_0` mapped from
+  `m1.active_sample_id`; `m1` dropped; `m2` added with
+  `active_sequence_id: null`. Caller validates the result.
+- **Phase C (v2 IO):** `ProjectV2::load_from_path /
+  load_and_validate / save_to_path` mirror the v1 surface;
+  `save_to_path` is validation-gated (refuses to write an
+  invalid v2 project). v2 round-trip is byte-stable across
+  save → load → save.
+- **Phase D (versioned dispatch):** `LoadedProject::{V1, V2}`
+  enum + `load_project_versioned(path)` reads JSON, peeks
+  `schema_version`, dispatches. Other versions return
+  `ProjectIoError::UnsupportedSchemaVersion`. No silent
+  upgrades.
+- **Phase E (`sfcwc migrate-project` CLI):** New subcommand
+  with `--in / --out / --migration-report` flags. Exit
+  codes 0 success, 1 IO/parse, 2 v1-validation OR
+  already-at-v2, 3 post-migration v2 validation. Writes
+  the migrated project + a structured `MigrationReport`
+  next to it (`<out_stem>.migration-report.json` by
+  default). `validate-project` now dispatches by
+  `schema_version` so v1 and v2 projects validate through
+  the same CLI surface. `compile-spc / compile-sfc / pack`
+  gain a `prepare_v1_input` helper: v1 passes through;
+  sample-only-equivalent v2 (empty atom data, all tracks
+  sample_sustain on voice 0) is shimmed to a synthetic v1
+  in a tempdir with absolute audio paths so the existing
+  v1-only pipeline produces bit-identical output; v2 with
+  atom data errors with the M2.5-pending message.
+- **Phase F (GUI v1/v2 dual-load):** The eframe shell now
+  dispatches File → Open through `load_project_versioned`.
+  Two-variant state (`Option<ProjectV1>` /
+  `Option<ProjectV2>`); the loaded schema appears in the
+  status bar. File → Save writes back as the loaded
+  version (no auto-migrate). New File → Migrate v1 → v2…
+  menu item runs the explicit migration, writes a sibling
+  migration report, and hot-reloads as v2; the v1 file is
+  untouched. v2 detail panel renders read-only Atom Pool /
+  Atom Sequences / Tracks sections; v2 sample entries are
+  shown read-only (editing arrives at M2.7). Compile +
+  Verify buttons work for v2 sample-only via the same
+  in-memory v1 shim used by the CLI.
+- **Phase G (tests):** 51 new core/lib v2 tests — positive
+  baseline + targeted negative tests for each new
+  validation rule (26–57, with cross-coupling cases for
+  rule 30 sample/atom ID collision and rule 54 track-vs-
+  sequence voice match). v2 round-trip byte-stability
+  test. Migration round-trip stability (v1 → v2 → save →
+  reload → save must be byte-identical). Migration field-
+  mapping correctness vs SPEC §16.10. `MigrationReport`
+  shape test. `load_project_versioned` dispatch tests for
+  each schema version + unknown-version rejection. 5 new
+  CLI integration tests in `app/tests/cli.rs` covering
+  migrate-project happy path, already-v2 input,
+  corrupted-v1 input, the round-trip migrate-then-compile-
+  spc bit-identical baseline, and the v2-with-atoms error.
+  **395 tests across the workspace; all green.** (was 347;
+  +48.)
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --all-targets`, `cargo test --workspace`
+  all green.
+
+### M2.1 demo (this host)
+
+Generated a canonical 8192-sample 8000-amp period-64 sine,
+imported into a v1 project, migrated to v2, ran compile-spc
+on both, and confirmed bit-identical output:
+
+```
+v1 driver_code = 671ee21ebb207302940075519e1ad0de557a97280038ab12aef7a22994b2bcfe
+v2 driver_code = 671ee21ebb207302940075519e1ad0de557a97280038ab12aef7a22994b2bcfe
+v1 aram_image = 8727dcbe6561a8af730096b18e0e6e746cccd03c47131ced6f975ed503d6068a
+v2 aram_image = 8727dcbe6561a8af730096b18e0e6e746cccd03c47131ced6f975ed503d6068a
+v1 spc_file   = 912ac507d62d90db93a42ff177fd842b7d6a65018f0b0f1453601a1531b09312
+v2 spc_file   = 912ac507d62d90db93a42ff177fd842b7d6a65018f0b0f1453601a1531b09312
+```
+
+(SHAs differ from the locked M1 baselines because that
+fixture has loop enabled at start_sample=0 / end_sample=8192 /
+snap=brr_block_16; the demo here uses an auto-imported,
+non-looped sine. The CLI integration test
+`cli_migrate_project_then_compile_spc_matches_v1_baseline`
+in `app/tests/cli.rs` covers the bit-identity claim
+end-to-end against the CLI-built fixture.)
+
+A v2 project with non-empty atom data correctly errors:
+
+```
+compile-spc: v2 project v2_atoms.json has atoms or atom
+sequences. atom rendering lands at M2.2; sequence
+compilation at M2.4; multi-voice driver at M2.5. v2
+projects with atoms or sequences cannot yet be compiled.
+Use a sample-only v2 project, or stay on v1 until M2.5
+ships.
+exit=2
+```
+
+## Previous passes
 
 **Pass M2.0 — Contracts freeze + M1 hotfix.**
 
@@ -984,6 +1119,24 @@ packer, the driver_build constants generator, the
 module_writer, the SFC export, or the SPC contract that alters
 these SHAs is a producer-side regression and must be flagged.
 
+- **Migration is explicit** (M2.1): v1 → v2 migration runs only via
+  `sfcwc migrate-project` (CLI) or File → Migrate v1 → v2 (GUI).
+  Load-time silent upgrades remain forbidden per SPEC §16.10.
+- **v2 sample-only compile path** (M2.1): a v2 project with empty
+  `atom_pool`, empty `atom_sequences`, and only voice-0
+  `sample_sustain` tracks compiles via the existing v1 pipeline
+  (in-memory v1 shim). v2 with atom data errors with the
+  M2.5-pending message; atom rendering lands at M2.2, sequence
+  compilation at M2.4, multi-voice driver at M2.5.
+- **GUI v2 read-only at M2.1:** atom_pool / atom_sequences / tracks
+  panels are listings only; editing arrives at M2.7.
+- **v2 round-trip byte-stability locked** (M2.1): `ProjectV2::save_to_path
+  → load_from_path → save_to_path` produces byte-identical output;
+  enforced by the `v2_save_load_round_trip_byte_stable` test.
+- **Migration is bit-preservation-clean** (M2.1): compile-spc on a
+  migrated sample-only v2 produces the same ARAM / SPC SHAs as
+  compile-spc on the original v1. Enforced by the
+  `cli_migrate_project_then_compile_spc_matches_v1_baseline` test.
 - **License model:** Apache-2.0 for the host application source; 0BSD for
   generated outputs (`.spc`, `.sfc`, driver/module blobs); snes_spc kept
   out-of-process to avoid LGPL propagation. See `LICENSING.md`.

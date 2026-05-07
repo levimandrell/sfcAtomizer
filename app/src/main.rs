@@ -1964,9 +1964,18 @@ fn v1_shim_from_sample_only_v2(
     // Build a v1 with absolute audio paths (the synthetic file lives
     // in a tempdir, away from the user's project_dir; relative
     // resolution would otherwise be wrong).
-    let project_dir = project_path
+    //
+    // Canonicalize the project path first so the parent is a real
+    // absolute path even when the user passed a relative project arg
+    // (`v2.json` from cwd). Falls back to joining cwd if canonicalize
+    // fails (e.g. broken symlinks).
+    let canonical = std::fs::canonicalize(project_path)
+        .ok()
+        .unwrap_or_else(|| project_path.to_path_buf());
+    let project_dir = canonical
         .parent()
         .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let mut sample_pool = v2.sample_pool.clone();
     for s in &mut sample_pool {
