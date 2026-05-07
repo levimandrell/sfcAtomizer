@@ -2361,3 +2361,275 @@ fn find_loop_candidates_writes_report() {
         assert_eq!(end % 16, 0);
     }
 }
+
+// =============================================================================
+// M2.1 — migrate-project (SPEC §16.10)
+// =============================================================================
+
+#[test]
+fn cli_migrate_project_happy_path() {
+    let dir = TempDir::new().unwrap();
+    let v1 = make_project_with_one_imported_sample(dir.path(), "v1mig");
+    let v2 = dir.path().join("v1mig.v2.json");
+
+    let out = Command::new(bin())
+        .args(["migrate-project", "--in"])
+        .arg(&v1)
+        .args(["--out"])
+        .arg(&v2)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let migrated = read_json(&v2);
+    assert_eq!(migrated["schema_version"], 2);
+    assert!(migrated["m1"].is_null());
+    assert_eq!(migrated["m2"]["active_sequence_id"], Value::Null);
+    assert!(migrated["atom_pool"].as_array().unwrap().is_empty());
+    assert!(migrated["atom_sequences"].as_array().unwrap().is_empty());
+    let tracks = migrated["tracks"].as_array().unwrap();
+    assert_eq!(tracks.len(), 1);
+    assert_eq!(tracks[0]["id"], "track_sample_0");
+    assert_eq!(tracks[0]["voice"], 0);
+    assert_eq!(tracks[0]["kind"], "sample_sustain");
+
+    // Default migration report path lives next to --out.
+    let report = dir.path().join("v1mig.v2.migration-report.json");
+    let r = read_json(&report);
+    assert_eq!(r["schema_version"], 1);
+    assert_eq!(r["report_type"], "migration_v1_to_v2");
+    assert_eq!(r["source_schema_version"], 1);
+    assert_eq!(r["target_schema_version"], 2);
+    let xs = r["transformations"].as_array().unwrap();
+    let paths: Vec<&str> = xs.iter().map(|t| t["path"].as_str().unwrap()).collect();
+    assert!(paths.contains(&"/m1"));
+    assert!(paths.contains(&"/atom_pool"));
+    assert!(paths.contains(&"/m2"));
+    assert!(paths.contains(&"/tracks"));
+}
+
+#[test]
+fn cli_migrate_project_already_v2_exits_2() {
+    let dir = TempDir::new().unwrap();
+    let v2_in = dir.path().join("already.v2.json");
+    let v2 = serde_json::json!({
+        "schema_version": 2,
+        "project": { "name": "already", "tick_rate_hz": 60 },
+        "driver": { "profile": "sample_basic", "bytecode_version": 1 },
+        "master_echo": {
+            "enabled": false, "edl": 0, "efb": 0,
+            "evol_l": 0, "evol_r": 0, "fir": [127, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "sample_pool": [],
+        "atom_pool": [],
+        "atom_sequences": [],
+        "tracks": [],
+        "m2": { "active_sequence_id": null }
+    });
+    std::fs::write(&v2_in, serde_json::to_string(&v2).unwrap()).unwrap();
+    let v2_out = dir.path().join("ignored.v2.json");
+
+    let out = Command::new(bin())
+        .args(["migrate-project", "--in"])
+        .arg(&v2_in)
+        .args(["--out"])
+        .arg(&v2_out)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("already at schema_version 2"),
+        "expected explicit already-v2 error; got: {stderr}"
+    );
+    assert!(!v2_out.exists(), "must not write output for already-v2 input");
+}
+
+#[test]
+fn cli_migrate_project_corrupted_v1_exits_2() {
+    let dir = TempDir::new().unwrap();
+    let v1 = dir.path().join("corrupt.json");
+    // Valid JSON, valid v1 envelope, but fails v1 validation
+    // (invalid driver profile, empty sample_pool, missing
+    // active_sample_id).
+    let bad = serde_json::json!({
+        "schema_version": 1,
+        "project": { "name": "bad", "tick_rate_hz": 60 },
+        "driver": { "profile": "synth_static", "bytecode_version": 1 },
+        "master_echo": {
+            "enabled": false, "edl": 0, "efb": 0,
+            "evol_l": 0, "evol_r": 0, "fir": [127, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "sample_pool": [],
+        "m1": { "active_sample_id": "" }
+    });
+    std::fs::write(&v1, serde_json::to_string(&bad).unwrap()).unwrap();
+    let v2 = dir.path().join("corrupt.v2.json");
+
+    let out = Command::new(bin())
+        .args(["migrate-project", "--in"])
+        .arg(&v1)
+        .args(["--out"])
+        .arg(&v2)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!v2.exists(), "must not write output when v1 fails validation");
+}
+
+#[test]
+fn cli_migrate_project_then_compile_spc_matches_v1_baseline() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let v1 = make_project_with_one_imported_sample(dir.path(), "baseline");
+
+    // Compile from v1 directly.
+    let v1_image = dir.path().join("v1.aram.bin");
+    let v1_spc = dir.path().join("v1.spc");
+    let out_v1 = Command::new(bin())
+        .args(["compile-spc", "--project"])
+        .arg(&v1)
+        .args(["--out-spc"])
+        .arg(&v1_spc)
+        .args(["--out-image"])
+        .arg(&v1_image)
+        .args(["--out-map"])
+        .arg(dir.path().join("v1.map.json"))
+        .args(["--out-report"])
+        .arg(dir.path().join("v1.compile.json"))
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out_v1.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out_v1.stderr)
+    );
+
+    // Migrate v1 -> v2.
+    let v2 = dir.path().join("baseline.v2.json");
+    let mig = Command::new(bin())
+        .args(["migrate-project", "--in"])
+        .arg(&v1)
+        .args(["--out"])
+        .arg(&v2)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(mig.status.code(), Some(0), "{:?}", mig);
+
+    // Compile from v2.
+    let v2_image = dir.path().join("v2.aram.bin");
+    let v2_spc = dir.path().join("v2.spc");
+    let out_v2 = Command::new(bin())
+        .args(["compile-spc", "--project"])
+        .arg(&v2)
+        .args(["--out-spc"])
+        .arg(&v2_spc)
+        .args(["--out-image"])
+        .arg(&v2_image)
+        .args(["--out-map"])
+        .arg(dir.path().join("v2.map.json"))
+        .args(["--out-report"])
+        .arg(dir.path().join("v2.compile.json"))
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out_v2.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out_v2.stderr)
+    );
+
+    // Migration must preserve audio behaviour bit-identically.
+    let v1_image_bytes = std::fs::read(&v1_image).unwrap();
+    let v2_image_bytes = std::fs::read(&v2_image).unwrap();
+    assert_eq!(
+        v1_image_bytes, v2_image_bytes,
+        "ARAM image must be bit-identical across migration"
+    );
+    let v1_spc_bytes = std::fs::read(&v1_spc).unwrap();
+    let v2_spc_bytes = std::fs::read(&v2_spc).unwrap();
+    assert_eq!(
+        v1_spc_bytes, v2_spc_bytes,
+        "SPC file must be bit-identical across migration"
+    );
+}
+
+#[test]
+fn cli_compile_spc_on_v2_with_atoms_errors_with_m25_pending() {
+    let dir = TempDir::new().unwrap();
+    let v2_path = dir.path().join("v2_atoms.json");
+    let v2 = serde_json::json!({
+        "schema_version": 2,
+        "project": { "name": "atomic", "tick_rate_hz": 60 },
+        "driver": { "profile": "multi_voice_atom", "bytecode_version": 2 },
+        "master_echo": {
+            "enabled": false, "edl": 0, "efb": 0,
+            "evol_l": 0, "evol_r": 0, "fir": [127, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "sample_pool": [],
+        "atom_pool": [{
+            "id": "atom_0001", "name": "sine_128",
+            "kind": "additive_single_cycle_v0",
+            "root_midi_note": 60,
+            "cycle_len_samples": 128,
+            "amplitude": 0.75,
+            "partials": [{ "harmonic": 1, "amplitude": 1.0, "phase_cycles": 0.0 }],
+            "render": {
+                "normalize": true,
+                "force_filter_0_first_block": true,
+                "force_filter_0_loop_entry": true
+            },
+            "playback": {
+                "volume": 0.8, "pan": 0.0, "echo": false,
+                "envelope": { "type": "gain_raw", "gain_byte": 127 }
+            }
+        }],
+        "atom_sequences": [{
+            "id": "atomseq_0001", "name": "single",
+            "voice": 1,
+            "steps": [{
+                "atom_id": "atom_0001",
+                "duration_ticks": 120,
+                "target_volume": 0.8,
+                "transition": { "type": "initial_kon" }
+            }],
+            "loop": false
+        }],
+        "tracks": [{
+            "id": "track_atom_1",
+            "voice": 1,
+            "kind": "atom_sequence",
+            "atom_sequence_id": "atomseq_0001"
+        }],
+        "m2": { "active_sequence_id": "atomseq_0001" }
+    });
+    std::fs::write(&v2_path, serde_json::to_string(&v2).unwrap()).unwrap();
+
+    let out = Command::new(bin())
+        .args(["compile-spc", "--project"])
+        .arg(&v2_path)
+        .args(["--out-spc"])
+        .arg(dir.path().join("a.spc"))
+        .args(["--out-image"])
+        .arg(dir.path().join("a.bin"))
+        .args(["--out-map"])
+        .arg(dir.path().join("a.map.json"))
+        .output()
+        .expect("run sfcwc");
+    assert_ne!(out.status.code(), Some(0), "expected non-zero exit");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("M2.5") || stderr.contains("atom") || stderr.contains("v2 project"),
+        "expected M2.5-pending or atom-related error; got: {stderr}"
+    );
+}

@@ -25,6 +25,9 @@ use sfc_atomizer_core::module_writer::{
 };
 use sfc_atomizer_core::packer::{pack as packer_pack, EncodedSample, PackInput};
 use sfc_atomizer_core::project::{ProjectIoError, ProjectV1, ValidationError};
+use sfc_atomizer_core::project_v2::{
+    load_project_versioned, migrate_from_v1, LoadedProject, MigrationReport,
+};
 use sfc_atomizer_core::report::{
     AramKind, AramMapReport, AssembleReport, AssembleStatus, AudibleStatus, AudibleThresholds,
     AudibleVerificationReport, AuditionReport, BrrEncodeBlock, BrrEncodeReport, BrrFixtureReport,
@@ -379,6 +382,27 @@ enum Command {
         #[arg(long)]
         brr_sample_rate: Option<u32>,
     },
+    /// Migrate a v1 project to v2 (SPEC §16.10).
+    ///
+    /// Validates the v1 input, transforms per the §16.10 mapping,
+    /// validates the resulting v2, and writes both the migrated
+    /// project and a migration report. Migrations are explicit and
+    /// one-way; load-time silent upgrades are forbidden (§16.10).
+    ///
+    /// Exit codes: 0 success, 1 IO/parse, 2 v1 validation OR input
+    /// already at v2, 3 post-migration v2 validation.
+    MigrateProject {
+        /// Path to the v1 input project.
+        #[arg(long, value_name = "PATH")]
+        r#in: PathBuf,
+        /// Path to write the v2 output project.
+        #[arg(long)]
+        out: PathBuf,
+        /// Optional path to write the migration report. Default:
+        /// `<out_stem>.migration-report.json` next to `--out`.
+        #[arg(long)]
+        migration_report: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -572,6 +596,11 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 brr_sample_rate_hz: brr_sample_rate,
             },
         ),
+        Command::MigrateProject {
+            r#in,
+            out,
+            migration_report,
+        } => cmd_migrate_project(&r#in, &out, migration_report.as_deref()),
     }
 }
 
@@ -1796,9 +1825,16 @@ fn cmd_validate_project(
         ..ValidationReport::stub()
     };
 
-    let load_result = ProjectV1::load_from_path(project);
+    let load_result = load_project_versioned(project);
     let (status, errors) = match load_result {
-        Ok(p) => match p.validate() {
+        Ok(LoadedProject::V1(p)) => match p.validate() {
+            Ok(()) => (ValidationStatus::Ok, Vec::new()),
+            Err(verrors) => (
+                ValidationStatus::Invalid,
+                verrors.into_iter().map(validation_error_to_json).collect(),
+            ),
+        },
+        Ok(LoadedProject::V2(p)) => match p.validate() {
             Ok(()) => (ValidationStatus::Ok, Vec::new()),
             Err(verrors) => (
                 ValidationStatus::Invalid,
@@ -1835,6 +1871,255 @@ fn cmd_validate_project(
         std::process::exit(exit);
     }
     Ok(())
+}
+
+/// Resolved project path for downstream compile commands. v1 projects
+/// are returned as-is; sample-only-equivalent v2 projects are
+/// "shimmed" into a synthetic v1 JSON (in a tempdir, with absolute
+/// audio paths so relative-path resolution still works) so the
+/// existing `compile_aram_image` / `export_sfc` plumbing — both v1-
+/// only — keeps working unchanged. v2 projects with atom data error
+/// with the M2.5-pending message per the brief.
+struct V1Input {
+    /// Path the caller should hand to compile_aram_image / export_sfc.
+    path: PathBuf,
+    /// Holds the synthetic JSON's tempdir alive until compile is
+    /// done. `None` for the pure-v1 path.
+    _guard: Option<tempfile::TempDir>,
+}
+
+fn prepare_v1_input(label: &str, project_path: &Path) -> V1Input {
+    let loaded = match load_project_versioned(project_path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("{label}: load failed for {}: {e}", project_path.display());
+            std::process::exit(match e {
+                ProjectIoError::Validation(_) => 2,
+                _ => 1,
+            });
+        }
+    };
+    match loaded {
+        LoadedProject::V1(_) => V1Input {
+            path: project_path.to_path_buf(),
+            _guard: None,
+        },
+        LoadedProject::V2(v2) => {
+            // Up-front v2 validation so we catch atom data even when
+            // compile_aram_image's v1 path would otherwise just see
+            // a synthetic-v1-equivalent.
+            if let Err(verrors) = v2.validate() {
+                eprintln!(
+                    "{label}: v2 project invalid — {} ({} error{})",
+                    project_path.display(),
+                    verrors.len(),
+                    if verrors.len() == 1 { "" } else { "s" }
+                );
+                for e in &verrors {
+                    eprintln!("  {} : {}", e.path, e.kind);
+                }
+                std::process::exit(2);
+            }
+            v1_shim_from_sample_only_v2(label, project_path, &v2)
+        }
+    }
+}
+
+fn v1_shim_from_sample_only_v2(
+    label: &str,
+    project_path: &Path,
+    v2: &sfc_atomizer_core::project_v2::ProjectV2,
+) -> V1Input {
+    use sfc_atomizer_core::project::M1Block;
+    use sfc_atomizer_core::project_v2::TrackKind;
+    // Sample-only equivalence: empty atom data, every track is
+    // sample_sustain on voice 0, and there's at least one such
+    // track. Anything else routes to the M2.5-pending error.
+    let any_atom_data = !v2.atom_pool.is_empty() || !v2.atom_sequences.is_empty();
+    let only_sample_voice_0 = !v2.tracks.is_empty()
+        && v2.tracks.iter().all(|t| {
+            t.voice == 0 && matches!(t.kind, TrackKind::SampleSustain { .. })
+        });
+    if any_atom_data || !only_sample_voice_0 {
+        eprintln!(
+            "{label}: v2 project {} has atoms or atom sequences. atom rendering lands at M2.2; sequence compilation at M2.4; multi-voice driver at M2.5. v2 projects with atoms or sequences cannot yet be compiled. Use a sample-only v2 project, or stay on v1 until M2.5 ships.",
+            project_path.display()
+        );
+        std::process::exit(2);
+    }
+
+    // Pick the first sample_sustain track's sample_id as the
+    // synthetic-v1 active_sample_id. (Validation guarantees the
+    // referenced sample exists in sample_pool.)
+    let active_sample_id = v2
+        .tracks
+        .iter()
+        .find_map(|t| match &t.kind {
+            TrackKind::SampleSustain { sample_id } => Some(sample_id.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    // Build a v1 with absolute audio paths (the synthetic file lives
+    // in a tempdir, away from the user's project_dir; relative
+    // resolution would otherwise be wrong).
+    let project_dir = project_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut sample_pool = v2.sample_pool.clone();
+    for s in &mut sample_pool {
+        let raw = Path::new(&s.source.path);
+        if !raw.is_absolute() {
+            let abs = project_dir.join(raw);
+            s.source.path = abs.display().to_string();
+        }
+    }
+    let v1 = ProjectV1 {
+        schema_version: ProjectV1::SCHEMA_VERSION_M1,
+        project: v2.project.clone(),
+        driver: v2.driver.clone(),
+        master_echo: v2.master_echo.clone(),
+        sample_pool,
+        m1: M1Block { active_sample_id },
+    };
+
+    // Write to a tempdir; the guard keeps the dir alive across the
+    // compile.
+    let dir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{label}: v2 shim tempdir: {e}");
+            std::process::exit(1);
+        }
+    };
+    let stem = project_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".to_string());
+    let shim_path = dir.path().join(format!("{stem}.v1-shim.json"));
+    if let Err(e) = v1.save_to_path(&shim_path) {
+        eprintln!("{label}: writing v2 shim {}: {e}", shim_path.display());
+        std::process::exit(1);
+    }
+    V1Input {
+        path: shim_path,
+        _guard: Some(dir),
+    }
+}
+
+/// `sfcwc migrate-project --in <v1> --out <v2>` — explicit one-way
+/// migration per SPEC §16.10. Validates the v1 input, runs
+/// `migrate_from_v1`, validates the resulting v2, writes both the
+/// migrated project and a structured migration report.
+///
+/// Exit codes (set via `std::process::exit` to bypass the generic
+/// `CliError` exit-1 path):
+///
+/// - 0 success
+/// - 1 IO / parse error (also for input that's not a JSON project)
+/// - 2 v1 validation failure OR input already at schema_version 2
+/// - 3 post-migration v2 validation failure (real bug — flag and stop)
+fn cmd_migrate_project(
+    in_path: &Path,
+    out_path: &Path,
+    migration_report: Option<&Path>,
+) -> Result<(), CliError> {
+    // Step 1 — load + dispatch by schema_version. v2 input is a hard
+    // error; the user is being asked to "migrate v1 to v2" but they
+    // pointed at a v2 file.
+    let loaded = match load_project_versioned(in_path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("migrate-project: {e}");
+            std::process::exit(match e {
+                ProjectIoError::NotFound { .. }
+                | ProjectIoError::Io { .. }
+                | ProjectIoError::Parse { .. }
+                | ProjectIoError::MalformedValue
+                | ProjectIoError::UnsupportedSchemaVersion { .. } => 1,
+                ProjectIoError::Validation(_) => 2,
+            });
+        }
+    };
+    let v1 = match loaded {
+        LoadedProject::V1(p) => p,
+        LoadedProject::V2(_) => {
+            eprintln!(
+                "migrate-project: input {} is already at schema_version 2 (no migration needed)",
+                in_path.display()
+            );
+            std::process::exit(2);
+        }
+    };
+
+    // Step 2 — v1 validation gate.
+    if let Err(verrors) = v1.validate() {
+        eprintln!(
+            "migrate-project: v1 input {} fails validation ({} error(s)):",
+            in_path.display(),
+            verrors.len()
+        );
+        for e in &verrors {
+            eprintln!("  {}: {}", e.path, e.kind);
+        }
+        std::process::exit(2);
+    }
+
+    // Step 3 — pure transformation.
+    let v2 = migrate_from_v1(&v1);
+
+    // Step 4 — post-migration validation gate.
+    if let Err(verrors) = v2.validate() {
+        eprintln!(
+            "migrate-project: post-migration v2 fails validation ({} error(s)) — this is a real bug:",
+            verrors.len()
+        );
+        for e in &verrors {
+            eprintln!("  {}: {}", e.path, e.kind);
+        }
+        std::process::exit(3);
+    }
+
+    // Step 5 — write the migrated project.
+    if let Err(e) = v2.save_to_path(out_path) {
+        eprintln!("migrate-project: writing {}: {}", out_path.display(), e);
+        std::process::exit(1);
+    }
+
+    // Step 6 — derive + write the migration report.
+    let report_path = match migration_report {
+        Some(p) => p.to_path_buf(),
+        None => default_migration_report_path(out_path),
+    };
+    let report =
+        MigrationReport::for_v1_to_v2(in_path.to_path_buf(), out_path.to_path_buf(), &v1);
+    if let Err(e) = write_json(&report_path, &report) {
+        eprintln!(
+            "migrate-project: writing migration report {}: {e}",
+            report_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    eprintln!(
+        "migrate-project: {} -> {}; {} sample(s) preserved; m1.active_sample_id={:?} mapped to track_sample_0 on voice 0; report -> {}",
+        in_path.display(),
+        out_path.display(),
+        v1.sample_pool.len(),
+        v1.m1.active_sample_id,
+        report_path.display()
+    );
+    Ok(())
+}
+
+fn default_migration_report_path(out: &Path) -> PathBuf {
+    let stem = out
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".to_string());
+    let parent = out.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!("{stem}.migration-report.json"))
 }
 
 fn derive_project_name_from_path(out: &Path) -> String {
@@ -2124,8 +2409,14 @@ fn cmd_pack(
         },
         None => None,
     };
-    let outcome = compile_aram_image("pack", project_path, driver_override, refresh_source_hash)
-        .expect("compile_aram_image returns via exit on error");
+    let v1_input = prepare_v1_input("pack", project_path);
+    let outcome = compile_aram_image(
+        "pack",
+        &v1_input.path,
+        driver_override,
+        refresh_source_hash,
+    )
+    .expect("compile_aram_image returns via exit on error");
     let project = outcome.project;
     let result_image = outcome.image;
     let map_report = outcome.map_report;
@@ -2795,9 +3086,11 @@ fn cmd_compile_sfc(
         }
     };
 
+    let v1_a = prepare_v1_input("compile-sfc", project_a_path);
+    let v1_b = project_b_path.map(|p| prepare_v1_input("compile-sfc", p));
     let result = match export_sfc(SfcExportInput {
-        project_a_path: project_a_path.to_path_buf(),
-        project_b_path: project_b_path.map(|p| p.to_path_buf()),
+        project_a_path: v1_a.path.clone(),
+        project_b_path: v1_b.as_ref().map(|i| i.path.clone()),
         loader_source_override: None,
         working_dir: work.path().to_path_buf(),
         out_sfc_path: out_sfc_owned.clone(),
@@ -3484,8 +3777,14 @@ fn cmd_compile_spc(
     out_report: Option<&Path>,
     refresh_source_hash: bool,
 ) -> Result<(), CliError> {
-    let outcome = compile_aram_image("compile-spc", project_path, None, refresh_source_hash)
-        .expect("compile_aram_image returns via exit on error");
+    let v1_input = prepare_v1_input("compile-spc", project_path);
+    let outcome = compile_aram_image(
+        "compile-spc",
+        &v1_input.path,
+        None,
+        refresh_source_hash,
+    )
+    .expect("compile_aram_image returns via exit on error");
     let project = &outcome.project;
 
     let stem = project_path
