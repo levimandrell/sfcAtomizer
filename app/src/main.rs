@@ -512,6 +512,24 @@ enum Command {
         #[arg(long)]
         oracle: Option<PathBuf>,
     },
+    /// M2.6: end-to-end M2 acceptance bundle. Mirror of
+    /// `m1-acceptance` for v2 multi_voice_atom projects: runs
+    /// validate / compile-spc / verify-spc-stereo / compile-sfc /
+    /// verify-sfc-structure / verify-sfc-modules-audible / doctor
+    /// and aggregates the reports into a single `bundle.json`
+    /// under `--out`.
+    M2Acceptance {
+        #[arg(long)]
+        project_a: PathBuf,
+        #[arg(long)]
+        project_b: Option<PathBuf>,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 160_000u32)]
+        frames: u32,
+        #[arg(long)]
+        oracle: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -768,6 +786,19 @@ fn run(cli: Cli) -> Result<(), CliError> {
             &sample_only_project,
             &atom_only_project,
             &combined_project,
+            &out,
+            frames,
+            oracle.as_deref(),
+        ),
+        Command::M2Acceptance {
+            project_a,
+            project_b,
+            out,
+            frames,
+            oracle,
+        } => cmd_m2_acceptance(
+            &project_a,
+            project_b.as_deref(),
             &out,
             frames,
             oracle.as_deref(),
@@ -2131,6 +2162,68 @@ struct V1Input {
     /// Holds the synthetic JSON's tempdir alive until compile is
     /// done. `None` for the pure-v1 path.
     _guard: Option<tempfile::TempDir>,
+}
+
+/// M2.6: variant of [`prepare_v1_input`] that recognizes v2
+/// `multi_voice_atom` projects and returns the original path
+/// untouched. `core::sfc_export::export_sfc` then dispatches on
+/// schema version + driver profile internally, so the caller does
+/// not need to synthesize a v1 shim. v1 / v2 sample-only continue
+/// through the existing shim path so the M1.6 byte-identity
+/// invariant holds.
+fn prepare_sfc_input(label: &str, project_path: &Path) -> V1Input {
+    let loaded = match load_project_versioned(project_path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("{label}: load failed for {}: {e}", project_path.display());
+            std::process::exit(match e {
+                ProjectIoError::Validation(_) => 2,
+                _ => 1,
+            });
+        }
+    };
+    match loaded {
+        LoadedProject::V1(_) => V1Input {
+            path: project_path.to_path_buf(),
+            _guard: None,
+        },
+        LoadedProject::V2(v2) if v2.driver.profile == "multi_voice_atom" => {
+            // v2 multi_voice flows through the M2.6 dispatcher in
+            // core::sfc_export. Up-front validate so error reporting
+            // matches the v1 / v2-sample-only paths.
+            if let Err(verrors) = v2.validate() {
+                eprintln!(
+                    "{label}: v2 project invalid — {} ({} error{})",
+                    project_path.display(),
+                    verrors.len(),
+                    if verrors.len() == 1 { "" } else { "s" }
+                );
+                for e in &verrors {
+                    eprintln!("  {} : {}", e.path, e.kind);
+                }
+                std::process::exit(2);
+            }
+            V1Input {
+                path: project_path.to_path_buf(),
+                _guard: None,
+            }
+        }
+        LoadedProject::V2(v2) => {
+            if let Err(verrors) = v2.validate() {
+                eprintln!(
+                    "{label}: v2 project invalid — {} ({} error{})",
+                    project_path.display(),
+                    verrors.len(),
+                    if verrors.len() == 1 { "" } else { "s" }
+                );
+                for e in &verrors {
+                    eprintln!("  {} : {}", e.path, e.kind);
+                }
+                std::process::exit(2);
+            }
+            v1_shim_from_sample_only_v2(label, project_path, &v2)
+        }
+    }
 }
 
 fn prepare_v1_input(label: &str, project_path: &Path) -> V1Input {
@@ -4071,8 +4164,8 @@ fn cmd_compile_sfc(
         }
     };
 
-    let v1_a = prepare_v1_input("compile-sfc", project_a_path);
-    let v1_b = project_b_path.map(|p| prepare_v1_input("compile-sfc", p));
+    let v1_a = prepare_sfc_input("compile-sfc", project_a_path);
+    let v1_b = project_b_path.map(|p| prepare_sfc_input("compile-sfc", p));
     let result = match export_sfc(SfcExportInput {
         project_a_path: v1_a.path.clone(),
         project_b_path: v1_b.as_ref().map(|i| i.path.clone()),
@@ -4088,7 +4181,9 @@ fn cmd_compile_sfc(
                 SfcExportError::Load { .. } | SfcExportError::Io { .. } => 1,
                 SfcExportError::Validation { .. } => 2,
                 SfcExportError::Decode { .. } => 1,
-                SfcExportError::Encode { .. } | SfcExportError::Pack { .. } => 3,
+                SfcExportError::Encode { .. }
+                | SfcExportError::Pack { .. }
+                | SfcExportError::V2Compile { .. } => 3,
                 SfcExportError::Module { .. } => 4,
                 SfcExportError::Driver { .. } | SfcExportError::Assemble(_) => 5,
                 SfcExportError::ModuleTooLarge(..) => 5,
@@ -4568,12 +4663,24 @@ fn cmd_verify_sfc_modules_audible(
     };
     write_json(&out_report_owned, &report)?;
 
+    let summary_for = |r: &AudibleVerificationReport| -> String {
+        match (r.driver_version, r.left, r.right) {
+            (Some(2), Some(l), Some(r)) => format!(
+                "v2 stereo L={{max_abs={}, rms={:.1}}} R={{max_abs={}, rms={:.1}}}",
+                l.max_abs, l.rms, r.max_abs, r.rms
+            ),
+            _ => format!(
+                "v{} mono max_abs={}, rms={:.1}",
+                r.driver_version.unwrap_or(1),
+                r.observed.max_abs,
+                r.observed.rms
+            ),
+        }
+    };
     eprintln!(
-        "verify-sfc-modules-audible: A={{max_abs={}, rms={:.1}}}, B={{max_abs={}, rms={:.1}}}, identical={}, status={}; report -> {}",
-        module_a_audible.observed.max_abs,
-        module_a_audible.observed.rms,
-        module_b_audible.observed.max_abs,
-        module_b_audible.observed.rms,
+        "verify-sfc-modules-audible: A={}, B={}, identical={}, status={}; report -> {}",
+        summary_for(&module_a_audible),
+        summary_for(&module_b_audible),
         modules_audio_identical,
         match status {
             AudibleStatus::Ok => "ok",
@@ -4622,6 +4729,9 @@ fn render_module_audible(
             min_rms,
         },
         status: AudibleStatus::OracleError,
+        driver_version: None,
+        left: None,
+        right: None,
         error: None,
     };
 
@@ -4655,6 +4765,14 @@ fn render_module_audible(
         }
     };
     let aram = project_blocks_to_aram(module_slice, &header, &blocks);
+
+    // M2.6: detect driver_version statically from the assembled
+    // driver bytes. Both M1 and M2 emit a `mov $f6, #imm` ready-
+    // signature write at init; the immediate is `01` for M1 and
+    // `02` for M2. Encoded as `8F imm F6` in SPC700. Scan the
+    // driver-code area only ($0200..$1200).
+    let detected_driver_version = detect_driver_version_from_aram(&aram);
+    report.driver_version = detected_driver_version;
 
     // Wrap as M1 SPC and write to scratch.
     let spc = match build_m1_image(aram.to_vec()) {
@@ -4742,12 +4860,64 @@ fn render_module_audible(
         fraction_zero,
     };
     report.spc_sha256 = sfc_atomizer_core::asm::sha256_hex(&pcm);
-    report.status = if (max_abs as u32) < min_max_abs || rms < min_rms {
-        AudibleStatus::SilentFail
+
+    // M2.6 stereo path: if the embedded driver advertises
+    // driver_version=2, populate per-channel metrics and gate on
+    // the SPEC §21 audibility floor against either channel (an M2
+    // module with hard-panned voices is allowed to be silent on
+    // one side; we only fail when BOTH channels are below the
+    // floor). M1 modules continue to gate on the legacy mono
+    // metrics computed above.
+    let stereo_pass = if matches!(detected_driver_version, Some(2)) {
+        let (l, r) = per_channel_metrics(&pcm, 32_000, 0, frames);
+        let l_audible = l.max_abs as u32 >= min_max_abs && l.rms >= min_rms;
+        let r_audible = r.max_abs as u32 >= min_max_abs && r.rms >= min_rms;
+        report.left = Some(l);
+        report.right = Some(r);
+        l_audible || r_audible
     } else {
-        AudibleStatus::Ok
+        // M1 path or unknown driver — no stereo metrics computed.
+        true // sentinel; the actual gate is the mono check below.
+    };
+    let mono_pass = (max_abs as u32) >= min_max_abs && rms >= min_rms;
+    report.status = match detected_driver_version {
+        Some(2) => {
+            if stereo_pass {
+                AudibleStatus::Ok
+            } else {
+                AudibleStatus::SilentFail
+            }
+        }
+        _ => {
+            if mono_pass {
+                AudibleStatus::Ok
+            } else {
+                AudibleStatus::SilentFail
+            }
+        }
     };
     report
+}
+
+/// Scan ARAM `[$0200..$1200]` for the SPC700 `mov $f6, #imm` byte
+/// triple (`8F imm F6`). M1 driver emits this with `imm=01`; M2 with
+/// `imm=02`. Returns `Some(imm)` on the first match, `None` if no
+/// triple is found in the driver-code window. (The S-DSP register
+/// space starts at `$F0..=$FF`; `$f6` is `CPUO2` aka driver_out_2,
+/// the version byte in the driver-ready signature.)
+fn detect_driver_version_from_aram(aram: &[u8]) -> Option<u8> {
+    const DRIVER_START: usize = 0x0200;
+    const DRIVER_END_EXCLUSIVE: usize = 0x1200;
+    if aram.len() < DRIVER_END_EXCLUSIVE {
+        return None;
+    }
+    let win = &aram[DRIVER_START..DRIVER_END_EXCLUSIVE];
+    for w in win.windows(3) {
+        if w[0] == 0x8F && w[2] == 0xF6 && (w[1] == 0x01 || w[1] == 0x02) {
+            return Some(w[1]);
+        }
+    }
+    None
 }
 
 // =============================================================================
@@ -5199,6 +5369,9 @@ fn cmd_verify_spc_audible(
             min_rms,
         },
         status: AudibleStatus::OracleError,
+        driver_version: None,
+        left: None,
+        right: None,
         error: None,
     };
 
@@ -5744,6 +5917,333 @@ fn cmd_m2_channel_acceptance(
         for f in &findings {
             eprintln!("  finding: {f}");
         }
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+// =============================================================================
+// M2.6 — m2-acceptance four-stage bundle
+// =============================================================================
+
+/// Run a subcommand, capturing stderr/stdout. Logs but does not
+/// fail on a non-zero exit so the bundle can still aggregate the
+/// reports each step wrote to disk.
+fn run_acceptance_step(bin: &Path, label: &str, args: &[&str]) -> std::process::Output {
+    let r = std::process::Command::new(bin)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("{label}: spawn failed: {e}"));
+    if !r.status.success() {
+        eprintln!(
+            "m2-acceptance: {label} exit={:?}: {}",
+            r.status.code(),
+            String::from_utf8_lossy(&r.stderr).trim()
+        );
+    }
+    r
+}
+
+fn cmd_m2_acceptance(
+    project_a: &Path,
+    project_b: Option<&Path>,
+    out_dir: &Path,
+    frames: u32,
+    oracle: Option<&Path>,
+) -> Result<(), CliError> {
+    create_dir(out_dir)?;
+    let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sfcwc"));
+
+    // Resolve oracle path so each spawned step can inherit it via env.
+    let workspace_root = std::env::current_dir().map_err(CliError::Cwd)?;
+    let oracle_resolved = resolve_oracle(oracle, &workspace_root);
+
+    // ---- Stage 4 (run first because subsequent steps need its data):
+    //      doctor — surfaces tool resolution + diagnostics.
+    let doctor_path = out_dir.join("doctor.json");
+    run_acceptance_step(
+        &bin,
+        "doctor",
+        &["doctor", "--out", doctor_path.to_str().unwrap()],
+    );
+
+    // ---- Stage 1: validation.
+    let validate_a_path = out_dir.join("validate-a.json");
+    let r = run_acceptance_step(
+        &bin,
+        "validate-project A",
+        &[
+            "validate-project",
+            "--project",
+            project_a.to_str().unwrap(),
+            "--json",
+            "--out",
+            validate_a_path.to_str().unwrap(),
+        ],
+    );
+    let validate_a_ok = r.status.success();
+
+    let mut validate_b_ok = true;
+    if let Some(b) = project_b {
+        let validate_b_path = out_dir.join("validate-b.json");
+        let r = run_acceptance_step(
+            &bin,
+            "validate-project B",
+            &[
+                "validate-project",
+                "--project",
+                b.to_str().unwrap(),
+                "--json",
+                "--out",
+                validate_b_path.to_str().unwrap(),
+            ],
+        );
+        validate_b_ok = r.status.success();
+    }
+
+    // ---- Stage 2: compile pipeline (compile-spc per project).
+    let compile_for = |label: &str, proj: &Path| -> (PathBuf, PathBuf, bool) {
+        let spc = out_dir.join(format!("{label}.spc"));
+        let img = out_dir.join(format!("{label}.aram.bin"));
+        let map = out_dir.join(format!("{label}.map.json"));
+        let creport = out_dir.join(format!("{label}.compile-spc.json"));
+        let r = run_acceptance_step(
+            &bin,
+            &format!("compile-spc {label}"),
+            &[
+                "compile-spc",
+                "--project",
+                proj.to_str().unwrap(),
+                "--out-spc",
+                spc.to_str().unwrap(),
+                "--out-image",
+                img.to_str().unwrap(),
+                "--out-map",
+                map.to_str().unwrap(),
+                "--out-report",
+                creport.to_str().unwrap(),
+            ],
+        );
+        (spc, creport, r.status.success())
+    };
+    let (spc_a, compile_spc_a_path, compile_spc_a_ok) = compile_for("project_a", project_a);
+    let (spc_b, compile_spc_b_path, compile_spc_b_ok) = match project_b {
+        Some(b) => {
+            let (s, c, ok) = compile_for("project_b", b);
+            (Some(s), Some(c), ok)
+        }
+        None => (None, None, true),
+    };
+
+    // ---- Stage 3: oracle gates — verify-spc-stereo per SPC.
+    let spawn_stereo = |label: &str, spc: &Path| -> (PathBuf, bool) {
+        let report = out_dir.join(format!("{label}.stereo.json"));
+        let pcm = out_dir.join(format!("{label}.pcm"));
+        let mut cmd = std::process::Command::new(&bin);
+        if let Some(o) = oracle_resolved.as_ref() {
+            cmd.env("SFCWC_SNES_SPC_ORACLE", o);
+        }
+        cmd.args([
+            "verify-spc-stereo",
+            "--spc",
+            spc.to_str().unwrap(),
+            "--frames",
+            &frames.to_string(),
+            "--out-report",
+            report.to_str().unwrap(),
+            "--out-pcm",
+            pcm.to_str().unwrap(),
+            "--with-source-step-windows",
+        ]);
+        let r = cmd.output().expect("spawn verify-spc-stereo");
+        if !r.status.success() {
+            eprintln!(
+                "m2-acceptance: verify-spc-stereo {label} exit={:?}: {}",
+                r.status.code(),
+                String::from_utf8_lossy(&r.stderr).trim()
+            );
+        }
+        (report, r.status.success())
+    };
+    let (stereo_a_path, stereo_a_ok) = if compile_spc_a_ok {
+        spawn_stereo("project_a", &spc_a)
+    } else {
+        (out_dir.join("project_a.stereo.json"), false)
+    };
+    let (stereo_b_path, stereo_b_ok) = match (&spc_b, compile_spc_b_ok) {
+        (Some(s), true) => {
+            let (p, ok) = spawn_stereo("project_b", s);
+            (Some(p), ok)
+        }
+        _ => (None, project_b.is_none()),
+    };
+
+    // ---- Stage 4 (continued): SFC compile + structure + modules audible.
+    let sfc_path = out_dir.join("project.sfc");
+    let compile_sfc_path = out_dir.join("compile-sfc.json");
+    let mut sfc_args: Vec<String> = vec![
+        "compile-sfc".to_string(),
+        "--project-a".to_string(),
+        project_a.display().to_string(),
+        "--out-sfc".to_string(),
+        sfc_path.display().to_string(),
+        "--out-report".to_string(),
+        compile_sfc_path.display().to_string(),
+    ];
+    if let Some(b) = project_b {
+        sfc_args.push("--project-b".to_string());
+        sfc_args.push(b.display().to_string());
+    }
+    let r = std::process::Command::new(&bin)
+        .args(&sfc_args)
+        .output()
+        .expect("spawn compile-sfc");
+    let compile_sfc_ok = r.status.success();
+    if !compile_sfc_ok {
+        eprintln!(
+            "m2-acceptance: compile-sfc exit={:?}: {}",
+            r.status.code(),
+            String::from_utf8_lossy(&r.stderr).trim()
+        );
+    }
+
+    let structure_sfc_path = out_dir.join("structure-sfc.json");
+    if compile_sfc_ok {
+        run_acceptance_step(
+            &bin,
+            "verify-sfc-structure",
+            &[
+                "verify-sfc-structure",
+                "--sfc",
+                sfc_path.to_str().unwrap(),
+                "--out-report",
+                structure_sfc_path.to_str().unwrap(),
+            ],
+        );
+    }
+    let modules_audible_path = out_dir.join("audible-sfc.json");
+    let mut modules_audible_ok = false;
+    if compile_sfc_ok {
+        let mut cmd = std::process::Command::new(&bin);
+        if let Some(o) = oracle_resolved.as_ref() {
+            cmd.env("SFCWC_SNES_SPC_ORACLE", o);
+        }
+        cmd.args([
+            "verify-sfc-modules-audible",
+            "--sfc",
+            sfc_path.to_str().unwrap(),
+            "--frames",
+            &frames.to_string(),
+            "--out-report",
+            modules_audible_path.to_str().unwrap(),
+        ]);
+        let r = cmd.output().expect("spawn verify-sfc-modules-audible");
+        modules_audible_ok = r.status.success();
+        if !modules_audible_ok {
+            eprintln!(
+                "m2-acceptance: verify-sfc-modules-audible exit={:?}: {}",
+                r.status.code(),
+                String::from_utf8_lossy(&r.stderr).trim()
+            );
+        }
+    }
+
+    // ---- Aggregate into bundle.json ----
+    let stage_status = |ok: bool| if ok { "ok" } else { "error" };
+
+    let stage_1_ok = validate_a_ok && validate_b_ok;
+    let stage_2_ok = compile_spc_a_ok && compile_spc_b_ok;
+    let stage_3_ok = stereo_a_ok && stereo_b_ok;
+    let stage_4_ok = compile_sfc_ok && modules_audible_ok;
+    let bundle_ok = stage_1_ok && stage_2_ok && stage_3_ok && stage_4_ok;
+
+    // Read the SHAs / metrics off the captured reports for the
+    // rollup. Missing files surface as None.
+    let read_opt = |p: &Path| -> Option<serde_json::Value> {
+        std::fs::read(p)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+    };
+    let compile_spc_a = read_opt(&compile_spc_a_path);
+    let compile_spc_b = compile_spc_b_path.as_ref().and_then(|p| read_opt(p));
+    let stereo_a = read_opt(&stereo_a_path);
+    let stereo_b = stereo_b_path.as_ref().and_then(|p| read_opt(p));
+    let compile_sfc = read_opt(&compile_sfc_path);
+    let modules_audible = read_opt(&modules_audible_path);
+
+    let bundle = serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "report_type": "m2_acceptance_bundle",
+        "project_a": project_a.display().to_string(),
+        "project_b": project_b.map(|p| p.display().to_string()),
+        "frames": frames,
+        "stage_1_validation": {
+            "status": stage_status(stage_1_ok),
+            "validate_a_report": validate_a_path.display().to_string(),
+            "validate_b_report": project_b.map(|_| out_dir.join("validate-b.json").display().to_string()),
+        },
+        "stage_2_compile": {
+            "status": stage_status(stage_2_ok),
+            "compile_spc_a_report": compile_spc_a_path.display().to_string(),
+            "compile_spc_b_report": compile_spc_b_path.as_ref().map(|p| p.display().to_string()),
+            "driver_code_sha256_a": compile_spc_a.as_ref()
+                .and_then(|v| v.get("driver_code_sha256")).and_then(|v| v.as_str())
+                .map(str::to_string),
+            "driver_code_sha256_b": compile_spc_b.as_ref()
+                .and_then(|v| v.get("driver_code_sha256")).and_then(|v| v.as_str())
+                .map(str::to_string),
+            "spc_sha256_a": compile_spc_a.as_ref()
+                .and_then(|v| v.get("spc_file_sha256")).and_then(|v| v.as_str())
+                .map(str::to_string),
+            "spc_sha256_b": compile_spc_b.as_ref()
+                .and_then(|v| v.get("spc_file_sha256")).and_then(|v| v.as_str())
+                .map(str::to_string),
+        },
+        "stage_3_oracle": {
+            "status": stage_status(stage_3_ok),
+            "stereo_a_report": stereo_a_path.display().to_string(),
+            "stereo_b_report": stereo_b_path.as_ref().map(|p| p.display().to_string()),
+            "stereo_a": stereo_a,
+            "stereo_b": stereo_b,
+        },
+        "stage_4_infrastructure": {
+            "status": stage_status(stage_4_ok),
+            "doctor_report": doctor_path.display().to_string(),
+            "compile_sfc_report": compile_sfc_path.display().to_string(),
+            "structure_sfc_report": structure_sfc_path.display().to_string(),
+            "modules_audible_report": modules_audible_path.display().to_string(),
+            "compile_sfc": compile_sfc,
+            "modules_audible": modules_audible,
+        },
+        "bundle": {
+            "status": if bundle_ok { "ok" } else { "error" },
+        }
+    });
+    let bundle_path = out_dir.join("bundle.json");
+    write_json(&bundle_path, &bundle)?;
+
+    let stage_summary = |label: &str, ok: bool| {
+        eprintln!("  {label}: {}", stage_status(ok));
+    };
+    let project_b_label = project_b
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "(clone)".to_string());
+    eprintln!(
+        "m2-acceptance: project_a={}, project_b={}",
+        project_a.display(),
+        project_b_label
+    );
+    stage_summary("stage_1_validation", stage_1_ok);
+    stage_summary("stage_2_compile", stage_2_ok);
+    stage_summary("stage_3_oracle", stage_3_ok);
+    stage_summary("stage_4_infrastructure", stage_4_ok);
+    eprintln!(
+        "  bundle.status: {}\n  -> {}",
+        if bundle_ok { "ok" } else { "error" },
+        bundle_path.display()
+    );
+
+    if !bundle_ok {
         std::process::exit(2);
     }
     Ok(())
