@@ -3770,7 +3770,8 @@ fn cli_compile_sfc_v2_multi_voice_source_hash_mismatch_errors() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("source") && (stderr.contains("sha") || stderr.contains("SHA") || stderr.contains("hash")),
+        stderr.contains("source")
+            && (stderr.contains("sha") || stderr.contains("SHA") || stderr.contains("hash")),
         "expected source-hash-mismatch error; got: {stderr}"
     );
     assert!(

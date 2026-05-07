@@ -946,8 +946,7 @@ mod tests {
         let out = compile_canonical();
         assert_eq!(out.total_ticks, 249);
         assert_eq!(
-            out.total_elapsed_ticks,
-            254,
+            out.total_elapsed_ticks, 254,
             "elapsed = sum-of-waits + n_waits = 249 + 5"
         );
     }

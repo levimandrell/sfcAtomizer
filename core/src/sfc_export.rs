@@ -661,11 +661,7 @@ fn compile_module_v2_multi_voice(
         let mut on_disk = ProjectV2::load_from_path(project_path)
             .map_err(|source| SfcExportError::Load { label, source })?;
         for (sample_id, _prev, new) in &hash_refreshes {
-            if let Some(slot) = on_disk
-                .sample_pool
-                .iter_mut()
-                .find(|s| &s.id == sample_id)
-            {
+            if let Some(slot) = on_disk.sample_pool.iter_mut().find(|s| &s.id == sample_id) {
                 slot.source.sha256 = new.clone();
             }
         }

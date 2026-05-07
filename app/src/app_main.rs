@@ -817,9 +817,8 @@ impl SfcwcApp {
                         "driver.profile → {new_profile}. Add an atom_sequence track to make this profile valid."
                     ));
                 } else {
-                    self.status_message = Some(format!(
-                        "driver.profile → {new_profile} (no data cleared)"
-                    ));
+                    self.status_message =
+                        Some(format!("driver.profile → {new_profile} (no data cleared)"));
                 }
             }
             v2_editor::SwitchProfileEffect::DestructiveClear {
