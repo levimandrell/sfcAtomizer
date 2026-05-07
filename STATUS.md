@@ -403,8 +403,13 @@ Supersedes:
   integration tests (compile-sequence happy path,
   missing-active error, unknown-id error, pack with
   sequence emits SEQ2 region). **470 tests across the
-  workspace; all green.** (was 462; +8 net delta after
-  reconciling the M2.4 prelude's added test.)
+  workspace; all green.** Per-file new-test breakdown:
+  sequence_compiler +6, sequence_compile +4, cli +4, atom
+  +5, capability_manifest +1, report +2, plus assorted small
+  deltas in pack_v2 / packer / project / project_v2 — gross
+  adds ≈ +27 across the M2.4 prelude + Phase I, with a few
+  M2.3-era scaffolding tests retired in the same window
+  (consultant M2.4 #4 narration fix, applied at M2.7).
 - **Cargo gates:** `cargo check`, `cargo fmt --check`,
   `cargo clippy --workspace --all-targets`,
   `cargo test --workspace` all green.

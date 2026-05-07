@@ -485,6 +485,12 @@ enum Command {
         out_report: Option<PathBuf>,
         #[arg(long)]
         out_pcm: Option<PathBuf>,
+        /// M2.6-postlude: optional 32 kHz stereo PCM16 WAV wrapper
+        /// over the oracle's interleaved s16le bytes. No mixing —
+        /// each channel passes through so M2 hard-pan fixtures
+        /// audition correctly.
+        #[arg(long)]
+        out_wav: Option<PathBuf>,
         #[arg(long)]
         oracle: Option<PathBuf>,
         /// When set, also compute pre-step (ticks 80..=120) and
@@ -765,6 +771,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             frames,
             out_report,
             out_pcm,
+            out_wav,
             oracle,
             with_source_step_windows,
         } => cmd_verify_spc_stereo(
@@ -772,6 +779,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             frames,
             out_report.as_deref(),
             out_pcm.as_deref(),
+            out_wav.as_deref(),
             oracle.as_deref(),
             with_source_step_windows,
         ),
@@ -5551,11 +5559,13 @@ fn cmd_verify_spc_audible(
 /// difference is the report shape (left + right + optional pre/
 /// post windows for source-step observability).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn cmd_verify_spc_stereo(
     spc_path: &Path,
     frames: u32,
     out_report: Option<&Path>,
     out_pcm: Option<&Path>,
+    out_wav: Option<&Path>,
     oracle: Option<&Path>,
     with_source_step_windows: bool,
 ) -> Result<(), CliError> {
@@ -5671,6 +5681,24 @@ fn cmd_verify_spc_stereo(
     report.frames_rendered = frames;
     report.left = l;
     report.right = r;
+
+    // M2.6-postlude: optional stereo WAV wrapper.
+    if let Some(wav_path) = out_wav {
+        if let Some(parent) = wav_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                create_dir(parent)?;
+            }
+        }
+        sfc_atomizer_core::audition::write_oracle_pcm_to_stereo_wav(
+            wav_path,
+            &pcm_bytes,
+            32_000,
+        )
+        .map_err(|e| CliError::Io {
+            path: wav_path.to_path_buf(),
+            source: std::io::Error::other(format!("write stereo WAV: {e}")),
+        })?;
+    }
 
     if with_source_step_windows {
         // SPEC §21 windows: pre=ticks 80..=120, post=ticks 130..=249.

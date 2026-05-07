@@ -187,8 +187,8 @@ fn build_voice_entry(
     };
     [
         voice, src_index, pitchl, pitchh, vol_l, vol_r, adsr1, adsr2, gain,
-        0x00, // flags reserved = 0 in M2
-        0x00, // pad to 11 bytes — TODO M3+: split flags into two if needed
+        0x00, // flags_reserved = 0 in M2 per SPEC §15.7
+        0x00, // pad_reserved   = 0 per SPEC §15.7
     ]
 }
 

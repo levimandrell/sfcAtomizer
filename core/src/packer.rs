@@ -54,10 +54,13 @@ use crate::report::{
 pub const ARAM_LEN: usize = 0x10000;
 pub const FIXED_REGIONS_END: u16 = 0x0200;
 pub const DRIVER_CODE_START: u16 = 0x0200;
-/// 4 KiB at $0200..$1200. M1.4 placeholder is zero-filled. M1.5
-/// replaces with the assembled `sample_basic` driver.
-pub const DRIVER_CODE_BUDGET_M1: u32 = 0x1000;
-pub const DRIVER_CODE_END_EXCLUSIVE: u16 = DRIVER_CODE_START + DRIVER_CODE_BUDGET_M1 as u16;
+/// 4 KiB at $0200..$1200. The driver-code region budget is
+/// profile-agnostic per SPEC §15.5: both `sample_basic` (M1) and
+/// `multi_voice_atom` (M2) drivers share the same 4 KiB cap.
+/// (Renamed at M2.7 from `DRIVER_CODE_BUDGET_M1` — the M1 tag
+/// was misleading after `build_m2` started using the same budget.)
+pub const DRIVER_CODE_BUDGET_4KIB: u32 = 0x1000;
+pub const DRIVER_CODE_END_EXCLUSIVE: u16 = DRIVER_CODE_START + DRIVER_CODE_BUDGET_4KIB as u16;
 /// Largest page boundary at or below the IPL ROM shadow start
 /// (`$FFC0`). All M1 echo buffers end here.
 pub const ECHO_END_M1: u16 = 0xFF00;
@@ -73,7 +76,7 @@ pub struct PackInput {
     /// Per-sample encoded BRR bytes, in `sample_pool` order.
     pub encoded_samples: Vec<EncodedSample>,
     /// Pre-built driver code blob. M1.4 ships a zero-filled placeholder
-    /// of any length `<= DRIVER_CODE_BUDGET_M1`; M1.5 ships the real
+    /// of any length `<= DRIVER_CODE_BUDGET_4KIB`; M1.5 ships the real
     /// assembled driver. Bytes are copied verbatim starting at
     /// `$0200`; the unused tail of the budget is left zero.
     pub driver_code: Vec<u8>,
@@ -200,10 +203,10 @@ pub fn pack(input: PackInput) -> Result<PackOutput, PackError> {
         .map_err(|errs| PackError::InvalidEcho(format!("{errs:?}")))?;
 
     // --- Driver region --------------------------------------------------
-    if driver_code.len() as u32 > DRIVER_CODE_BUDGET_M1 {
+    if driver_code.len() as u32 > DRIVER_CODE_BUDGET_4KIB {
         return Err(PackError::DriverTooLarge {
             actual: driver_code.len() as u32,
-            max: DRIVER_CODE_BUDGET_M1,
+            max: DRIVER_CODE_BUDGET_4KIB,
         });
     }
     let mut image = Box::new([0u8; ARAM_LEN]);
@@ -298,7 +301,7 @@ pub fn pack(input: PackInput) -> Result<PackOutput, PackError> {
     // --- Build the map report ------------------------------------------
     let map_report = build_map_report(BuildMapInput {
         sample_count,
-        driver_budget: DRIVER_CODE_BUDGET_M1,
+        driver_budget: DRIVER_CODE_BUDGET_4KIB,
         srcdir_start,
         srcdir_bytes,
         srcdir_padding,
@@ -659,10 +662,10 @@ pub fn pack_v2(input: PackInputV2) -> Result<PackOutputV2, PackError> {
         .map_err(|errs| PackError::InvalidEcho(format!("{errs:?}")))?;
 
     // --- Driver region --------------------------------------------------
-    if driver_code.len() as u32 > DRIVER_CODE_BUDGET_M1 {
+    if driver_code.len() as u32 > DRIVER_CODE_BUDGET_4KIB {
         return Err(PackError::DriverTooLarge {
             actual: driver_code.len() as u32,
-            max: DRIVER_CODE_BUDGET_M1,
+            max: DRIVER_CODE_BUDGET_4KIB,
         });
     }
     let mut image = Box::new([0u8; ARAM_LEN]);
@@ -828,7 +831,7 @@ pub fn pack_v2(input: PackInputV2) -> Result<PackOutputV2, PackError> {
         sample_count: project.sample_pool.len() as u32,
         atom_count: project.atom_pool.len() as u32,
         total_sources,
-        driver_budget: DRIVER_CODE_BUDGET_M1,
+        driver_budget: DRIVER_CODE_BUDGET_4KIB,
         srcdir_start,
         srcdir_bytes,
         srcdir_padding,
@@ -1362,12 +1365,12 @@ mod tests {
                 bytes: brr_zeros(1),
                 loop_entry_block: None,
             }],
-            driver_code: driver_zeros(DRIVER_CODE_BUDGET_M1 as usize + 1),
+            driver_code: driver_zeros(DRIVER_CODE_BUDGET_4KIB as usize + 1),
         })
         .unwrap_err();
         assert!(
             matches!(err, PackError::DriverTooLarge { actual, max }
-                if actual == DRIVER_CODE_BUDGET_M1 + 1 && max == DRIVER_CODE_BUDGET_M1),
+                if actual == DRIVER_CODE_BUDGET_4KIB + 1 && max == DRIVER_CODE_BUDGET_4KIB),
             "got {err:?}"
         );
     }

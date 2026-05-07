@@ -93,6 +93,50 @@ pub fn write_oracle_pcm_to_mono_wav(
     write_pcm16_mono_wav(out_path, &mono, sample_rate_hz)
 }
 
+/// Wrap the snes_spc oracle's interleaved-stereo s16le PCM bytes
+/// directly as a 32 kHz stereo PCM16 WAV — no channel mixing. Used
+/// by the M2.6-postlude audition path so the user hears the full
+/// per-channel pan picture (M2 fixtures have voice 0 hard-left and
+/// voice 1 hard-right).
+pub fn write_oracle_pcm_to_stereo_wav(
+    out_path: &Path,
+    pcm_stereo_le: &[u8],
+    sample_rate_hz: u32,
+) -> Result<(), AuditionError> {
+    if !pcm_stereo_le.len().is_multiple_of(4) {
+        return Err(AuditionError::UnalignedBrrLength(pcm_stereo_le.len()));
+    }
+    if sample_rate_hz == 0 || sample_rate_hz > 192_000 {
+        return Err(AuditionError::SampleRateOutOfRange(sample_rate_hz));
+    }
+    let data_size = pcm_stereo_le.len() as u32;
+    let riff_size = 36 + data_size;
+    let bytes_per_sec = sample_rate_hz * 4; // stereo * 16-bit
+    let block_align: u16 = 4;
+    let bits_per_sample: u16 = 16;
+
+    let mut buf = Vec::with_capacity(44 + pcm_stereo_le.len());
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&riff_size.to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    buf.extend_from_slice(&2u16.to_le_bytes()); // num channels
+    buf.extend_from_slice(&sample_rate_hz.to_le_bytes());
+    buf.extend_from_slice(&bytes_per_sec.to_le_bytes());
+    buf.extend_from_slice(&block_align.to_le_bytes());
+    buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_size.to_le_bytes());
+    buf.extend_from_slice(pcm_stereo_le);
+
+    let mut f = File::create(out_path)?;
+    f.write_all(&buf)?;
+    f.sync_all()?;
+    Ok(())
+}
+
 /// Public-API wrapper around the internal `write_pcm16_mono_wav`
 /// header writer. Used by `preview-atom` (M2.2) and any caller that
 /// already holds decoded mono PCM and needs to emit a byte-stable

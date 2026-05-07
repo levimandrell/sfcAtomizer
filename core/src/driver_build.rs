@@ -16,7 +16,7 @@
 //! 6. Slice the driver bytes out of the 64 KB image: starting at
 //!    `$0200`, ending immediately before the four-byte sentinel
 //!    `$DE $AD $BE $EF` the driver source emits at `driver_end`.
-//! 7. Bound-check against `DRIVER_CODE_BUDGET_M1` (4 KiB) and
+//! 7. Bound-check against `DRIVER_CODE_BUDGET_4KIB` (4 KiB) and
 //!    SHA-256 the result.
 //!
 //! Rationale for the sentinel: asar produces a 64 KB image with
@@ -40,7 +40,7 @@ pub const DRIVER_ASM_SRC: &str = include_str!("../fixtures/asm/m1_sample_basic.a
 pub const DRIVER_ASM_SRC_M2: &str = include_str!("../fixtures/asm/m2_multi_voice_atom.asm");
 
 use crate::asm::{sha256_hex, AsarBackend, AssembleError, AssembleInput, AssemblerBackend};
-use crate::packer::DRIVER_CODE_BUDGET_M1;
+use crate::packer::DRIVER_CODE_BUDGET_4KIB;
 use crate::pitch::{pitch_register, split_pitch};
 use crate::project::{Envelope, ProjectV1};
 use crate::project_v2::ProjectV2;
@@ -176,10 +176,10 @@ pub fn build(input: DriverBuildInput<'_>) -> Result<DriverBuildOutput, DriverBui
     let sentinel_offset = find_sentinel(&image, driver_start)
         .ok_or(DriverBuildError::SentinelMissing(DRIVER_END_SENTINEL))?;
     let driver_code = image[driver_start..sentinel_offset].to_vec();
-    if driver_code.len() as u32 > DRIVER_CODE_BUDGET_M1 {
+    if driver_code.len() as u32 > DRIVER_CODE_BUDGET_4KIB {
         return Err(DriverBuildError::OverBudget(
             driver_code.len() as u32,
-            DRIVER_CODE_BUDGET_M1,
+            DRIVER_CODE_BUDGET_4KIB,
         ));
     }
     // M2.0 (consultant #7): if the driver code accidentally
@@ -663,10 +663,10 @@ pub fn build_m2(input: DriverBuildInputM2<'_>) -> Result<DriverBuildOutputM2, Dr
     let sentinel_offset = find_sentinel(&image, driver_start)
         .ok_or(DriverBuildError::SentinelMissing(DRIVER_END_SENTINEL))?;
     let driver_code = image[driver_start..sentinel_offset].to_vec();
-    if driver_code.len() as u32 > DRIVER_CODE_BUDGET_M1 {
+    if driver_code.len() as u32 > DRIVER_CODE_BUDGET_4KIB {
         return Err(DriverBuildError::OverBudget(
             driver_code.len() as u32,
-            DRIVER_CODE_BUDGET_M1,
+            DRIVER_CODE_BUDGET_4KIB,
         ));
     }
     // Sentinel collision scan past sentinel + 4 to scan_end.

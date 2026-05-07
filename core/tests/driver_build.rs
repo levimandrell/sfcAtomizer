@@ -11,7 +11,7 @@ use sfc_atomizer_core::driver_build::{
     build, compute_constants, workspace_driver_asm_path, DriverBuildError, DriverBuildInput,
     DRIVER_END_SENTINEL,
 };
-use sfc_atomizer_core::packer::DRIVER_CODE_BUDGET_M1;
+use sfc_atomizer_core::packer::DRIVER_CODE_BUDGET_4KIB;
 use sfc_atomizer_core::project::{
     Driver, Envelope, M1Block, MasterEcho, Project, ProjectV1, SampleFormat, SampleLoop,
     SamplePlayback, SampleSlot, SampleSource,
@@ -109,10 +109,10 @@ fn build_driver_for_minimal_project() {
 
     assert!(!out.driver_code.is_empty(), "driver bytes nonempty");
     assert!(
-        (out.driver_code.len() as u32) <= DRIVER_CODE_BUDGET_M1,
+        (out.driver_code.len() as u32) <= DRIVER_CODE_BUDGET_4KIB,
         "driver {} bytes > budget {}",
         out.driver_code.len(),
-        DRIVER_CODE_BUDGET_M1
+        DRIVER_CODE_BUDGET_4KIB
     );
     // Driver bytes must NOT contain the sentinel; we sliced before it.
     assert!(out.driver_code.windows(4).all(|w| w != DRIVER_END_SENTINEL));
@@ -413,10 +413,10 @@ fn build_driver_m2_assembles_within_budget() {
     })
     .expect("build_m2 must succeed");
     assert!(
-        out.driver_code.len() as u32 <= DRIVER_CODE_BUDGET_M1,
+        out.driver_code.len() as u32 <= DRIVER_CODE_BUDGET_4KIB,
         "M2 driver {} bytes exceeds {} budget",
         out.driver_code.len(),
-        DRIVER_CODE_BUDGET_M1
+        DRIVER_CODE_BUDGET_4KIB
     );
     // Driver code SHA must be deterministic.
     let dir2 = TempDir::new().unwrap();
