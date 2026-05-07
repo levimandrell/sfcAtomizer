@@ -31,12 +31,21 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::asm::{AsarBackend, AssembleError, AssembleInput, AssemblerBackend};
+use crate::atom::render_to_brr;
 use crate::audio::{decode_to_mono_pcm, AudioDecodeError};
 use crate::brr_encoder::{encode as brr_encode, encode_looped, EncodeOptions};
-use crate::driver_build::{build as driver_build, DriverBuildError, DriverBuildInput};
+use crate::capability_manifest::CapabilityManifest;
+use crate::driver_build::{
+    build as driver_build, build_m2, DriverBuildError, DriverBuildInput, DriverBuildInputM2,
+};
 use crate::module_writer::{write_module, ModuleWriteError, ModuleWriteInput};
-use crate::packer::{pack as packer_pack, EncodedSample, PackError, PackInput};
+use crate::packer::{
+    pack as packer_pack, pack_v2, EncodedSample, PackError, PackInput, PackInputV2,
+};
 use crate::project::{ProjectIoError, ProjectV1, ValidationError};
+use crate::project_v2::{load_project_versioned, LoadedProject, ProjectV2};
+use crate::sequence_compiler::{compile_sequence, SequenceCompileInput, SourceDirectory};
+use crate::voice_setup::build_voice_setup_table;
 
 /// LoROM file offset for module A embedding (bank $01).
 pub const MODULE_A_FILE_OFFSET: usize = 0x8000;
@@ -146,6 +155,16 @@ pub enum SfcExportError {
     Assemble(#[from] AssembleError),
     #[error("module too large: {0} > {1} bytes (bank {2})")]
     ModuleTooLarge(usize, usize, &'static str),
+    /// M2.6: v2 multi_voice path — voice setup table emit /
+    /// sequence compile / atom render errors that don't fit any
+    /// other variant cleanly. Contents are the typed source error's
+    /// `Display` form prefixed with the failing stage.
+    #[error("project {label}: {stage}: {message}")]
+    V2Compile {
+        label: &'static str,
+        stage: &'static str,
+        message: String,
+    },
     #[error("io error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -157,12 +176,17 @@ pub enum SfcExportError {
 pub const LOADER_ASM_SRC: &str = include_str!("../fixtures/asm/m1_loader_65816.asm");
 
 pub fn export_sfc(input: SfcExportInput<'_>) -> Result<SfcExportOutput, SfcExportError> {
-    // 1. Compile project A → module_a.bin.
-    let module_a = compile_module("A", &input.project_a_path, input.refresh_source_hash)?;
+    // 1. Compile project A → module_a.bin (dispatched on schema version
+    //    + driver profile; M2.6 added the v2 multi_voice_atom branch).
+    let module_a =
+        compile_module_dispatched("A", &input.project_a_path, input.refresh_source_hash)?;
 
     // 2. Optional project B → module_b.bin (or clone of A).
     let (module_b, module_b_is_clone_of_a) = match &input.project_b_path {
-        Some(p) => (compile_module("B", p, input.refresh_source_hash)?, false),
+        Some(p) => (
+            compile_module_dispatched("B", p, input.refresh_source_hash)?,
+            false,
+        ),
         None => {
             let mut clone = module_a.clone();
             clone.project_name = format!("{}_swap_clone", clone.project_name);
@@ -170,6 +194,11 @@ pub fn export_sfc(input: SfcExportInput<'_>) -> Result<SfcExportOutput, SfcExpor
         }
     };
 
+    // SPEC §15.6 hard cap: each module.bin must fit within one
+    // 32 KiB LoROM bank. `write_module` enforces the same cap with
+    // a typed `ModuleWriteError::ModuleTooLarge`; this is the
+    // post-compile safety net that surfaces the same constraint at
+    // the SFC-embed layer.
     if module_a.module_bytes.len() > LOROM_BANK_SIZE {
         return Err(SfcExportError::ModuleTooLarge(
             module_a.module_bytes.len(),
@@ -392,6 +421,202 @@ fn compile_module(
 
     Ok(SfcModuleArtifact {
         project_name: project.project.name.clone(),
+        module_bytes: module.bytes,
+        module_file_sha256: module.module_file_sha256,
+        module_in_file_sha256: module.content_sha256_zeroed,
+    })
+}
+
+/// Dispatch a project to the right compile-module path based on its
+/// schema version and driver profile. v1 sample_basic and v2
+/// sample-only-equivalent flow through the M1.6 path
+/// ([`compile_module`]); v2 `multi_voice_atom` flows through the
+/// M2.6 path ([`compile_module_v2_multi_voice`]). Mixed-mode
+/// two-project SFCs (one v1 + one v2 multi_voice) are supported by
+/// dispatching each project independently.
+fn compile_module_dispatched(
+    label: &'static str,
+    project_path: &Path,
+    refresh_source_hash: bool,
+) -> Result<SfcModuleArtifact, SfcExportError> {
+    match load_project_versioned(project_path)
+        .map_err(|source| SfcExportError::Load { label, source })?
+    {
+        LoadedProject::V1(_) => compile_module(label, project_path, refresh_source_hash),
+        LoadedProject::V2(v2) => {
+            if v2.driver.profile == "multi_voice_atom" {
+                compile_module_v2_multi_voice(label, project_path, &v2)
+            } else {
+                // v2 sample-only-equivalent: fall through to the M1.6
+                // path. `compile_module` re-loads as v1 via the
+                // schema_version=1 carry-forward helper inside
+                // `ProjectV1::load_from_path`, which migrates
+                // schema=2 sample-only to v1 in-memory.
+                compile_module(label, project_path, refresh_source_hash)
+            }
+        }
+    }
+}
+
+/// M2.6: compile a v2 `multi_voice_atom` project to a `module.bin`.
+///
+/// Mirrors the M2.5 `compile-spc` v2 path: encode samples, render
+/// atoms, build the voice setup table, compile the active sequence,
+/// shadow-pack to learn voice_setup_addr / sequence_addr, build the
+/// M2 driver, real-pack with driver bytes, then `write_module`.
+fn compile_module_v2_multi_voice(
+    label: &'static str,
+    project_path: &Path,
+    v2: &ProjectV2,
+) -> Result<SfcModuleArtifact, SfcExportError> {
+    if let Err(errors) = v2.validate() {
+        return Err(SfcExportError::Validation { label, errors });
+    }
+    let project_dir = project_path.parent().unwrap_or_else(|| Path::new("."));
+
+    // Encode samples (same path as M1).
+    let mut encoded_samples: Vec<EncodedSample> = Vec::with_capacity(v2.sample_pool.len());
+    for slot in &v2.sample_pool {
+        let raw = Path::new(&slot.source.path);
+        let audio_path: PathBuf = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            project_dir.join(raw)
+        };
+        let pcm = decode_to_mono_pcm(&audio_path).map_err(|source| SfcExportError::Decode {
+            label,
+            sample_id: slot.id.clone(),
+            source,
+        })?;
+        let opts = EncodeOptions::default();
+        let (bytes, loop_entry_block) = if slot.looped.enabled {
+            match slot.looped.start_sample {
+                Some(start) => {
+                    let r = encode_looped(&pcm, start, &opts).map_err(|source| {
+                        SfcExportError::Encode {
+                            label,
+                            sample_id: slot.id.clone(),
+                            source,
+                        }
+                    })?;
+                    (r.bytes, Some(start / 16))
+                }
+                None => (brr_encode(&pcm, &opts).bytes, None),
+            }
+        } else {
+            (brr_encode(&pcm, &opts).bytes, None)
+        };
+        encoded_samples.push(EncodedSample {
+            sample_id: slot.id.clone(),
+            bytes,
+            loop_entry_block,
+        });
+    }
+
+    // Render atoms (M2.2 path; AtomRenderError is uninhabited at M2).
+    let mut encoded_atoms: Vec<EncodedSample> = Vec::with_capacity(v2.atom_pool.len());
+    for atom in &v2.atom_pool {
+        let out = render_to_brr(atom).expect("AtomRenderError uninhabited at M2");
+        encoded_atoms.push(EncodedSample {
+            sample_id: atom.id.clone(),
+            bytes: out.brr_bytes,
+            loop_entry_block: Some(0),
+        });
+    }
+
+    // Voice setup table (M2.3).
+    let voice_setup_table = build_voice_setup_table(v2).map_err(|e| SfcExportError::V2Compile {
+        label,
+        stage: "voice_setup_table",
+        message: e.to_string(),
+    })?;
+
+    // Active sequence → SEQ2 bytecode (M2.4). None if no active sequence.
+    let manifest = CapabilityManifest::multi_voice_atom();
+    let sequence_data: Option<Vec<u8>> = match v2
+        .m2
+        .active_sequence_id
+        .as_deref()
+        .and_then(|id| v2.atom_sequences.iter().find(|s| s.id == id))
+    {
+        Some(seq) => {
+            let source_directory = SourceDirectory::from_project(v2);
+            let out = compile_sequence(SequenceCompileInput {
+                project: v2,
+                manifest: &manifest,
+                source_directory: &source_directory,
+                sequence: seq,
+            })
+            .map_err(|e| SfcExportError::V2Compile {
+                label,
+                stage: "sequence_compile",
+                message: e.to_string(),
+            })?;
+            Some(out.bytecode)
+        }
+        None => None,
+    };
+
+    // Shadow pack to learn voice_setup_addr / sequence_addr.
+    let shadow = pack_v2(PackInputV2 {
+        project: v2.clone(),
+        encoded_samples: encoded_samples.clone(),
+        encoded_atoms: encoded_atoms.clone(),
+        driver_code: Vec::new(),
+        sequence_data: sequence_data.clone(),
+        voice_setup_table: Some(voice_setup_table.clone()),
+    })
+    .map_err(|source| SfcExportError::Pack { label, source })?;
+    let voice_setup_addr = shadow
+        .map_report
+        .regions
+        .iter()
+        .find(|r| r.name == "voice_setup_table")
+        .map(|r| u32::from_str_radix(r.start.trim_start_matches("0x"), 16).unwrap() as u16)
+        .unwrap_or(0);
+    let sequence_addr = shadow
+        .map_report
+        .regions
+        .iter()
+        .find(|r| r.name == "sequence_data")
+        .map(|r| u32::from_str_radix(r.start.trim_start_matches("0x"), 16).unwrap() as u16)
+        .unwrap_or(0);
+
+    // Build M2 driver against the learned addresses.
+    let driver_work = tempfile::tempdir().map_err(|source| SfcExportError::Io {
+        path: PathBuf::from("<driver-tempdir>"),
+        source,
+    })?;
+    let driver_out = build_m2(DriverBuildInputM2 {
+        project: v2,
+        map_report: &shadow.map_report,
+        voice_setup_addr,
+        sequence_addr,
+        source_override: None,
+        working_dir: driver_work.path().to_path_buf(),
+    })
+    .map_err(|source| SfcExportError::Driver { label, source })?;
+
+    // Real pack with the assembled driver.
+    let real_pack = pack_v2(PackInputV2 {
+        project: v2.clone(),
+        encoded_samples,
+        encoded_atoms,
+        driver_code: driver_out.driver_code.clone(),
+        sequence_data,
+        voice_setup_table: Some(voice_setup_table),
+    })
+    .map_err(|source| SfcExportError::Pack { label, source })?;
+
+    let module = write_module(ModuleWriteInput {
+        aram_image: &real_pack.aram_image,
+        map_report: &real_pack.map_report,
+        echo_enabled: v2.master_echo.enabled,
+    })
+    .map_err(|source| SfcExportError::Module { label, source })?;
+
+    Ok(SfcModuleArtifact {
+        project_name: v2.project.name.clone(),
         module_bytes: module.bytes,
         module_file_sha256: module.module_file_sha256,
         module_in_file_sha256: module.content_sha256_zeroed,

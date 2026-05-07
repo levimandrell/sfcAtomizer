@@ -908,6 +908,21 @@ pub struct AudibleVerificationReport {
     pub observed: ObservedAudio,
     pub thresholds: AudibleThresholds,
     pub status: AudibleStatus,
+    /// M2.6: which driver this module reports running. M1 modules
+    /// hold $01 in the assembled `mov $f6, #$01` ready-signature
+    /// instruction; M2 modules hold $02. Detected from the embedded
+    /// driver bytes, not from a runtime port read. None when no
+    /// `mov $f6, #imm` byte triple lives at the canonical driver
+    /// address (unexpected; reported as `unknown` instead of
+    /// crashing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_version: Option<u8>,
+    /// M2.6: per-channel metrics from the oracle's stereo PCM.
+    /// Populated for M2 modules (driver_version = 2); None for M1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<PerChannelMetrics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<PerChannelMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -1729,6 +1744,9 @@ mod tests {
                 min_rms: 200.0,
             },
             status: AudibleStatus::Ok,
+            driver_version: Some(1),
+            left: None,
+            right: None,
             error: None,
         };
         let r = SfcModulesAudibleReport {
@@ -1783,6 +1801,9 @@ mod tests {
                 min_rms: 200.0,
             },
             status: AudibleStatus::Ok,
+            driver_version: Some(1),
+            left: None,
+            right: None,
             error: None,
         };
         round_trip(&r);
@@ -1790,6 +1811,20 @@ mod tests {
         r2.status = AudibleStatus::SilentFail;
         r2.error = Some("max_abs=0".to_string());
         round_trip(&r2);
+        // M2 path: per-channel metrics populated.
+        let mut r3 = r.clone();
+        r3.driver_version = Some(2);
+        r3.left = Some(PerChannelMetrics {
+            max_abs: 15624,
+            rms: 11034.0,
+            zero_crossing_rate: 999.0,
+        });
+        r3.right = Some(PerChannelMetrics {
+            max_abs: 31990,
+            rms: 25555.0,
+            zero_crossing_rate: 996.0,
+        });
+        round_trip(&r3);
     }
 
     #[test]

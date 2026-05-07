@@ -718,6 +718,9 @@ mod tests {
                 min_rms: 200.0,
             },
             status: AudibleStatus::Ok,
+            driver_version: Some(1),
+            left: None,
+            right: None,
             error: None,
         };
         let compile_sfc = CompileSfcReport {
