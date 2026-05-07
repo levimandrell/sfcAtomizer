@@ -2,36 +2,237 @@
 
 ## Current milestone
 
-**M2.3 — Multi-source ARAM packer + capability manifest
-shipped.** New `core::packer::pack_v2` consumes both
-`encoded_samples` and `encoded_atoms` and emits the M2
-region order per SPEC §15.5: driver → source directory
-(samples-first, atoms-second) → optional sequence-data
-placeholder → sample BRR pool → synth atom pool → voice
-setup table → free → echo. Sample-only-equivalent v2
-projects produce byte-identical ARAM to the v1 packer,
-preserving the M2.1 migration→pack bit-identity guarantee.
-Voice setup table built per SPEC §15.7 — 22 bytes for M2
-(two voices × 11 bytes), unused voices use `src_index=0xFF`
-sentinel. Capability manifest emitted per SPEC §5.4 as a
-sidecar JSON; two profiles ship at M2.3 (`sample_basic`,
-`multi_voice_atom`) with full feature sets + dependency
-validation. New `AramKind::VoiceSetupTable` region kind
-plus `AramAtomsSummary` / `PerAtomAramEntry` map-report
-extensions. SPEC §15.6 32 KiB module.bin cap promoted to a
-hard error in `core::module_writer` (`ModuleTooLarge`).
-`sfcwc pack` dispatches by schema/profile: sample_basic
-runs the existing M1.4 path, multi_voice_atom renders all
-atoms via `core::atom::render_to_brr`, builds the voice
-setup table, calls `pack_v2`. New `--out-capability-manifest`
-flag.
+**M2.4 — Sequence bytecode compiler v0 + prelude SPEC
+patches shipped.** New `core::sequence_compiler` lowers
+`atom_sequences[].steps` to SEQ2 bytecode per SPEC §14.3.
+First step (`initial_kon`) lowers to SET_SRC + SET_VOL +
+KON + WAIT; subsequent steps (`fade_to_zero_retrigger`)
+lower to the §14.3 source-step pattern (VOL_SLIDE fade-out
+→ KOFF → 1-tick gap → SET_SRC → SET_VOL → KON → VOL_SLIDE
+fade-in → WAIT sustain). Sequence terminator is END ($00)
+preceded by the SEQ2 region header. The compiler enforces
+capability manifest gating (rejects compile when
+`synth_source_step` / `volume_slide` / `core_sequence_wait`
+are absent), per-tick DSP write budget (24 default; observed
+max for canonical fixture = 4), and one-active-slide
+overlap check. M2.4 default lowering does NOT emit
+SET_PITCH; voice setup table seeds the pitch register at
+init.
 
-**M2.4 next.** Sequence bytecode compiler v0 — generate
-SEQ2 bytecode for atom sequences, populate the
-`sequence_data` region the M2.3 packer reserves. PM to
-brief.
+`sfcwc pack` now lowers the project's `m2.active_sequence_id`
+to bytecode and feeds it into `pack_v2`'s `sequence_data`
+slot; the new `sequence_data` ARAM region appears between
+the source directory and the sample BRR pool. The byte-
+pinned canonical sequence is **49 bytes total** (8 SEQ2
+header + 41 payload). New `sfcwc compile-sequence` CLI for
+engineer / CI inspection.
+
+Phase 0 prelude landed nine SPEC patches: §15.7 voice byte
+map (bytes 0..=10) + `$FF` unused-voice sentinel ABI;
+§14.3 WAIT execution model + slide accumulator state with
+integer-Bresenham formula and round-half-AWAY-from-zero;
+§20.2 status-flags M2 bit map locked (8 bits); §20.2
+"ticks, not seconds" rule; §5.4 canonical feature
+dependency graph promoted; §5.4 `core_tick_loop` polling-
+only-profile rule; §21 v2-sample-only bit-identity
+invariant promoted from STATUS to spec. Companion fix:
+`core::capability_manifest::sample_basic()` drops
+`core_tick_loop` (M1 driver is polling-only).
+
+**M2.5 next.** Driver `multi_voice_atom` in `.spc` —
+implement the SPC700 timer-driven driver that consumes
+SEQ2 bytecode and the voice setup table from ARAM,
+producing audible multi-voice playback. PM to brief.
 
 ## Last pass
+
+**Pass M2.4 — Sequence bytecode compiler v0 + M2.4 prelude.**
+
+- **Phase 0 (SPEC prelude, 9 edits):** §15.7 voice byte map
+  with explicit byte offsets + `src_index=$FF` unused-voice
+  sentinel as binary ABI; §14.3 WAIT execution model
+  pinning the per-tick step order (slide-advance → wait-
+  decrement → opcode-read until WAIT/END/budget); §14.3
+  slide accumulator state with the integer-Bresenham
+  round-half-AWAY-from-zero formula; §20.2 status-flags M2
+  8-bit map locked (voice0_active / voice1_active /
+  echo_enabled / stopped / reset_to_ipl_pending /
+  timing_overrun / bytecode_error / write_budget_exceeded);
+  §20.2 "ticks, not seconds" rule; §5.4 dependency graph
+  promoted to a canonical sub-subsection; §5.4
+  `core_tick_loop` polling-only-profile rule; §5.2
+  mandatory-core line reconciled; §21 v2-sample-only bit-
+  identity invariant promoted from STATUS to spec. Companion
+  code fix: `CapabilityManifest::sample_basic()` drops
+  `core_tick_loop` from the feature set, with the
+  `sample_basic_does_not_claim_core_tick_loop` regression
+  test.
+- **Phase A/B (`core::sequence_compiler`):** SPEC §14.3
+  lowering rules implemented as `compile_sequence`. First-
+  step `initial_kon` → SET_SRC / SET_VOL / KON / WAIT.
+  Subsequent-step `fade_to_zero_retrigger` → VOL_SLIDE
+  (fade-out, ticks=fade_out_ticks) / WAIT / KOFF / WAIT 1
+  (mandatory gap before SET_SRC on a sounding voice) /
+  SET_SRC / SET_VOL 0,0 / KON / VOL_SLIDE (fade-in,
+  ticks=fade_in_ticks) / WAIT / WAIT (sustain). END ($00)
+  terminator. Output wrapped with the 8-byte SEQ2 header.
+  vol_l / vol_r derived from `atom.playback.pan` and
+  `step.target_volume * atom.playback.volume` via the
+  shared constant-power `playback_to_voll_volr` helper.
+  No SET_PITCH in default lowering — voice setup table
+  seeds it.
+- **Phase C (capability manifest enforcement):** First
+  load-bearing capability check in the project. Compiler
+  rejects when `core_sequence_wait` /
+  `synth_atom_sequence` / `synth_source_step` (if
+  fade_to_zero_retrigger present) / `volume_slide` (same)
+  / `sample_runtime_src_change` (multi-step) are absent.
+  Single-step pure-`initial_kon` sequences compile under
+  fewer features. Returns `SequenceCompileError::CapabilityMissing`.
+- **Phase D (per-tick write budget):** Walk the lowered
+  bytecode tick-by-tick maintaining slide intervals; count
+  DSP writes per tick (active-slide=2, KON=1, KOFF=1,
+  SET_SRC=1, SET_VOL=2, VOL_SLIDE=0). For the canonical
+  fixture, the observed max is **4 writes/tick** against
+  a 24-write budget, far below ceiling. Compiler errors
+  with `WriteBudgetExceeded` if the budget is breached on
+  any tick.
+- **Phase E (one-slide enforcement):** Maintain interval
+  list `[tick_start, tick_end)` per active slide; sort and
+  scan for overlap. Errors with `OverlappingSlides`
+  describing both intervals. Slide tick-window is
+  `[bytecode_read_tick + 1, ...)` — the slide is registered
+  on the bytecode-read tick but its first write is on the
+  NEXT tick (per SPEC §14.3 execution model: slide-advance
+  runs before opcode-read).
+- **Phase F (`SequenceCompileReport`):** Standard
+  `{ schema_version, report_type }` envelope plus bytecode
+  SHA-256, payload + total + region byte counts, max
+  writes/tick estimate vs budget, total ticks, voice-setup
+  / sequence-data ARAM addresses (filled by pack).
+  Round-trip tests cover populated + minimal shapes.
+- **Phase G (pack integration):** `cmd_pack_v2_multi_voice`
+  resolves `m2.active_sequence_id`, builds the source-
+  directory view, calls `compile_sequence`, and threads
+  the bytecode through `pack_v2`'s `sequence_data` slot.
+  After `pack_v2` returns, the post-pack
+  `SequenceCompileReport` is written alongside the existing
+  outputs, populated with the actual ARAM addresses.
+  Sample-only-equivalent v2 packs unchanged (preserves the
+  M2.1 bit-identity invariant — verified by
+  `cli_pack_v2_sample_only_matches_v1_aram_sha`).
+- **Phase H (`sfcwc compile-sequence` CLI):** New
+  standalone command. Loads + validates v2, looks up
+  active sequence (or `--sequence-id`), compiles, writes
+  `.seq.bin` and structured report. Exit codes: 0 success,
+  1 IO/parse, 2 project-invalid / sequence-not-found /
+  capability-missing, 3 compile error (budget / overlap /
+  too-large).
+- **Phase I (tests, +18):** 11 sequence_compiler unit
+  tests (byte-pinned canonical bytecode, KOFF+WAIT1+SET_SRC
+  pattern preserved, no SET_PITCH in default lowering,
+  capability gating per missing feature, dep graph
+  edge-by-edge, determinism, total ticks invariant, max
+  writes/tick≤4, invalid first/last step transition,
+  unknown atom_id). 2 SequenceCompileReport round-trip
+  tests. 4 sequence_compile integration tests (canonical
+  byte-pinned, end-to-end pack with sequence, no-active-
+  sequence pack, voice-setup-table byte-pinned ABI). 5
+  atom edge-case tests (8 partials deterministic,
+  amplitude=0 silent, unnormalised clamp safety, phase-
+  cycles same-input-same-output, cycle 256 render). 4 CLI
+  integration tests (compile-sequence happy path,
+  missing-active error, unknown-id error, pack with
+  sequence emits SEQ2 region). **470 tests across the
+  workspace; all green.** (was 462; +8 net delta after
+  reconciling the M2.4 prelude's added test.)
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green.
+
+### M2.4 baselines locked
+
+Canonical M2 sequence fixture (1 sample voice 0 panned
+LEFT, 2 sine atoms voice 1 panned RIGHT, 2-step sequence
+`initial_kon atom_a` then `fade_to_zero_retrigger` to
+`atom_b` with fade_out=4 / fade_in=4 / duration=120 /
+target_volume=0.8 / atom volume=1.0 pan=+1.0):
+
+```
+M2_CANONICAL_SEQUENCE_BYTECODE_SHA256 = f9fa6ea85a7197b662a3b386c9606bb25954708b9714629de7069c90f0fd24f0
+M2_CANONICAL_SEQUENCE_BYTES           = 49                                  ; 8 header + 41 payload
+M2_CANONICAL_SEQUENCE_TOTAL_TICKS     = 249                                 ; 120 + 4 + 1 + 4 + 120
+M2_CANONICAL_MAX_WRITES_PER_TICK      = 4                                   ; budget 24, 17% utilization
+M2_CANONICAL_VOICE_SETUP_TABLE_SHA256 = f2faaed8530fb82933e3c30b7537190ba150c38e00b82eee83517ac818089ad5
+```
+
+Bytecode hex dump (header + payload + END):
+
+```
+SEQ2 header: 53 45 51 32 02 00 29 00
+Step 0 init: 10 01 01                                  ; SET_SRC v=1, src=1
+             11 01 00 66                               ; SET_VOL v=1, l=0, r=102 ($66 = constant-power R at 0.8 vol)
+             12 02                                     ; KON mask=0b10
+             01 78                                     ; WAIT 120
+Step 1 fade: 20 01 00 00 04                            ; VOL_SLIDE v=1, target (0,0), 4 ticks
+             01 04                                     ; WAIT 4
+             13 02                                     ; KOFF mask=0b10
+             01 01                                     ; WAIT 1 (mandatory gap)
+             10 01 02                                  ; SET_SRC v=1, src=2
+             11 01 00 00                               ; SET_VOL v=1, 0, 0
+             12 02                                     ; KON mask=0b10
+             20 01 00 66 04                            ; VOL_SLIDE v=1, target (0,102), 4 ticks
+             01 04                                     ; WAIT 4
+             01 78                                     ; WAIT 120 (sustain)
+End:         00                                        ; END
+```
+
+Voice setup table for the canonical fixture (22 bytes; LEFT
+sample on voice 0, RIGHT atom on voice 1):
+
+```
+voice 0:  00 00 00 10 7f 00 00 00 7f 00 00            ; SRCN 0, pitch $1000, vol_l=127 / vol_r=0
+voice 1:  01 01 00 10 00 7f 00 00 7f 00 00            ; SRCN 1, pitch $1000, vol_l=0   / vol_r=127
+```
+
+### Multi-voice ARAM (post-M2.4)
+
+Same fixture as the M2.3 baseline plus the new
+sequence_data region between source directory and sample
+BRR pool. The added region shifts the sample/atom/voice-
+table addresses by 256 B (one sequence_data page).
+
+```
+M2_MULTI_VOICE_ARAM_SHA256_M24    = 18861b8ad076ca170ca1d3d80cc73c8998c00c057d190b5164d17d243d216722
+                                  ; supersedes the M2.3 baseline since the layout now includes sequence_data
+```
+
+Region order:
+
+```
+$0000-$00EF  direct_page         (240 B,  fixed_runtime)
+$00F0-$00FF  hardware_io         (16 B,   fixed_hardware)
+$0100-$01FF  stack               (256 B,  fixed_runtime)
+$0200-$11FF  driver_code         (4096 B)
+$1200-$12FF  source_directory    (256 B; 3 entries × 4 B + page pad)
+$1300-$13FF  sequence_data       (256 B; 49 SEQ2 + 207 page pad)
+$1400-$148F  sample_brr_pool     (144 B)
+$1490-$14FB  synth_atom_pool     (108 B)
+$14FC-$1511  voice_setup_table   (22 B)
+$1512-$FEFF  free                (59886 B)
+$FF00-$FFBF  ipl_rom_safe_pad
+$FFC0-$FFFF  ipl_rom_shadow
+```
+
+### v1↔v2 sample-only invariant — still bit-identical
+
+```
+M2_SAMPLE_ONLY_V2_ARAM_SHA256     = 9b14634a339359e837fae7ad65f2c077eb7f545bc6bf5e08de6186d1dda4eaf7
+                                  ; identical between v1 pack and migrated-v2 pack of the same project
+                                  ; preserved through M2.4 per cli_pack_v2_sample_only_matches_v1_aram_sha
+```
+
+## Previous passes
 
 **Pass M2.3 — Multi-source ARAM packer + capability manifest.**
 
@@ -1444,6 +1645,46 @@ these SHAs is a producer-side regression and must be flagged.
   sequence_data / no voice setup table reduces to the v1 layout
   byte-for-byte. Locked by `pack_v2_sample_only_matches_v1_layout`
   and the CLI-level `cli_pack_v2_sample_only_matches_v1_aram_sha`.
+- **Step duration semantics** (M2.4): `duration_ticks` is the
+  sustain time at target volume AFTER any transition completes.
+  Total step time = `transition_ticks + duration_ticks`. For
+  `initial_kon`, transition is 0. For `fade_to_zero_retrigger`,
+  transition is `fade_out_ticks + 1 + fade_in_ticks` (the +1 is
+  the mandatory KOFF→SET_SRC gap). Compiler tests
+  `total_ticks_matches_lowering` lock this.
+- **No SET_PITCH in default M2.4 lowering** (M2.4): voice setup
+  table seeds the pitch register at driver init from the atom's
+  `root_midi_note`. The SET_PITCH ($30) opcode stays in §14.3 for
+  forward compat (M3+ pitch sweeps); M2.4 compiler simply doesn't
+  emit it. Locked by `canonical_lowering_emits_no_set_pitch`.
+- **Capability manifest enforcement first lands in compile_sequence**
+  (M2.4): per SPEC §5.4 / consultant #4, every compile entry point
+  must consult the manifest. compile_sequence rejects when
+  `synth_source_step` / `volume_slide` / `core_sequence_wait` etc.
+  are absent, with `SequenceCompileError::CapabilityMissing` naming
+  the missing feature. Validated by
+  `rejects_when_synth_source_step_missing` and
+  `dep_graph_each_edge_produces_missing_dep_when_dropped`.
+- **Slide tick-window starts at +1** (M2.4 / SPEC §14.3): the
+  bytecode-read tick that issues `VOL_SLIDE` does NOT itself
+  contribute slide writes. Per the per-tick step order (slide-
+  advance → wait-decrement → opcode-read), the slide is registered
+  during opcode-read and first writes on the NEXT tick. The
+  compiler's `ActiveSlideInterval { tick_start, tick_end }` is
+  therefore `[bytecode_read_tick + 1, ...)`. Locked by
+  `max_writes_per_tick_estimate_is_at_most_4` (which would observe
+  6 writes on the bytecode-read tick if the interval were off-by-
+  one).
+- **Voice setup table byte-pinned ABI test** (M2.4 /
+  consultant #28): `voice_setup_table_byte_pinned_abi` extracts
+  the 22-byte table from the canonical multi-voice fixture's
+  packed ARAM and asserts byte-exact match against the expected
+  vector. Locks the §15.7 ABI between packer and the future M2.5
+  driver.
+- **WAIT 0 invalid; M2.4 compiler never emits it** (M2.4 / SPEC
+  §14.3): schema validation rule 43 already disallows
+  `duration_ticks=0`, and the compiler's `emit_wait` debug-asserts
+  on it. Locked at the source level.
 - **License model:** Apache-2.0 for the host application source; 0BSD for
   generated outputs (`.spc`, `.sfc`, driver/module blobs); snes_spc kept
   out-of-process to avoid LGPL propagation. See `LICENSING.md`.
