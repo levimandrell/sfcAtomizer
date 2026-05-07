@@ -2,57 +2,168 @@
 
 ## Current milestone
 
-**M2.5 — Multi-voice atom driver in `.spc` shipped.** New
-SPC700 driver `m2_multi_voice_atom.asm` (1158 B assembled,
-4 KiB budget) implements SPEC §20.2 `multi_voice_atom`:
-T0 timer at $85 (60.150 Hz nominal), voice-setup-table
-walk for two-voice DSP init, `init_kon_mask` for sample
-voices, full SEQ2 opcode interpreter (END / WAIT /
-SET_SRC / SET_VOL / KON / KOFF / VOL_SLIDE / SET_PITCH),
-integer-Bresenham slide arithmetic, host-command protocol
-(STOP / RESET_TO_IPL / PING / reject) carried over from
-M1. `compile-spc` dispatches v2 multi_voice_atom projects
-through the new path; v1 / v2-sample-only continue
-through the M1 pipeline byte-identically.
+**M2.6 — `.sfc` parity + m2-acceptance shipped.** New
+`compile-sfc` v2 multi_voice_atom path (Phase A): mirrors
+the M2.5 SPC compile pipeline (encode + atoms + voice setup
++ sequence + driver build + pack + module write), then
+embeds the resulting `module.bin` into the same M1.6 LoROM
+shell. Single-project clone mode, two-project mode, and
+mixed v1/v2 / sample_basic+multi_voice combinations all
+flow through the new dispatcher in
+`core::sfc_export::compile_module_dispatched`. v1
+sample_basic + v2-sample-only output is byte-identical to
+the M1.6 baseline.
 
-New per-channel oracle harness: `verify-spc-stereo`
-renders an SPC through `snes_spc_oracle` and emits L/R
-metrics (max_abs, rms, zero-crossing rate); optional
-`--with-source-step-windows` slices the canonical SPEC §21
-windows (pre = ticks 80..=120, post = ticks 130..=249) for
-the source-step zcr ratio. The aggregator
-`m2-channel-acceptance` runs three projects (sample_only
-v1 / atom_only v2 / combined v2), checks SPEC §21
-audibility + silence + ratio gates, and writes a unified
-JSON report.
+New per-channel oracle path on `verify-sfc-modules-audible`
+(Phase D): driver_version is detected statically from the
+embedded driver bytes (the `mov $f6, #imm` ready-signature
+write), routing each module to either the legacy mono
+gate (M1) or the new SPEC §21 stereo gate (M2). Per-channel
+metrics + driver_version land in
+`SfcModulesAudibleReport.module_a_audible` /
+`module_b_audible`.
 
-Three driver bugs surfaced and fixed during M2.5
-diagnosis:
+New `m2-acceptance` four-stage bundle (Phase E): mirror of
+`m1-acceptance` for v2 projects. Stages are
+**validation** (project schema), **compile** (compile-spc
+per project), **oracle** (verify-spc-stereo per .spc with
+source-step windows), and **infrastructure** (doctor +
+compile-sfc + verify-sfc-structure +
+verify-sfc-modules-audible). All stage reports + a
+unified `bundle.json` land under `--out`. Behavioral
+gates only (per the M2.5 policy); identity SHAs are
+informational.
 
-- **`sequence_addr` off-by-8** — driver constants now
-  point at the SEQ2 bytecode payload, not the 8-byte
-  region header (SPEC §14.3 "Driver-side `sequence_addr`
-  semantics" added).
-- **Driver entry fall-through** — explicit `jmp main_loop`
-  after the ready-signature writes; previously fell into
-  `setup_voice_0`, RET'd from an empty stack, and crashed
-  on a STOP-opcode byte in DP.
-- **KON / KOFF latch interaction** — `op_kon` now writes
-  `KOFF = $00` before `KON = mask` (S-DSP holds voices in
-  release while `KOFF` bits stay set; SPEC §14.3 "KON /
-  KOFF latching" added).
+Loader byte-identity carry-forward: `m1_loader_65816.asm`
+re-assembles to 588 bytes with SHA-256
+`955f525c5304af5aea1b53fe12a1b0b469dc9a86bd74dff50c3ffb381b873f40`,
+locked by `loader_byte_identity_at_m2_6`. Sentinel-collision
+guard against the SPC700 driver's `$DE $AD $BE $EF` pattern
+also clean.
 
-SPEC additions: §14.3 driver-side sequence_addr semantics +
-KON/KOFF latching; §20.2 init step 5 sequence_addr clarification +
-init step 8 `init_kon_mask` documentation; §16.6 sample_pool
-length relaxed to `0..=128` (atom-only multi_voice_atom
-fixtures need empty pool to validate).
+32 KiB module cap (SPEC §15.6) near-boundary tests
+(Phase B): three CLI tests exercise just-under (31 782 B),
+near-boundary (32 763 B; 5 below the cap), and over (32
+790 B → ModuleTooLarge hard error). The strict `> 32 768`
+comparison in `core::module_writer` accepts `≤ 32 768`
+exactly.
 
-**M2.6 next.** Smoke run, integration polish, M2 acceptance
-chain (`m2-acceptance` analogue of `m1-acceptance`). PM to
-brief.
+Two-distinct M2 swap end-to-end (Phase F): two distinct
+multi_voice projects (one sine_128→sine_64 source-step,
+one sustained sine_64) compile to a single SFC, both
+modules clear per-channel audibility floors,
+`modules_audio_identical = false`, and module A's
+source-step zcr ratio ≥ 1.5 while module B's stays
+< 1.5.
+
+**M2.7 next.** GUI atom / sequence editing. PM to brief.
 
 ## Last pass
+
+**Pass M2.6 — `.sfc` parity + m2-acceptance bundle.**
+
+- **Phase A (compile-sfc v2 dispatch):**
+  `core::sfc_export::compile_module_dispatched` routes
+  projects to the right compile-module path based on
+  schema version + driver profile. New
+  `compile_module_v2_multi_voice` mirrors the M2.5
+  compile-spc flow but emits `module.bin` instead of
+  `.spc`. App-side `prepare_sfc_input` recognizes v2
+  multi_voice and lets the path through unmodified; v1 /
+  v2 sample-only continue through the existing v1-shim
+  for byte-identity. New `SfcExportError::V2Compile`
+  variant for typed v2-pipeline failures (voice_setup,
+  sequence_compile).
+- **Phase B (32 KiB cap near-boundary tests):** three CLI
+  tests under `cli_compile_sfc_v2_module_*_32_kib_*` —
+  90/24576 → 31 782 B (under), 96/24784 → 32 763 B
+  (5 B from cap), 97/24576 → 32 790 B (over → error
+  exit). Boundaries determined empirically because BRR
+  encoding rounds frame counts up to 16-frame block
+  boundaries (9 B per BRR block).
+- **Phase C (loader byte-identity carry-forward):**
+  `loader_byte_identity_at_m2_6` builds a fresh M1 SFC,
+  extracts the loader bytes via the report's
+  `loader_size_bytes` field, asserts `588 B` exactly +
+  pinned SHA-256, and scans for the SPC700 driver-end
+  sentinel pattern.
+- **Phase D (verify-sfc-modules-audible stereo
+  extension):** new `detect_driver_version_from_aram`
+  scans the reconstructed ARAM `[0x0200..0x1200]` window
+  for `8F xx F6` byte triples (the `mov $f6, #imm`
+  ready-signature write). M1 modules report `driver_version=1`
+  and run the legacy mono gate; M2 modules report
+  `driver_version=2`, populate `report.left` / `right`
+  with `PerChannelMetrics`, and pass when at least one
+  channel clears the audibility floor (hard-panned voices
+  intentionally silent on their off-side). Top-level
+  stderr summary now prints `v2 stereo L=...{rms=...}
+  R=...` for M2 modules and `v1 mono ...` for M1.
+  `AudibleVerificationReport` gained three optional
+  fields (`driver_version`, `left`, `right`) with serde
+  `skip_serializing_if = "Option::is_none"` so M1 reports
+  are still legible.
+- **Phase E (m2-acceptance bundle):** new
+  `cmd_m2_acceptance` four-stage aggregator. Each stage's
+  sub-reports land under `--out`, plus a unified
+  `bundle.json` with stage-level rollup statuses + key
+  metrics (driver SHAs, SPC SHAs, per-channel metrics,
+  module audibility). Bundle exit code = 2 on any stage
+  fail; stderr summary mirrors `m1-acceptance`.
+- **Phase F (two-distinct M2 swap end-to-end):**
+  `cli_compile_sfc_two_distinct_m2_swap_audible_end_to_end`
+  builds two distinct multi_voice projects sharing a
+  WAV (so LEFT is comparable across modules); compiles
+  both into one SFC; runs verify-sfc-modules-audible;
+  asserts `modules_audio_identical = false`; runs
+  per-project verify-spc-stereo with source-step
+  windows; asserts module A's right-channel zcr ratio
+  >= 1.5 and module B's stays < 1.5.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **488 tests
+  workspace-wide** (was 482 at M2.5; +6 net delta —
+  three boundary tests, one loader test, one swap-end-to-end
+  test, one m2-acceptance test).
+
+### M2.6 baselines locked
+
+```
+M1_LOADER_SIZE_BYTES               = 588                                ; M1.6 baseline; M2.6 re-asserted
+M1_LOADER_SHA256                   = 955f525c5304af5aea1b53fe12a1b0b469dc9a86bd74dff50c3ffb381b873f40
+                                    ; locked by loader_byte_identity_at_m2_6
+M2_MODULE_CAP_BYTES                = 32768                              ; SPEC §15.6 hard cap; > 32768 errors
+M2_CANONICAL_MODULE_BYTES          = 9458                               ; canonical M2 fixture this build (informational)
+M2_CANONICAL_SFC_BYTES             = 262144                             ; LoROM minimum (256 KiB); same as M1
+M2_MIN_SFC_FILE_BYTES              = 262144                             ; unchanged from M1.6
+M2_DRIVER_VERSION                  = 2                                  ; embedded in `mov $f6, #$02` ready-signature write
+```
+
+Behavioral gates from M2.5 carry forward unchanged
+(audibility floors `max_abs >= 1000`, `rms >= 200`;
+silence ceiling `<= 50`; source-step zcr ratio `>= 1.5`).
+
+### Decisions log additions (M2.6)
+
+- `compile-sfc` dispatches v2 multi_voice_atom through the
+  M2.6 path; sample_basic / v1 / v2-sample-only continue
+  through the M1.6 path byte-identically.
+- 32 KiB module cap enforced at `compile-sfc` with
+  explicit `ModuleTooLarge` error; near-boundary tests
+  cover the threshold.
+- Loader byte-identical to M1.6 (locked via byte-equality
+  test against `M1_LOADER_SIZE_BYTES = 588`).
+- `verify-sfc-modules-audible` auto-detects driver_version
+  from the embedded driver and dispatches mono (M1) vs
+  stereo (M2) gates.
+- `m2-acceptance` ships as the M2 analog of
+  `m1-acceptance`; four-stage structure with `bundle.json`
+  aggregator. Behavioral gates only; identity SHAs are
+  informational.
+- Two-distinct M2 swap pipeline validated end-to-end
+  through the audio path.
+
+## Previous passes
 
 **Pass M2.5 — Multi-voice atom driver in `.spc` + M2.5 prelude.**
 
