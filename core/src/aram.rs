@@ -121,6 +121,7 @@ pub fn map_from_image(aram: &[u8; ARAM_LEN]) -> AramMapReport {
         echo: None,
         source_directory: None,
         samples: None,
+        atoms: None,
         warnings: Vec::new(),
     }
 }

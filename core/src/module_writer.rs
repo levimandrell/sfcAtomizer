@@ -40,6 +40,10 @@ pub const MODULE_ENTRYPOINT_M1: u16 = 0x0200;
 pub const MODULE_HEADER_SHA_OFFSET: usize = 0x20;
 pub const MODULE_HEADER_SHA_LEN: usize = 32;
 pub const BLOCK_ENTRY_LEN: usize = 8;
+/// SPEC §15.6: `module.bin` is hard-capped at 32 KiB — one LoROM
+/// bank, the size embedded between banks 1 and 2 in the .sfc test
+/// ROM. Promoted to spec at M2.0; enforced as a hard error at M2.3.
+pub const MODULE_MAX_BYTES: u32 = 32 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ModuleWriteInput<'a> {
@@ -83,6 +87,8 @@ pub enum ModuleWriteError {
     RegionPastEnd { start: u32, end: u32 },
     #[error("invalid region address {addr:?}: {reason}")]
     InvalidRegionAddr { addr: String, reason: String },
+    #[error("module.bin too large: {actual} bytes > {max} (SPEC §15.6, one LoROM bank cap)")]
+    ModuleTooLarge { actual: u32, max: u32 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -124,7 +130,8 @@ pub fn write_module(input: ModuleWriteInput<'_>) -> Result<ModuleWriteOutput, Mo
             | AramKind::SequenceData
             | AramKind::InstrumentMetadata
             | AramKind::SampleBrrPool
-            | AramKind::SynthAtomPool => {
+            | AramKind::SynthAtomPool
+            | AramKind::VoiceSetupTable => {
                 let (start, end_inclusive) = parse_addr_range(&region.start, &region.end)?;
                 let length = end_inclusive as u32 - start as u32 + 1;
                 if length == 0 {
@@ -175,6 +182,13 @@ pub fn write_module(input: ModuleWriteInput<'_>) -> Result<ModuleWriteOutput, Mo
     for b in &blocks {
         block_data_offsets.push(total_bytes);
         total_bytes += b.length;
+    }
+
+    if total_bytes > MODULE_MAX_BYTES {
+        return Err(ModuleWriteError::ModuleTooLarge {
+            actual: total_bytes,
+            max: MODULE_MAX_BYTES,
+        });
     }
 
     let mut bytes = vec![0u8; total_bytes as usize];
@@ -472,6 +486,7 @@ mod tests {
                 start_addr: 0x1200,
             }),
             samples: None,
+            atoms: None,
             warnings: Vec::new(),
         }
     }

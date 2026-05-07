@@ -138,6 +138,10 @@ pub struct AramMapReport {
     /// Per-sample BRR-pool layout; populated by the M1+ packer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub samples: Option<AramSamplesSummary>,
+    /// Per-atom BRR-pool layout; populated by the M2+ packer when
+    /// the project carries a non-empty `atom_pool`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atoms: Option<AramAtomsSummary>,
     /// Soft warnings — informational, never block the pack. Examples:
     /// "FREE_LESS_THAN_256_BYTES", "ECHO_NEAR_TOP_OF_ARAM_REVIEW_IPL_BIT".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -185,6 +189,7 @@ impl AramMapReport {
             echo: None,
             source_directory: None,
             samples: None,
+            atoms: None,
             warnings: Vec::new(),
         }
     }
@@ -247,6 +252,28 @@ pub struct PerSampleAramEntry {
     pub bytes: u32,
 }
 
+/// Atom-pool summary (M2+). The atom region lives between the sample
+/// BRR pool and the voice setup table per SPEC §15.5; SRCN order
+/// follows declaration order in `project.atom_pool[]` after every
+/// sample slot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AramAtomsSummary {
+    pub total_atoms: u32,
+    pub total_brr_bytes: u32,
+    pub per_atom: Vec<PerAtomAramEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PerAtomAramEntry {
+    pub atom_id: String,
+    /// SRCN — index into the source directory. `samples.len() + i`
+    /// for the i-th atom, since samples come first.
+    pub source_index: u32,
+    pub start_addr: u16,
+    pub bytes: u32,
+    pub cycle_len_samples: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AramRegion {
     pub name: String,
@@ -268,6 +295,10 @@ pub enum AramKind {
     InstrumentMetadata,
     SampleBrrPool,
     SynthAtomPool,
+    /// M2 voice setup table (SPEC §15.7) — small per-voice register-
+    /// init table the driver consults during boot. 11 bytes per entry,
+    /// always 22 bytes for M2 (two voices).
+    VoiceSetupTable,
     EchoBuffer,
     Free,
 }
