@@ -2639,3 +2639,255 @@ fn cli_compile_spc_on_v2_with_atoms_errors_with_m25_pending() {
         "expected M2.5-pending or atom-related error; got: {stderr}"
     );
 }
+
+// =============================================================================
+// M2.2 — render-atom / preview-atom (SPEC §16.9)
+// =============================================================================
+
+/// Build a v2 project with two sine atoms (cycle 64 + cycle 128).
+/// Both validate cleanly and exercise the M2.2 render path.
+fn write_v2_project_with_two_sine_atoms(dir: &Path) -> PathBuf {
+    let path = dir.join("atoms.v2.json");
+    let v2 = serde_json::json!({
+        "schema_version": 2,
+        "project": { "name": "atomic", "tick_rate_hz": 60 },
+        "driver": { "profile": "multi_voice_atom", "bytecode_version": 2 },
+        "master_echo": {
+            "enabled": false, "edl": 0, "efb": 0,
+            "evol_l": 0, "evol_r": 0, "fir": [127, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "sample_pool": [{
+            "id": "lead", "name": "lead",
+            "source": {
+                "path": "audio/lead.wav",
+                "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                "format": "wav", "sample_rate_hz": 32000,
+                "channels": 1, "frames": 4096
+            },
+            "root_midi_note": 60,
+            "loop": { "enabled": false },
+            "playback": {
+                "volume": 1.0, "pan": 0.0, "echo": false,
+                "envelope": { "type": "gain_raw", "gain_byte": 127 }
+            }
+        }],
+        "atom_pool": [
+            {
+                "id": "sine_64", "name": "sine_64",
+                "kind": "additive_single_cycle_v0",
+                "root_midi_note": 60, "cycle_len_samples": 64, "amplitude": 0.75,
+                "partials": [{ "harmonic": 1, "amplitude": 1.0, "phase_cycles": 0.0 }],
+                "render": { "normalize": true, "force_filter_0_first_block": true,
+                            "force_filter_0_loop_entry": true },
+                "playback": {
+                    "volume": 1.0, "pan": 0.0, "echo": false,
+                    "envelope": { "type": "gain_raw", "gain_byte": 127 }
+                }
+            },
+            {
+                "id": "sine_128", "name": "sine_128",
+                "kind": "additive_single_cycle_v0",
+                "root_midi_note": 60, "cycle_len_samples": 128, "amplitude": 0.75,
+                "partials": [{ "harmonic": 1, "amplitude": 1.0, "phase_cycles": 0.0 }],
+                "render": { "normalize": true, "force_filter_0_first_block": true,
+                            "force_filter_0_loop_entry": true },
+                "playback": {
+                    "volume": 1.0, "pan": 0.0, "echo": false,
+                    "envelope": { "type": "gain_raw", "gain_byte": 127 }
+                }
+            }
+        ],
+        "atom_sequences": [{
+            "id": "atomseq_0001", "name": "single", "voice": 1,
+            "steps": [{
+                "atom_id": "sine_128", "duration_ticks": 120, "target_volume": 0.8,
+                "transition": { "type": "initial_kon" }
+            }],
+            "loop": false
+        }],
+        "tracks": [
+            { "id": "track_sample_0", "voice": 0, "kind": "sample_sustain",
+              "sample_id": "lead" },
+            { "id": "track_atom_1", "voice": 1, "kind": "atom_sequence",
+              "atom_sequence_id": "atomseq_0001" }
+        ],
+        "m2": { "active_sequence_id": "atomseq_0001" }
+    });
+    std::fs::write(&path, serde_json::to_string_pretty(&v2).unwrap()).unwrap();
+    path
+}
+
+#[test]
+fn cli_render_atom_happy_path() {
+    let dir = TempDir::new().unwrap();
+    let project = write_v2_project_with_two_sine_atoms(dir.path());
+    let brr = dir.path().join("sine_128.brr");
+    let report = dir.path().join("sine_128.report.json");
+
+    let out = Command::new(bin())
+        .args(["render-atom", "--project"])
+        .arg(&project)
+        .args(["--atom", "sine_128"])
+        .args(["--out-brr"])
+        .arg(&brr)
+        .args(["--out-report"])
+        .arg(&report)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+
+    let bytes = std::fs::read(&brr).unwrap();
+    assert_eq!(bytes.len(), 72, "cycle=128 expects 72 BRR bytes");
+
+    let r = read_json(&report);
+    assert_envelope(&r, "atom_render");
+    assert_eq!(r["atom_id"], "sine_128");
+    assert_eq!(r["atom_name"], "sine_128");
+    assert_eq!(r["atom_kind"], "additive_single_cycle_v0");
+    assert_eq!(r["cycle_len_samples"], 128);
+    assert_eq!(r["partial_count"], 1);
+    assert_eq!(r["normalize"], true);
+    assert_eq!(r["brr_bytes"], 72);
+    // Locked M2_ATOM_128_SINE_BRR_SHA256 baseline.
+    assert_eq!(
+        r["brr_sha256"],
+        "348c791449916e1f9169d0e229cd79bf97967b19e22db3c4a5be7dc9c69ac876"
+    );
+}
+
+#[test]
+fn cli_render_atom_deterministic_across_runs() {
+    let dir = TempDir::new().unwrap();
+    let project = write_v2_project_with_two_sine_atoms(dir.path());
+    let brr_a = dir.path().join("a.brr");
+    let brr_b = dir.path().join("b.brr");
+
+    for out_path in [&brr_a, &brr_b] {
+        let out = Command::new(bin())
+            .args(["render-atom", "--project"])
+            .arg(&project)
+            .args(["--atom", "sine_128"])
+            .args(["--out-brr"])
+            .arg(out_path)
+            .args(["--out-report"])
+            .arg(out_path.with_extension("report.json"))
+            .output()
+            .expect("run sfcwc");
+        assert_eq!(out.status.code(), Some(0));
+    }
+    let a = std::fs::read(&brr_a).unwrap();
+    let b = std::fs::read(&brr_b).unwrap();
+    assert_eq!(a, b, "render-atom must be deterministic across runs");
+}
+
+#[test]
+fn cli_render_atom_64_and_128_distinct_brr() {
+    let dir = TempDir::new().unwrap();
+    let project = write_v2_project_with_two_sine_atoms(dir.path());
+
+    let brr_64 = dir.path().join("sine_64.brr");
+    let r64 = Command::new(bin())
+        .args(["render-atom", "--project"])
+        .arg(&project)
+        .args(["--atom", "sine_64", "--out-brr"])
+        .arg(&brr_64)
+        .args(["--out-report"])
+        .arg(dir.path().join("sine_64.report.json"))
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(r64.status.code(), Some(0));
+
+    let brr_128 = dir.path().join("sine_128.brr");
+    let r128 = Command::new(bin())
+        .args(["render-atom", "--project"])
+        .arg(&project)
+        .args(["--atom", "sine_128", "--out-brr"])
+        .arg(&brr_128)
+        .args(["--out-report"])
+        .arg(dir.path().join("sine_128.report.json"))
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(r128.status.code(), Some(0));
+
+    let bytes_64 = std::fs::read(&brr_64).unwrap();
+    let bytes_128 = std::fs::read(&brr_128).unwrap();
+    assert_eq!(bytes_64.len(), 36);
+    assert_eq!(bytes_128.len(), 72);
+    assert_ne!(bytes_64, bytes_128);
+}
+
+#[test]
+fn cli_render_atom_v1_project_errors_with_migrate_hint() {
+    let dir = TempDir::new().unwrap();
+    let v1 = make_project_with_one_imported_sample(dir.path(), "v1only");
+    let out = Command::new(bin())
+        .args(["render-atom", "--project"])
+        .arg(&v1)
+        .args(["--atom", "anything"])
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("v1 project")
+            || stderr.contains("migrate-project")
+            || stderr.contains("requires v2"),
+        "expected migrate hint; got: {stderr}"
+    );
+}
+
+#[test]
+fn cli_render_atom_missing_atom_id_lists_available() {
+    let dir = TempDir::new().unwrap();
+    let project = write_v2_project_with_two_sine_atoms(dir.path());
+    let out = Command::new(bin())
+        .args(["render-atom", "--project"])
+        .arg(&project)
+        .args(["--atom", "ghost_atom"])
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ghost_atom"),
+        "expected missing-id message; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("sine_64") && stderr.contains("sine_128"),
+        "expected available atom ids in stderr; got: {stderr}"
+    );
+}
+
+#[test]
+fn cli_preview_atom_writes_audition_wav() {
+    let dir = TempDir::new().unwrap();
+    let project = write_v2_project_with_two_sine_atoms(dir.path());
+    let wav = dir.path().join("preview.wav");
+    let out = Command::new(bin())
+        .args(["preview-atom", "--project"])
+        .arg(&project)
+        .args(["--atom", "sine_128"])
+        .args(["--duration-seconds", "1.0"])
+        .args(["--out-wav"])
+        .arg(&wav)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bytes = std::fs::read(&wav).unwrap();
+    assert_eq!(&bytes[0..4], b"RIFF");
+    assert_eq!(&bytes[8..12], b"WAVE");
+    // 1 second at 32 kHz mono PCM16 = 32000 frames × 2 bytes = 64000
+    // payload + 44-byte header = 64044 bytes.
+    assert_eq!(bytes.len(), 44 + 32000 * 2);
+    let sample_rate = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
+    assert_eq!(sample_rate, 32000);
+    let channels = u16::from_le_bytes(bytes[22..24].try_into().unwrap());
+    assert_eq!(channels, 1);
+    let bits = u16::from_le_bytes(bytes[34..36].try_into().unwrap());
+    assert_eq!(bits, 16);
+}
