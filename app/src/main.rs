@@ -4908,12 +4908,31 @@ fn render_module_audible(
     report
 }
 
-/// Scan ARAM `[$0200..$1200]` for the SPC700 `mov $f6, #imm` byte
-/// triple (`8F imm F6`). M1 driver emits this with `imm=01`; M2 with
-/// `imm=02`. Returns `Some(imm)` on the first match, `None` if no
-/// triple is found in the driver-code window. (The S-DSP register
-/// space starts at `$F0..=$FF`; `$f6` is `CPUO2` aka driver_out_2,
-/// the version byte in the driver-ready signature.)
+/// Scan ARAM `[$0200..$1200]` for the full driver-ready-signature
+/// 12-byte sequence and extract the `driver_version` byte from the
+/// `mov $f6, #imm` instruction inside it.
+///
+/// Pattern (12 bytes — three `mov dp, #imm` (8F imm dp) followed by
+/// one `mov dp, dp` (FA d2 d1)):
+///
+/// ```text
+///   8F A5 F4   mov $f4, #$a5  (sig byte 1)
+///   8F 5A F5   mov $f5, #$5a  (sig byte 2)
+///   8F VV F6   mov $f6, #VV   (driver_version: VV = 1 for M1, 2 for M2)
+///   FA 01 F7   mov $f7, $01   (write status_flags from dp $01)
+/// ```
+///
+/// Anchoring on the full pattern avoids the M2.7 false-positive
+/// risk of matching any random `8F xx F6` byte triple inside
+/// driver code (consultant #8). The signature bytes `$A5` and
+/// `$5A` are the M1.5 driver-ready tag; both M1 and M2 drivers
+/// emit this exact 12-byte layout (M1's `mov $f7, $01` and M2's
+/// `mov $f7, $01` both encode as `FA 01 F7`).
+///
+/// Returns `Some(VV)` on first match. Falls back to `None` if no
+/// match is found in the driver window — the caller should treat
+/// that as "unknown driver" (e.g. malformed module, or a future
+/// driver that changed the ready-sig encoding).
 fn detect_driver_version_from_aram(aram: &[u8]) -> Option<u8> {
     const DRIVER_START: usize = 0x0200;
     const DRIVER_END_EXCLUSIVE: usize = 0x1200;
@@ -4921,12 +4940,80 @@ fn detect_driver_version_from_aram(aram: &[u8]) -> Option<u8> {
         return None;
     }
     let win = &aram[DRIVER_START..DRIVER_END_EXCLUSIVE];
-    for w in win.windows(3) {
-        if w[0] == 0x8F && w[2] == 0xF6 && (w[1] == 0x01 || w[1] == 0x02) {
-            return Some(w[1]);
+    for w in win.windows(12) {
+        if w[0] == 0x8F
+            && w[1] == 0xA5
+            && w[2] == 0xF4
+            && w[3] == 0x8F
+            && w[4] == 0x5A
+            && w[5] == 0xF5
+            && w[6] == 0x8F
+            && w[8] == 0xF6
+            && w[9] == 0xFA
+            && w[10] == 0x01
+            && w[11] == 0xF7
+        {
+            return Some(w[7]);
         }
     }
     None
+}
+
+#[cfg(test)]
+mod driver_version_detection_tests {
+    use super::detect_driver_version_from_aram;
+
+    /// Synthesize an ARAM image with a coincidental `8F xx F6`
+    /// triple at an offset *not* preceded by the ready-signature
+    /// prefix. The pre-M2.8 triple-only detector would have
+    /// false-positived; the M2.8 anchored detector returns `None`.
+    #[test]
+    fn anchored_detector_rejects_isolated_8f_xx_f6_triple() {
+        let mut aram = vec![0u8; 0x10000];
+        // Place a stray `8F 02 F6` at $0400 with no surrounding
+        // sig bytes.
+        aram[0x0400] = 0x8F;
+        aram[0x0401] = 0x02;
+        aram[0x0402] = 0xF6;
+        assert_eq!(
+            detect_driver_version_from_aram(&aram),
+            None,
+            "stray 8F 02 F6 must not false-positive"
+        );
+    }
+
+    /// Synthesize a real-shape ready-signature pattern at $0500
+    /// and confirm the detector extracts version 2.
+    #[test]
+    fn anchored_detector_finds_m2_ready_signature() {
+        let mut aram = vec![0u8; 0x10000];
+        let sig = [
+            0x8F, 0xA5, 0xF4, // mov $f4, #$a5
+            0x8F, 0x5A, 0xF5, // mov $f5, #$5a
+            0x8F, 0x02, 0xF6, // mov $f6, #$02 (driver_version = 2)
+            0xFA, 0x01, 0xF7, // mov $f7, $01  (status_flags dp-to-dp)
+        ];
+        aram[0x0500..0x050C].copy_from_slice(&sig);
+        assert_eq!(detect_driver_version_from_aram(&aram), Some(2));
+    }
+
+    /// Same shape but with version=1 (M1 driver).
+    #[test]
+    fn anchored_detector_finds_m1_ready_signature() {
+        let mut aram = vec![0u8; 0x10000];
+        let sig = [
+            0x8F, 0xA5, 0xF4, 0x8F, 0x5A, 0xF5, 0x8F, 0x01, 0xF6, 0xFA, 0x01, 0xF7,
+        ];
+        aram[0x0600..0x060C].copy_from_slice(&sig);
+        assert_eq!(detect_driver_version_from_aram(&aram), Some(1));
+    }
+
+    /// ARAM smaller than the driver window should not panic.
+    #[test]
+    fn anchored_detector_returns_none_on_small_aram() {
+        let aram = vec![0u8; 0x0500];
+        assert_eq!(detect_driver_version_from_aram(&aram), None);
+    }
 }
 
 // =============================================================================
