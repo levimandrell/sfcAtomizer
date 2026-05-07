@@ -312,3 +312,235 @@ driver_end:
         "expected SentinelCollision, got {err:?}"
     );
 }
+
+// =============================================================================
+// M2.5 — build_m2 (multi_voice_atom driver)
+// =============================================================================
+
+use sfc_atomizer_core::driver_build::{build_m2, DriverBuildInputM2};
+use sfc_atomizer_core::project_v2::{
+    AtomSequence, AtomSequenceStep, AtomTransition, M2Block, ProjectV2, Track, TrackKind,
+};
+
+fn minimal_v2_multi_voice() -> ProjectV2 {
+    use sfc_atomizer_core::atom::{AtomKind, AtomPartial, AtomRenderOptions, AtomSlot};
+    let v1 = minimal_project();
+    ProjectV2 {
+        schema_version: 2,
+        project: v1.project.clone(),
+        driver: Driver {
+            profile: "multi_voice_atom".to_string(),
+            bytecode_version: 2,
+        },
+        master_echo: v1.master_echo.clone(),
+        sample_pool: v1.sample_pool.clone(),
+        atom_pool: vec![AtomSlot {
+            id: "atom_a".to_string(),
+            name: "atom_a".to_string(),
+            kind: AtomKind::AdditiveSingleCycleV0 {
+                partials: vec![AtomPartial {
+                    harmonic: 1,
+                    amplitude: 1.0,
+                    phase_cycles: 0.0,
+                }],
+            },
+            root_midi_note: 60,
+            cycle_len_samples: 128,
+            amplitude: 0.75,
+            render: AtomRenderOptions {
+                normalize: true,
+                force_filter_0_first_block: true,
+                force_filter_0_loop_entry: true,
+            },
+            playback: SamplePlayback {
+                volume: 1.0,
+                pan: 1.0,
+                echo: false,
+                envelope: Envelope::GainRaw { gain_byte: 127 },
+            },
+        }],
+        atom_sequences: vec![AtomSequence {
+            id: "atomseq_0001".to_string(),
+            name: "single".to_string(),
+            voice: 1,
+            steps: vec![AtomSequenceStep {
+                atom_id: "atom_a".to_string(),
+                duration_ticks: 60,
+                target_volume: 0.8,
+                transition: AtomTransition::InitialKon,
+            }],
+            looped: false,
+        }],
+        tracks: vec![
+            Track {
+                id: "track_sample_0".to_string(),
+                name: String::new(),
+                voice: 0,
+                kind: TrackKind::SampleSustain {
+                    sample_id: "lead".to_string(),
+                },
+            },
+            Track {
+                id: "track_atom_1".to_string(),
+                name: String::new(),
+                voice: 1,
+                kind: TrackKind::AtomSequence {
+                    atom_sequence_id: "atomseq_0001".to_string(),
+                },
+            },
+        ],
+        m2: M2Block {
+            active_sequence_id: Some("atomseq_0001".to_string()),
+        },
+    }
+}
+
+#[test]
+fn build_driver_m2_assembles_within_budget() {
+    if skip_if_no_asar() {
+        return;
+    }
+    let project = minimal_v2_multi_voice();
+    let map = map_for(0x1200);
+    let dir = TempDir::new().unwrap();
+    let out = build_m2(DriverBuildInputM2 {
+        project: &project,
+        map_report: &map,
+        voice_setup_addr: 0x14FC,
+        sequence_addr: 0x1300,
+        source_override: None,
+        working_dir: dir.path().to_path_buf(),
+    })
+    .expect("build_m2 must succeed");
+    assert!(
+        out.driver_code.len() as u32 <= DRIVER_CODE_BUDGET_M1,
+        "M2 driver {} bytes exceeds {} budget",
+        out.driver_code.len(),
+        DRIVER_CODE_BUDGET_M1
+    );
+    // Driver code SHA must be deterministic.
+    let dir2 = TempDir::new().unwrap();
+    let out2 = build_m2(DriverBuildInputM2 {
+        project: &project,
+        map_report: &map,
+        voice_setup_addr: 0x14FC,
+        sequence_addr: 0x1300,
+        source_override: None,
+        working_dir: dir2.path().to_path_buf(),
+    })
+    .unwrap();
+    assert_eq!(out.driver_code_sha256, out2.driver_code_sha256);
+    eprintln!(
+        "M2 driver: {} bytes, sha256={}",
+        out.driver_code.len(),
+        out.driver_code_sha256
+    );
+}
+
+/// M2.5: `init_kon_mask` is derived from project tracks. A project
+/// with one `sample_sustain` track on voice 0 + one `atom_sequence`
+/// track on voice 1 yields mask=$01 (only voice 0 KON'd at init);
+/// the atom voice is left for the bytecode's first KON opcode.
+#[test]
+fn compute_constants_m2_init_kon_mask_only_sample_voices() {
+    use sfc_atomizer_core::driver_build::compute_constants_m2;
+    let project = minimal_v2_multi_voice();
+    let map = map_for(0x1200);
+    let c = compute_constants_m2(&project, &map, 0x14FC, 0x1300).unwrap();
+    assert_eq!(
+        c.init_kon_mask, 0b01,
+        "expected init_kon_mask=0b01 (sample on v0, atom on v1)"
+    );
+}
+
+/// `sequence_addr` constant in the .inc must point at the
+/// bytecode payload, i.e. region_start + 8 bytes (skipping the
+/// SEQ2 header). Driver init reads from this address directly.
+#[test]
+fn render_constants_inc_m2_sequence_addr_skips_seq2_header() {
+    use sfc_atomizer_core::driver_build::{compute_constants_m2, render_constants_inc_m2};
+    let project = minimal_v2_multi_voice();
+    let map = map_for(0x1200);
+    let c = compute_constants_m2(&project, &map, 0x14FC, 0x1300).unwrap();
+    let inc = render_constants_inc_m2(&c, &project);
+    // 0x1300 region start + 8-byte header = 0x1308. Lo=$08, hi=$13.
+    let line_lo = inc
+        .lines()
+        .find(|l| l.starts_with("sequence_addr_lo"))
+        .expect("sequence_addr_lo line missing");
+    let line_hi = inc
+        .lines()
+        .find(|l| l.starts_with("sequence_addr_hi"))
+        .expect("sequence_addr_hi line missing");
+    assert!(
+        line_lo.ends_with("$08"),
+        "expected payload-aligned lo byte $08; line='{line_lo}'"
+    );
+    assert!(
+        line_hi.ends_with("$13"),
+        "expected payload-aligned hi byte $13; line='{line_hi}'"
+    );
+}
+
+/// M2.5 driver implements the KOFF-clear-before-KON pattern in
+/// `op_kon` (SPEC §14.3 "KON / KOFF latching"). The assembled body
+/// must therefore contain both a `mov $f2, #$5c ; mov $f3, #$00`
+/// (KOFF clear) sequence AND a subsequent `mov $f2, #$4c` (KON write)
+/// inside the bytecode handler block — distinct from the init-time
+/// KOFF clear at the top.
+#[test]
+fn build_driver_m2_clears_koff_before_kon_in_op_kon() {
+    if skip_if_no_asar() {
+        return;
+    }
+    let project = minimal_v2_multi_voice();
+    let map = map_for(0x1200);
+    let dir = TempDir::new().unwrap();
+    let out = build_m2(DriverBuildInputM2 {
+        project: &project,
+        map_report: &map,
+        voice_setup_addr: 0x14FC,
+        sequence_addr: 0x1300,
+        source_override: None,
+        working_dir: dir.path().to_path_buf(),
+    })
+    .unwrap();
+
+    // KOFF = $5c, immediate $00. Encoded: 8F 5C F2 8F 00 F3.
+    let koff_clear: &[u8] = &[0x8F, 0x5C, 0xF2, 0x8F, 0x00, 0xF3];
+    let koff_positions: Vec<usize> = out
+        .driver_code
+        .windows(koff_clear.len())
+        .enumerate()
+        .filter_map(|(i, w)| if w == koff_clear { Some(i) } else { None })
+        .collect();
+    assert!(
+        koff_positions.len() >= 2,
+        "expected at least two KOFF=00 writes (init + op_kon); found {}: {:?}",
+        koff_positions.len(),
+        koff_positions
+    );
+    // KON = $4c. Encoded: 8F 4C F2 (immediate write follows).
+    let kon_write: &[u8] = &[0x8F, 0x4C, 0xF2];
+    let kon_positions: Vec<usize> = out
+        .driver_code
+        .windows(kon_write.len())
+        .enumerate()
+        .filter_map(|(i, w)| if w == kon_write { Some(i) } else { None })
+        .collect();
+    // Three expected KON writes: init clear (mask=00) + init_kon_mask + op_kon.
+    assert!(
+        kon_positions.len() >= 3,
+        "expected at least three KON writes; found {}: {:?}",
+        kon_positions.len(),
+        kon_positions
+    );
+    // The last KOFF=00 write must precede the last KON write — that's
+    // the op_kon body's "clear KOFF, then KON" pair.
+    let last_koff = *koff_positions.last().unwrap();
+    let last_kon = *kon_positions.last().unwrap();
+    assert!(
+        last_koff < last_kon,
+        "op_kon's KOFF clear must precede its KON write: koff@{last_koff}, kon@{last_kon}"
+    );
+}
