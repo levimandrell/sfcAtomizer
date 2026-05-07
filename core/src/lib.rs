@@ -27,6 +27,7 @@ pub mod pitch;
 pub mod project;
 pub mod project_v2;
 pub mod report;
+pub mod sequence_compiler;
 pub mod sfc_export;
 pub mod spc;
 pub mod tools;
