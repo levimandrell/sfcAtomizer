@@ -105,7 +105,7 @@ Profiles are presets over granular flags: `sample_basic`, `sample_fx`, `synth_st
 
 ### 5.2 Feature flags
 
-**Mandatory core:** `core_tick_loop`, `core_dsp_write`, `core_sequence_wait`, `core_note_on_off`, `core_pitch_table`, `core_source_directory`, `core_key_on_delay_safety`.
+**Mandatory core:** `core_dsp_write`, `core_note_on_off`, `core_pitch_table`, `core_source_directory`, `core_key_on_delay_safety`. Profiles that use WAIT/slide/sequence opcodes additionally require `core_tick_loop` and `core_sequence_wait`; polling-only profiles (`sample_basic` in M1) omit both.
 
 **Sample:** `sample_playback`, `sample_multisample`, `sample_keysplit`, `sample_velocity_layers`, `sample_runtime_src_change`.
 
@@ -177,6 +177,24 @@ The `measured` block is populated by the build process and consumed by UI displa
 
 `max_dsp_writes_per_tick` is a compiler scheduling policy, not a hardware maximum. One logical S-DSP write means one target register update via $F2/$F3. The default soft budget is 24 logical writes/tick for M0–M2 to preserve interpreter headroom and avoid bursty event schedules. Later calibration may raise this per profile after cycle measurement. Compile reports show both the soft budget and measured peak writes/tick.
 
+`core_tick_loop` indicates the driver runs a 60 Hz nominal timer-tick (T0 driven). Polling-only profiles (`sample_basic` in M1) set this `false`. Profiles that use WAIT/slide/sequence opcodes require it `true`.
+
+#### Feature dependency graph (canonical)
+
+Locked at M2.4 prelude. Every feature whose flag is `true` MUST have all its declared prerequisites also `true`; the compiler validates this at every entry point (see §5.4 Manifest enforcement). The same edges apply to `sample_basic`, `multi_voice_atom`, and any future profile.
+
+```
+multi_voice_playback      -> core_note_on_off, core_dsp_write
+synth_static_atom         -> sample_playback, core_source_directory
+synth_atom_sequence       -> synth_static_atom, core_sequence_wait
+synth_source_step         -> synth_atom_sequence, sample_runtime_src_change,
+                             core_key_on_delay_safety
+volume_slide              -> volume_set, core_tick_loop
+sample_runtime_src_change -> core_source_directory, core_note_on_off
+```
+
+The compiler crate exposes the same graph as data in `core::capability_manifest::dependencies_of`; SPEC and code stay in sync via test-side enumeration.
+
 #### M2 profile: `multi_voice_atom`
 
 M2 introduces a second driver profile alongside `sample_basic`. Feature set:
@@ -190,17 +208,7 @@ echo_per_voice_mask, synth_static_atom, synth_atom_sequence,
 synth_source_step, multi_voice_playback
 ```
 
-Dependencies (a feature implies its prerequisites):
-
-```
-multi_voice_playback     -> core_note_on_off, core_dsp_write
-synth_static_atom        -> sample_playback, core_source_directory
-synth_atom_sequence      -> synth_static_atom, core_sequence_wait
-synth_source_step        -> synth_atom_sequence, sample_runtime_src_change,
-                              core_key_on_delay_safety
-volume_slide             -> volume_set, core_tick_loop
-sample_runtime_src_change -> core_source_directory, core_note_on_off
-```
+Dependencies follow the canonical feature graph above; every flag this profile enables has its prerequisites enabled.
 
 Limits:
 
@@ -605,11 +613,47 @@ $30  SET_PITCH
        validation: pitch <= $3FFF
 ```
 
-#### WAIT counting semantics
+#### WAIT execution model
 
-At each timer tick, if `wait_counter > 0` the driver decrements the counter, advances any active VOL_SLIDE, and returns. Otherwise it reads and executes commands until one of: WAIT sets `wait_counter`, END is reached, or the per-tick DSP write budget would be exceeded (excess writes deferred to the next tick).
+On each timer tick, the driver applies one full tick step in this order:
 
-`WAIT 1` means "resume on the next tick," not "wait zero ticks."
+1. If a slide is active for any voice, advance the slide accumulator one tick (write VOLL/VOLR to DSP — see slide accumulator state below).
+2. If `wait_counter > 0`, decrement `wait_counter` by 1 and return for this tick.
+3. Else, read and execute opcodes from the bytecode stream until:
+   - (a) a `WAIT k` is encountered, which sets `wait_counter = k` and returns;
+   - (b) `END` is encountered, which halts the sequence; or
+   - (c) the per-tick DSP write budget would be exceeded by the next opcode, in which case the driver sets `write_budget_exceeded` in `status_flags` and returns (the unprocessed opcode resumes on the next tick).
+
+`WAIT 1` therefore means "resume bytecode reading on the next tick after this one," NOT "wait zero ticks." `WAIT 0` is invalid: the M2.4 compiler MUST NOT emit it (trivially satisfied — `duration_ticks` validation rule 43 enforces 1..=255), and driver behaviour on `WAIT 0` is undefined.
+
+#### Slide accumulator state
+
+The driver maintains exactly one active slide at a time (per `multi_voice_playback` capability limit `max_simultaneous_volume_slides = 1`). A slide is described by:
+
+```
+slide_voice         u8     ; which voice (0 or 1) is being slid
+slide_ticks_total   u8     ; original ticks param from VOL_SLIDE
+slide_ticks_done    u8     ; ticks elapsed; advances 1..=slide_ticks_total
+slide_start_l       u8     ; vol_l at slide start
+slide_start_r       u8     ; vol_r at slide start
+slide_target_l      u8     ; target vol_l from VOL_SLIDE operand
+slide_target_r      u8     ; target vol_r from VOL_SLIDE operand
+slide_active        bit    ; in active_voice_mask or status_flags
+```
+
+On each slide tick the driver writes:
+
+```
+elapsed = slide_ticks_done           ; just-incremented value, 1..=slide_ticks_total
+dl      = slide_target_l - slide_start_l   ; signed i16 in compiler estimate
+dr      = slide_target_r - slide_start_r
+new_l   = slide_start_l + (dl * elapsed + sign(dl) * (slide_ticks_total/2)) / slide_ticks_total
+new_r   = slide_start_r + (dr * elapsed + sign(dr) * (slide_ticks_total/2)) / slide_ticks_total
+```
+
+`+ sign(d)*(N/2) / N` is integer round-to-nearest with round-half-AWAY-from-zero (matching the atom render rounding mode from §16.9; same convention throughout). When `slide_ticks_done == slide_ticks_total`, the slide ends and `slide_active` clears. The final tick writes exactly `target_l` / `target_r` (the formula above evaluates to that exactly when `elapsed == total`).
+
+Compiler's job: compute the slide writes-per-tick estimate (always 2 writes for an active slide tick — VOLL + VOLR). Driver's job: implement the formula deterministically in SPC700 assembly.
 
 #### Source-step lowering
 
@@ -717,21 +761,27 @@ The M2 packer extends the region list per Appendix A.3 (driver evolution): drive
 
 ### 15.7 Voice setup table (M2)
 
-The M2 packer adds a small table the driver consults during init to seed each voice's DSP registers. One 11-byte entry per voice:
+The M2 packer adds a small table the driver consults during init to seed each voice's DSP registers. One 11-byte entry per voice; M2 emits a 22-byte table for two voices.
+
+**Per-entry byte map (binary ABI between packer and driver):**
 
 ```
-u8   voice              ; 0..=1 for M2 (sample voice / atom voice)
-u8   src_index          ; index into source directory
-u16  pitch_le           ; SNES pitch register, little-endian
-u8   vol_l              ; 0..=127
-u8   vol_r              ; 0..=127
-u8   adsr1
-u8   adsr2
-u8   gain
-u8   flags              ; reserved = 0 in M2
+byte 0   voice                   ; physical voice number, 0..=1 in M2
+byte 1   src_index               ; SRCN; $FF = unused (see below)
+byte 2   pitch_l                 ; 14-bit pitch register low byte
+byte 3   pitch_h                 ; 14-bit pitch register high byte (low 6 bits)
+byte 4   vol_l                   ; signed 8-bit, M2: 0..=127 (no phase invert)
+byte 5   vol_r                   ; signed 8-bit, M2: 0..=127
+byte 6   adsr1                   ; SPC700 ADSR1 register byte
+byte 7   adsr2                   ; SPC700 ADSR2 register byte
+byte 8   gain                    ; SPC700 GAIN register byte
+byte 9   flags_reserved          ; M2: must be $00
+byte 10  pad_reserved            ; M2: must be $00 (ABI byte explicit)
 ```
 
-M2 has 2 entries → 22-byte table. The table lives in its own packer region between the synth atom pool and `free`; the driver init sequence reads each entry, programs the voice's S-DSP registers, and stops. M3+ profiles may extend `flags` with bits for runtime behaviour.
+**Unused-voice sentinel.** When a voice is unused, the packer emits `src_index = $FF` and `$00` for every other field except `voice` (which records the physical voice number). The driver MUST detect `src_index = $FF` and skip all DSP setup for that voice; it MUST NOT KON the voice. This is the binary ABI between the M2 packer and the M2.5 driver.
+
+The table lives in its own packer region between the synth atom pool and `free`; the driver init sequence reads each entry, programs the voice's S-DSP registers, and stops. M3+ profiles may extend `flags_reserved` with bits for runtime behaviour.
 
 ---
 
@@ -1502,6 +1552,8 @@ The bounded host-side spin counts in §19.2 govern how long the host waits for e
 
 The M2 driver runs a SPC700 timer-driven polling loop, not an interrupt. The S-SMP has two 8 kHz timers and one 64 kHz timer. M2 uses **T0** with `T0TARGET ($FA) = 133 (= $85)`, yielding a tick rate of `8000 / 133 ≈ 60.150 Hz` ("60 Hz nominal" — precision is sufficient for sequencing; tighter labels are M3+ work).
 
+**Ticks, not seconds.** Source-step timing windows and oracle frame selection MUST be expressed in ticks or sample frames at 32 kHz, NOT in seconds. The M2.4 sequence compiler emits all durations in ticks; the M2.5/M2.6 oracle harness converts ticks-to-frames as `frames = ticks * 32000 / 60.150`.
+
 **Init sequence:**
 
 ```
@@ -1555,12 +1607,21 @@ M2 supports one active VOL_SLIDE at a time. The bytecode compiler errors if a ge
 
 **Tick semantics (matches §14.3 WAIT counting):** if `wait_counter > 0`, decrement, advance any active slide, return. Otherwise read commands until WAIT sets `wait_counter`, END is reached, or the per-tick DSP write budget would be exceeded.
 
-**Status-flags reservation (M2):** the M2 driver introduces four new status bits — `voice1_active`, `timing_overrun`, `bytecode_error`, `write_budget_exceeded` — bringing the M1 byte close to its limit. Two surface-area extensions are reserved at M2.0; M2.5 (the multi-voice driver implementation pass) picks one and locks it:
+**Status-flags M2 bit map (locked at M2.4 prelude):**
 
-1. **Sibling status byte** — store an extended status byte at zero-page `$0F` (`status_flags_ext`) and surface it on host port `$F6`, replacing the M1 `driver_version` byte. Host treats the high bit of `driver_out_2` (`$F6`) as a "wide status" indicator.
-2. **`driver_version` bump** — set `driver_out_2 = $02` and reinterpret the existing `driver_out_3` status byte under v2 semantics, freeing legacy bits for new meanings.
+```
+M2 driver status_flags byte (driver_version = $02):
+  bit 0   voice0_active
+  bit 1   voice1_active
+  bit 2   echo_enabled
+  bit 3   stopped                     ; set by STOP host command
+  bit 4   reset_to_ipl_pending        ; set during RESET_TO_IPL ack
+  bit 5   timing_overrun              ; T0OUT > 4 on a single tick
+  bit 6   bytecode_error              ; END unexpectedly, bad opcode, etc.
+  bit 7   write_budget_exceeded       ; per-tick DSP write budget hit
+```
 
-Either path keeps the v1 ready signature (`$A5 $5A`) on `driver_out_0..1`. M2.5 documents the chosen path here and updates the host parser.
+Single status byte; no extension byte. `driver_version = 2` (returned on `driver_out_2 = $F6`) communicates the new bit map; the M1 `driver_version = 1` status flags remain unchanged. Either driver keeps the ready signature (`$A5 $5A`) on `driver_out_0..1`. M2.5 implements; the bit positions above are now ABI.
 
 ---
 
@@ -1660,6 +1721,8 @@ normalized_correlation(pre_window, post_window) <= 0.95
 The zero-crossing-rate ratio is the primary gate; the correlation check is informational and may be dropped from the bundle if its implementation cost outweighs the signal it provides.
 
 **Process boundary.** Loader execution remains a human/Mesen2 audition gate; the M2 oracle renders verify module-content audio, not 65816 loader behaviour (consistent with §21 M1 sfc verification scope).
+
+**v2-sample-only bit-identity invariant (locked at M2.4 prelude).** A v2 project that contains only sample data — empty `atom_pool`, empty `atom_sequences`, every track is `sample_sustain` on voice 0 — MUST produce byte-identical ARAM, SPC, and SFC output relative to the equivalent v1 project, unless an explicit baseline bump is approved. This invariant carries the M2.1 migration→pack bit-identity guarantee through M2.x and is enforced by `cli_pack_v2_sample_only_matches_v1_aram_sha` and `cli_migrate_project_then_compile_spc_matches_v1_baseline`.
 
 ### M3 — Static synth atom mode (Level 1)
 

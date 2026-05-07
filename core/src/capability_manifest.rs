@@ -144,8 +144,12 @@ pub enum CapabilityDepError {
 
 /// Feature names enabled under `sample_basic`. Subset of the
 /// multi_voice_atom set: only the M1 sample-playback core.
+///
+/// `core_tick_loop` is intentionally absent — the M1 `sample_basic`
+/// driver is polling-only with no 60 Hz timer. Profiles that use
+/// WAIT/slide/sequence opcodes require it; sample_basic does not.
+/// SPEC §5.4.
 pub const SAMPLE_BASIC_FEATURES: &[&str] = &[
-    "core_tick_loop",
     "core_dsp_write",
     "core_note_on_off",
     "core_source_directory",
@@ -277,6 +281,19 @@ mod tests {
         CapabilityManifest::multi_voice_atom()
             .validate_dependencies()
             .expect("multi_voice_atom deps must be self-consistent");
+    }
+
+    /// SPEC §5.4 (M2.4 prelude): `core_tick_loop` indicates the
+    /// driver runs a 60 Hz nominal timer-tick. Polling-only profiles
+    /// (`sample_basic` in M1) MUST NOT claim it.
+    #[test]
+    fn sample_basic_does_not_claim_core_tick_loop() {
+        let m = CapabilityManifest::sample_basic();
+        assert_eq!(
+            m.features.get("core_tick_loop"),
+            None,
+            "sample_basic must not enable core_tick_loop (M1 driver is polling-only)"
+        );
     }
 
     #[test]
