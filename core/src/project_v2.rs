@@ -214,9 +214,12 @@ impl ProjectV2 {
             }
         }
 
-        // Rule 9 (carry-forward): sample_pool length 1..=128.
+        // Rule 9 (relaxed at M2.5, SPEC §16.6): sample_pool length 0..=128.
+        // Empty pool is valid for sample_basic projects (silent SPC) and for
+        // multi_voice_atom atom-only fixtures whose oracle gates assert
+        // silence on the unused channel.
         let pool_len = self.sample_pool.len();
-        if !(1..=128).contains(&pool_len) {
+        if pool_len > 128 {
             errors.push(ValidationError {
                 path: "/sample_pool".to_string(),
                 kind: ValidationErrorKind::SamplePoolLength(pool_len),

@@ -134,9 +134,11 @@ impl ProjectV1 {
             }
         }
 
-        // Rule 9: sample_pool length 1..=128.
+        // Rule 9 (relaxed at M2.5, SPEC §16.6): sample_pool length 0..=128.
+        // Empty pool is schema-valid; downstream pack/compile still
+        // requires at least one source for sample_basic projects.
         let pool_len = self.sample_pool.len();
-        if !(1..=128).contains(&pool_len) {
+        if pool_len > 128 {
             errors.push(ValidationError {
                 path: "/sample_pool".to_string(),
                 kind: ValidationErrorKind::SamplePoolLength(pool_len),
@@ -803,7 +805,7 @@ pub enum ValidationErrorKind {
     MasterEchoEnabledRequiresEdl(u8),
     #[error("master_echo.enabled=false requires edl=0, got {0}")]
     MasterEchoDisabledRequiresZeroEdl(u8),
-    #[error("sample_pool length {0} out of range 1..=128")]
+    #[error("sample_pool length {0} out of range 0..=128")]
     SamplePoolLength(usize),
     #[error("duplicate sample id {0:?}")]
     DuplicateSampleId(String),
@@ -1060,9 +1062,29 @@ mod tests {
     // Rule 9
     #[test]
     fn rule_09_sample_pool_length_range() {
+        // M2.5 (SPEC §16.6): empty pool is now valid; only > 128 errors.
         let mut p = valid_project();
         p.sample_pool.clear();
-        assert_has_path(&p.validate().unwrap_err(), "/sample_pool");
+        let errs = p.validate().unwrap_err();
+        assert!(
+            !errs.iter().any(|e| e.path == "/sample_pool"),
+            "empty pool no longer errors at /sample_pool: {errs:?}"
+        );
+
+        // Length 129 still errors.
+        let template = p.sample_pool.first().cloned().unwrap_or_else(|| {
+            // Build a minimal template if pool was empty.
+            valid_project().sample_pool[0].clone()
+        });
+        let mut over = valid_project();
+        over.sample_pool.clear();
+        for i in 0..129 {
+            let mut s = template.clone();
+            s.id = format!("s{i:03}");
+            over.sample_pool.push(s);
+        }
+        over.m1.active_sample_id = "s000".to_string();
+        assert_has_path(&over.validate().unwrap_err(), "/sample_pool");
     }
 
     // Rule 10 — id pattern

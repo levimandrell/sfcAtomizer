@@ -679,6 +679,14 @@ The capability flag `synth_source_step` enables this lowering; without it, seque
 
 When `bytecode_version` is bumped, older modules either continue to work (if the new driver maintains backward compatibility) or require a recompile from the source project (§16). Modules are not migrated; projects are.
 
+#### Driver-side `sequence_addr` semantics
+
+The driver constants emitted by the build pipeline (`m2_constants.inc` `sequence_addr_lo` / `sequence_addr_hi`) MUST point at the bytecode payload start, i.e. `region_start + 8` bytes (skipping the SEQ2 region header `magic` / `bytecode_version` / `reserved` / `bytecode_len_le`). The driver does not re-validate the magic at runtime; the build pipeline is responsible for emitting a well-formed header and pointing the constant past it. The map report's `sequence_data` region addresses report the region start (header included), and individual driver builds offset by the 8-byte header.
+
+#### KON / KOFF latching
+
+The S-DSP `KOFF` register is level-sensitive: while a bit is set in `KOFF`, the corresponding voice is held in release every DSP frame, so a `KON` write after a `KOFF` will key the voice on for one frame and immediately key it back off — the voice reads as silence even though it is "playing." The driver MUST therefore clear `KOFF` (write `KOFF = $00`) before writing the `KON` mask in the `KON` opcode handler. The standard ordering inside `op_kon` is: write `KOFF = $00`, then write `KON = mask`. Bytecode authors do not emit explicit `KOFF = $00` opcodes; the driver handles latch-clear implicitly. (M2.5 baked this in after a source-step lowering produced silence on the post-step window in the canonical combined fixture.)
+
 ---
 
 ## 15. ARAM packing
@@ -1011,7 +1019,7 @@ Validation runs at project load and at compile entry. Every failed rule produces
 
 **`sample_pool`.**
 
-- Length `1..=128`.
+- Length `0..=128`. (Empty pool is valid: a `sample_basic` project with no samples produces a silent SPC — a degenerate but well-formed module. M2.5 also requires this for `multi_voice_atom` atom-only fixtures whose oracle gates assert silence on the unused channel.)
 - Each entry's `id` matches `^[a-z0-9_]+$`, length `1..=64`, globally unique within the pool.
 - Each entry's `name` length `1..=64`, no control characters. Path separators allowed (sample names are display-only).
 - `source.format` ∈ `{wav, aiff, brr}`.
@@ -1565,10 +1573,10 @@ The M2 driver runs a SPC700 timer-driven polling loop, not an interrupt. The S-S
 2. Init DSP globals (master vol, DIR, echo regs).
 3. Init voice 0 from voice setup table entry 0 (sample voice).
 4. Init voice 1 from voice setup table entry 1 (default atom params).
-5. Init sequence pointer (seq_ptr_lo / seq_ptr_hi → SEQ2 region).
+5. Init sequence pointer (seq_ptr_lo / seq_ptr_hi → SEQ2 bytecode payload — see §14.3 "Driver-side sequence_addr semantics"; this is region_start + 8, not the SEQ2 header).
 6. T0TARGET = $85.
 7. Enable T0 via CONTROL register; clear T0OUT.
-8. KON voice 0 (the sample track).
+8. Issue `KON #init_kon_mask`. The build system computes `init_kon_mask` from the project's `tracks[]` as `OR over t in tracks where t.kind == sample_sustain of (1 << t.voice)`. Voices with `src_index = $FF` in the voice setup table are excluded (they are skipped by step 3/4 and have no DSP regs configured). `atom_sequence` track voices are NOT included in `init_kon_mask` — they are KON'd by the SEQ2 bytecode interpreter when their sequence executes its first KON opcode.
 9. Enter main_loop.
 ```
 
