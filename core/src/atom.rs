@@ -624,6 +624,105 @@ mod tests {
         );
     }
 
+    // ============================================================
+    // M2.4 atom edge-case tests (consultant #7 / #36).
+    // ============================================================
+
+    /// J — atom with 8 partials (max harmonics 1..=8) renders
+    /// deterministically.
+    #[test]
+    fn render_atom_with_eight_partials_deterministic() {
+        let mut atom = canonical_sine_atom(128);
+        let AtomKind::AdditiveSingleCycleV0 { partials } = &mut atom.kind;
+        *partials = (1..=8u8)
+            .map(|h| AtomPartial {
+                harmonic: h,
+                amplitude: 1.0,
+                phase_cycles: 0.0,
+            })
+            .collect();
+        let a = render_to_brr(&atom).expect("render");
+        let b = render_to_brr(&atom).expect("render");
+        assert_eq!(a.brr_sha256, b.brr_sha256);
+        assert_eq!(a.brr_sha256.len(), 64);
+    }
+
+    /// K — atom with `amplitude = 0.0` produces all-zero PCM.
+    #[test]
+    fn render_atom_with_zero_amplitude_is_silent() {
+        let mut atom = canonical_sine_atom(128);
+        atom.amplitude = 0.0;
+        let pcm = render_to_pcm(&atom);
+        assert_eq!(pcm.len(), 128);
+        assert!(
+            pcm.iter().all(|s| *s == 0),
+            "zero-amplitude atom must render all-zero PCM"
+        );
+    }
+
+    /// L — atom with `normalize = false` and partials summing > 1.0
+    /// produces no NaN / no infinity, samples remain in i16 range.
+    #[test]
+    fn render_unnormalized_high_partials_clamps_safely() {
+        let mut atom = canonical_sine_atom(128);
+        atom.amplitude = 1.0;
+        atom.render.normalize = false;
+        let AtomKind::AdditiveSingleCycleV0 { partials } = &mut atom.kind;
+        *partials = vec![
+            AtomPartial {
+                harmonic: 1,
+                amplitude: 1.0,
+                phase_cycles: 0.0,
+            },
+            AtomPartial {
+                harmonic: 1,
+                amplitude: 1.0,
+                phase_cycles: 0.0,
+            },
+            AtomPartial {
+                harmonic: 1,
+                amplitude: 1.0,
+                phase_cycles: 0.0,
+            },
+        ];
+        let pcm = render_to_pcm(&atom);
+        for s in &pcm {
+            let v = *s as i32;
+            assert!(
+                (-32768..=32767).contains(&v),
+                "sample out of i16 range: {v}"
+            );
+        }
+    }
+
+    /// M — same `phase_cycles` produces identical PCM (deterministic
+    /// across two calls; mod-1 phase wrapping is a property of the
+    /// formula but the schema bounds phase_cycles to [0.0, 1.0)).
+    #[test]
+    fn render_same_phase_cycles_deterministic() {
+        let mut a1 = canonical_sine_atom(128);
+        let mut a2 = canonical_sine_atom(128);
+        let AtomKind::AdditiveSingleCycleV0 { partials } = &mut a1.kind;
+        partials[0].phase_cycles = 0.999;
+        let AtomKind::AdditiveSingleCycleV0 { partials } = &mut a2.kind;
+        partials[0].phase_cycles = 0.999;
+        let r1 = render_to_pcm(&a1);
+        let r2 = render_to_pcm(&a2);
+        assert_eq!(r1, r2, "identical phase_cycles must produce identical PCM");
+    }
+
+    /// N — atom with `cycle_len_samples = 256` renders correctly
+    /// (256 / 16 * 9 = 144 BRR bytes).
+    #[test]
+    fn render_cycle_256_sine_atom() {
+        let atom = canonical_sine_atom(256);
+        let out = render_to_brr(&atom).expect("render");
+        assert_eq!(out.brr_bytes.len(), 144);
+        assert_eq!(out.pcm.len(), 256);
+        let out2 = render_to_brr(&atom).expect("render");
+        assert_eq!(out.brr_sha256, out2.brr_sha256);
+    }
+
     /// **M2 atom-render baselines** — locked SHAs for the canonical
     /// 64- and 128-sample sine atoms (`amplitude=0.75`,
     /// `partial.amplitude=1.0`, `phase_cycles=0`,

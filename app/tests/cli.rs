@@ -3062,3 +3062,153 @@ fn cli_preview_atom_writes_audition_wav() {
     let bits = u16::from_le_bytes(bytes[34..36].try_into().unwrap());
     assert_eq!(bits, 16);
 }
+
+// =============================================================================
+// M2.4 — compile-sequence CLI + pack-with-sequence integration
+// =============================================================================
+
+#[test]
+fn cli_compile_sequence_happy_path() {
+    let dir = TempDir::new().unwrap();
+    let project = write_v2_project_with_two_sine_atoms(dir.path());
+    let out_bin = dir.path().join("atomseq_0001.seq.bin");
+    let out_report = dir.path().join("atomseq_0001.report.json");
+    let out = Command::new(bin())
+        .args(["compile-sequence", "--project"])
+        .arg(&project)
+        .args(["--out-bin"])
+        .arg(&out_bin)
+        .args(["--out-report"])
+        .arg(&out_report)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bytes = std::fs::read(&out_bin).unwrap();
+    // The fixture has a single-step sequence (atom_a, initial_kon,
+    // 120 ticks). Layout: 8-byte SEQ2 header + SET_SRC(3) +
+    // SET_VOL(4) + KON(2) + WAIT(2) + END(1) = 20 bytes total.
+    assert_eq!(
+        bytes.len(),
+        20,
+        "expected single-step compiled sequence to be 20 bytes"
+    );
+    let r = read_json(&out_report);
+    assert_envelope(&r, "sequence_compile");
+    assert_eq!(r["bytecode_total_bytes"], 20);
+    assert_eq!(r["bytecode_payload_bytes"], 12);
+}
+
+#[test]
+fn cli_compile_sequence_missing_active_errors() {
+    let dir = TempDir::new().unwrap();
+    let path = write_v2_project_with_two_sine_atoms(dir.path());
+    // Drop the active_sequence_id and re-validate.
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut v: Value = serde_json::from_str(&text).unwrap();
+    v["m2"]["active_sequence_id"] = serde_json::Value::Null;
+    std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+    let out = Command::new(bin())
+        .args(["compile-sequence", "--project"])
+        .arg(&path)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no active sequence") || stderr.contains("--sequence-id"),
+        "expected hint to specify --sequence-id; got: {stderr}"
+    );
+}
+
+#[test]
+fn cli_compile_sequence_unknown_id_errors() {
+    let dir = TempDir::new().unwrap();
+    let project = write_v2_project_with_two_sine_atoms(dir.path());
+    let out = Command::new(bin())
+        .args(["compile-sequence", "--project"])
+        .arg(&project)
+        .args(["--sequence-id", "ghost_seq"])
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ghost_seq"),
+        "expected unknown-id error to mention the requested id; got: {stderr}"
+    );
+}
+
+#[test]
+fn cli_pack_v2_multi_voice_with_sequence_emits_sequence_region() {
+    // Same fixture as the M2.3 capability-manifest test, but verify
+    // the M2.4 sequence_data region is now present in the AramMapReport
+    // and the SEQ2 magic appears at its start.
+    let dir = TempDir::new().unwrap();
+    let project = write_v2_project_with_two_sine_atoms(dir.path());
+    // Match WAV SHA against the synthesised sample (write_v2_project
+    // declares audio/lead.wav with a placeholder SHA; pack only uses
+    // the audio file when source SHA matches, so we recompute and
+    // patch the project).
+    let audio_dir = dir.path().join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let audio = audio_dir.join("lead.wav");
+    let pcm = synth_sine_pcm(256, 64.0, 8000.0);
+    write_pcm16_wav_with_samples(&audio, 32_000, 1, &pcm);
+    let sha = sfc_atomizer_core::asm::sha256_hex_file(&audio).unwrap();
+    let text = std::fs::read_to_string(&project).unwrap();
+    let mut v: Value = serde_json::from_str(&text).unwrap();
+    v["sample_pool"][0]["source"]["sha256"] = serde_json::json!(sha);
+    v["sample_pool"][0]["source"]["frames"] = serde_json::json!(256);
+    std::fs::write(&project, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+    let image = dir.path().join("aram.bin");
+    let map = dir.path().join("aram-map.json");
+    let manifest = dir.path().join("capability-manifest.json");
+    let out = Command::new(bin())
+        .args(["pack", "--project"])
+        .arg(&project)
+        .args(["--out-image"])
+        .arg(&image)
+        .args(["--out-map"])
+        .arg(&map)
+        .args(["--out-capability-manifest"])
+        .arg(&manifest)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let m = read_json(&map);
+    let regions = m["regions"].as_array().unwrap();
+    let names: Vec<&str> = regions.iter().filter_map(|r| r["name"].as_str()).collect();
+    assert!(
+        names.contains(&"sequence_data"),
+        "expected sequence_data region"
+    );
+
+    // SEQ2 magic at the sequence_data start address.
+    let seq_region = regions
+        .iter()
+        .find(|r| r["name"] == "sequence_data")
+        .unwrap();
+    let start = u32::from_str_radix(
+        seq_region["start"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x"),
+        16,
+    )
+    .unwrap() as usize;
+    let img = std::fs::read(&image).unwrap();
+    assert_eq!(&img[start..start + 4], b"SEQ2");
+}
