@@ -16,6 +16,7 @@
 //! the encoded bytes are guaranteed to decode to the same samples
 //! the encoder scored against.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::brr::{decode_block, BrrDecoderState};
@@ -54,7 +55,7 @@ pub struct EncodeResult {
     pub summary: EncodeSummary,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct EncodedBlockReport {
     pub index: u32,
     pub filter: u8,
@@ -66,7 +67,7 @@ pub struct EncodedBlockReport {
     pub block_clamp_count: u32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct EncodeSummary {
     pub total_blocks: u32,
     pub encoded_bytes: u32,
@@ -76,6 +77,7 @@ pub struct EncodeSummary {
     pub filter_distribution: [u32; 4],
     /// Per-sample squared discontinuity at the loop seam, RMS-style.
     /// `None` for non-looped encodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_click_score: Option<f64>,
 }
 
