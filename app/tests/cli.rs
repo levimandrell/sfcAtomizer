@@ -1946,6 +1946,7 @@ fn cli_verify_sfc_modules_audible_silent_module_fails() {
                     echo: None,
                     source_directory: None,
                     samples: None,
+                    atoms: None,
                     warnings: Vec::new(),
                 }
             },
@@ -2856,6 +2857,176 @@ fn cli_render_atom_missing_atom_id_lists_available() {
         stderr.contains("sine_64") && stderr.contains("sine_128"),
         "expected available atom ids in stderr; got: {stderr}"
     );
+}
+
+// =============================================================================
+// M2.3 — pack v2 multi_voice_atom + capability manifest sidecar
+// =============================================================================
+
+#[test]
+fn cli_pack_v2_multi_voice_emits_capability_manifest() {
+    let dir = TempDir::new().unwrap();
+    let project = write_v2_project_with_two_sine_atoms(dir.path());
+    // Provide a real audio file for the sample (the v2 fixture
+    // declares sample-pool[0].path = audio/lead.wav; create it).
+    let audio_dir = dir.path().join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let audio = audio_dir.join("lead.wav");
+    let pcm = synth_sine_pcm(256, 64.0, 8000.0);
+    write_pcm16_wav_with_samples(&audio, 32_000, 1, &pcm);
+    // Update sample SHA in the project to match the just-written WAV.
+    let sha = sfc_atomizer_core::asm::sha256_hex_file(&audio).unwrap();
+    let text = std::fs::read_to_string(&project).unwrap();
+    let mut v: Value = serde_json::from_str(&text).unwrap();
+    v["sample_pool"][0]["source"]["sha256"] = serde_json::json!(sha);
+    // Update frame count too (synth_sine_pcm has 256 frames).
+    v["sample_pool"][0]["source"]["frames"] = serde_json::json!(256);
+    std::fs::write(&project, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+    let image = dir.path().join("aram.bin");
+    let map = dir.path().join("aram-map.json");
+    let manifest = dir.path().join("capability-manifest.json");
+
+    let out = Command::new(bin())
+        .args(["pack", "--project"])
+        .arg(&project)
+        .args(["--out-image"])
+        .arg(&image)
+        .args(["--out-map"])
+        .arg(&map)
+        .args(["--out-capability-manifest"])
+        .arg(&manifest)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Image is 64 KB.
+    let img = std::fs::read(&image).unwrap();
+    assert_eq!(img.len(), 65536);
+
+    // Map report has atoms summary.
+    let m = read_json(&map);
+    assert_envelope(&m, "aram_map");
+    assert!(m["atoms"].is_object(), "expected atoms summary in map");
+    assert_eq!(m["atoms"]["total_atoms"], 2);
+    let region_names: Vec<&str> = m["regions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["name"].as_str())
+        .collect();
+    assert!(region_names.contains(&"synth_atom_pool"));
+    assert!(region_names.contains(&"voice_setup_table"));
+
+    // Capability manifest sidecar.
+    let cap = read_json(&manifest);
+    assert_envelope(&cap, "capability_manifest");
+    assert_eq!(cap["driver_profile"], "multi_voice_atom");
+    assert_eq!(cap["driver_version"], 2);
+    assert_eq!(cap["bytecode_version"], 2);
+    assert_eq!(cap["limits"]["max_music_voices"], 2);
+    assert_eq!(cap["limits"]["max_atom_sources"], 32);
+    assert_eq!(cap["features"]["synth_static_atom"], true);
+    assert_eq!(cap["features"]["synth_atom_sequence"], true);
+    assert_eq!(cap["features"]["multi_voice_playback"], true);
+}
+
+#[test]
+fn cli_pack_v2_sample_only_emits_sample_basic_manifest() {
+    let dir = TempDir::new().unwrap();
+    // v1 project, then migrate to v2-sample-only-equivalent.
+    let v1 = make_project_with_one_imported_sample(dir.path(), "sb_v2");
+    let v2 = dir.path().join("sb_v2.v2.json");
+    let mig = Command::new(bin())
+        .args(["migrate-project", "--in"])
+        .arg(&v1)
+        .args(["--out"])
+        .arg(&v2)
+        .output()
+        .unwrap();
+    assert_eq!(mig.status.code(), Some(0));
+
+    let image = dir.path().join("aram.bin");
+    let map = dir.path().join("aram-map.json");
+    let manifest = dir.path().join("capability-manifest.json");
+
+    let out = Command::new(bin())
+        .args(["pack", "--project"])
+        .arg(&v2)
+        .args(["--out-image"])
+        .arg(&image)
+        .args(["--out-map"])
+        .arg(&map)
+        .args(["--out-capability-manifest"])
+        .arg(&manifest)
+        .output()
+        .expect("run sfcwc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let cap = read_json(&manifest);
+    assert_envelope(&cap, "capability_manifest");
+    assert_eq!(cap["driver_profile"], "sample_basic");
+    assert_eq!(cap["driver_version"], 1);
+    assert_eq!(cap["bytecode_version"], 1);
+    assert_eq!(cap["limits"]["max_music_voices"], 1);
+    assert_eq!(cap["limits"]["max_atom_sources"], 0);
+    // Atom features must NOT be present in sample_basic.
+    assert!(cap["features"].get("synth_static_atom").is_none());
+    assert!(cap["features"].get("multi_voice_playback").is_none());
+}
+
+#[test]
+fn cli_pack_v2_sample_only_matches_v1_aram_sha() {
+    // M2.1 bit-identity guarantee carried into M2.3: pack on a
+    // sample-only-equivalent v2 produces the same ARAM bytes as
+    // pack on the original v1.
+    let dir = TempDir::new().unwrap();
+    let v1 = make_project_with_one_imported_sample(dir.path(), "iso");
+    let v2 = dir.path().join("iso.v2.json");
+    Command::new(bin())
+        .args(["migrate-project", "--in"])
+        .arg(&v1)
+        .args(["--out"])
+        .arg(&v2)
+        .output()
+        .unwrap();
+
+    let v1_image = dir.path().join("v1.bin");
+    let v1_map = dir.path().join("v1.map.json");
+    Command::new(bin())
+        .args(["pack", "--project"])
+        .arg(&v1)
+        .args(["--out-image"])
+        .arg(&v1_image)
+        .args(["--out-map"])
+        .arg(&v1_map)
+        .output()
+        .unwrap();
+    let v2_image = dir.path().join("v2.bin");
+    let v2_map = dir.path().join("v2.map.json");
+    Command::new(bin())
+        .args(["pack", "--project"])
+        .arg(&v2)
+        .args(["--out-image"])
+        .arg(&v2_image)
+        .args(["--out-map"])
+        .arg(&v2_map)
+        .output()
+        .unwrap();
+
+    let a = std::fs::read(&v1_image).unwrap();
+    let b = std::fs::read(&v2_image).unwrap();
+    assert_eq!(a, b, "v2-sample-only ARAM must match v1 ARAM byte-for-byte");
 }
 
 #[test]
