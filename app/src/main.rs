@@ -315,6 +315,11 @@ enum Command {
         /// before pack. Default off.
         #[arg(long)]
         refresh_source_hash: bool,
+        /// M2.3: write the capability manifest sidecar to this path.
+        /// Defaults to `<out_map>.capability-manifest.json` next to
+        /// the ARAM map.
+        #[arg(long)]
+        out_capability_manifest: Option<PathBuf>,
     },
     /// Encode a WAV / AIFF / BRR audio file to BRR bytes (M1.3).
     ///
@@ -506,12 +511,14 @@ fn run(cli: Cli) -> Result<(), CliError> {
             out_map,
             driver,
             refresh_source_hash,
+            out_capability_manifest,
         } => cmd_pack(
             &project,
             &out_image,
             &out_map,
             driver.as_deref(),
             refresh_source_hash,
+            out_capability_manifest.as_deref(),
         ),
         Command::M1Acceptance {
             project_a,
@@ -2719,7 +2726,32 @@ fn cmd_pack(
     out_map: &Path,
     driver_path: Option<&Path>,
     refresh_source_hash: bool,
+    out_capability_manifest: Option<&Path>,
 ) -> Result<(), CliError> {
+    // Peek the schema to decide between the v1-shim path (M1.4
+    // bit-identical output) and the M2.3 multi-source pack_v2 path.
+    let multi_voice = match load_project_versioned(project_path) {
+        Ok(LoadedProject::V2(p)) if p.driver.profile == "multi_voice_atom" => Some(p),
+        _ => None,
+    };
+
+    let manifest_path = out_capability_manifest
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| default_capability_manifest_path(out_map));
+
+    if let Some(v2) = multi_voice {
+        return cmd_pack_v2_multi_voice(
+            project_path,
+            &v2,
+            out_image,
+            out_map,
+            &manifest_path,
+            driver_path,
+        );
+    }
+
+    // sample_basic / v1 / sample-only-equivalent v2 path: existing
+    // M1.4 layout via the v1 shim.
     let driver_override = match driver_path {
         Some(p) => match std::fs::read(p) {
             Ok(b) => Some(b),
@@ -2748,6 +2780,8 @@ fn cmd_pack(
         source,
     })?;
     write_json(out_map, &map_report)?;
+    let manifest = sfc_atomizer_core::capability_manifest::CapabilityManifest::sample_basic();
+    write_json(&manifest_path, &manifest)?;
 
     let image_sha = sfc_atomizer_core::asm::sha256_hex(&result_image[..]);
     let summ = map_report.samples.as_ref();
@@ -2760,7 +2794,7 @@ fn cmd_pack(
     let free = map_report.free_bytes;
     let free_pct = (free as f64) * 100.0 / 65536.0;
     eprintln!(
-        "pack: {} sample{}, {} BRR bytes, echo {}, free={} B ({:.1}%); image -> {} (sha256={}); map -> {}",
+        "pack: {} sample{}, {} BRR bytes, echo {}, free={} B ({:.1}%); image -> {} (sha256={}); map -> {}; capability manifest (sample_basic) -> {}",
         project.sample_pool.len(),
         if project.sample_pool.len() == 1 { "" } else { "s" },
         total_brr,
@@ -2770,6 +2804,197 @@ fn cmd_pack(
         out_image.display(),
         image_sha,
         out_map.display(),
+        manifest_path.display(),
+    );
+    Ok(())
+}
+
+fn default_capability_manifest_path(out_map: &Path) -> PathBuf {
+    let parent = out_map.parent().unwrap_or_else(|| Path::new("."));
+    let stem = out_map
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".to_string());
+    parent.join(format!("{stem}.capability-manifest.json"))
+}
+
+/// M2.3 multi_voice_atom pack path. Renders every atom in the
+/// project's atom_pool through `core::atom::render_to_brr`, builds
+/// the voice setup table per SPEC §15.7, calls `pack_v2`, writes the
+/// image / map / capability manifest. Sequence data is left empty
+/// (M2.4 fills).
+fn cmd_pack_v2_multi_voice(
+    project_path: &Path,
+    v2: &sfc_atomizer_core::project_v2::ProjectV2,
+    out_image: &Path,
+    out_map: &Path,
+    manifest_path: &Path,
+    driver_path: Option<&Path>,
+) -> Result<(), CliError> {
+    if let Err(verrors) = v2.validate() {
+        eprintln!(
+            "pack: v2 project invalid — {} ({} error{})",
+            project_path.display(),
+            verrors.len(),
+            if verrors.len() == 1 { "" } else { "s" }
+        );
+        for e in &verrors {
+            eprintln!("  {} : {}", e.path, e.kind);
+        }
+        std::process::exit(2);
+    }
+
+    // Driver-code blob: M2.5 ships the multi_voice_atom driver; M2.3
+    // accepts a caller-provided override or zero-fills the budget.
+    let driver_code = match driver_path {
+        Some(p) => match std::fs::read(p) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("pack: driver read failed for {}: {e}", p.display());
+                std::process::exit(1);
+            }
+        },
+        None => Vec::new(),
+    };
+
+    // Encode samples through the same M1.3 path the v1 packer uses.
+    let project_dir = project_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut encoded_samples: Vec<sfc_atomizer_core::packer::EncodedSample> =
+        Vec::with_capacity(v2.sample_pool.len());
+    for slot in &v2.sample_pool {
+        let raw = Path::new(&slot.source.path);
+        let audio_path = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            project_dir.join(raw)
+        };
+        let pcm = match decode_to_mono_pcm(&audio_path) {
+            Ok(p) => p,
+            Err(e) => {
+                let exit = match &e {
+                    AudioDecodeError::Probe(_) | AudioDecodeError::Io(_) => 1,
+                    _ => 2,
+                };
+                eprintln!("pack: decode failed for sample {}: {e}", slot.id);
+                std::process::exit(exit);
+            }
+        };
+        let opts = EncodeOptions::default();
+        let (bytes, loop_entry_block) = if slot.looped.enabled {
+            match slot.looped.start_sample {
+                Some(start) => match encode_looped(&pcm, start, &opts) {
+                    Ok(r) => (r.bytes, Some(start / 16)),
+                    Err(e) => {
+                        eprintln!("pack: encode failed for sample {}: {e}", slot.id);
+                        std::process::exit(3);
+                    }
+                },
+                None => (brr_encode(&pcm, &opts).bytes, None),
+            }
+        } else {
+            (brr_encode(&pcm, &opts).bytes, None)
+        };
+        encoded_samples.push(sfc_atomizer_core::packer::EncodedSample {
+            sample_id: slot.id.clone(),
+            bytes,
+            loop_entry_block,
+        });
+    }
+
+    // Render atoms via render_to_brr.
+    let mut encoded_atoms: Vec<sfc_atomizer_core::packer::EncodedSample> =
+        Vec::with_capacity(v2.atom_pool.len());
+    for atom in &v2.atom_pool {
+        let out =
+            render_to_brr(atom).expect("AtomRenderError uninhabited at M2; render is infallible");
+        encoded_atoms.push(sfc_atomizer_core::packer::EncodedSample {
+            sample_id: atom.id.clone(),
+            bytes: out.brr_bytes,
+            // Atoms always loop, entry block = 0 (single-cycle).
+            loop_entry_block: Some(0),
+        });
+    }
+
+    let voice_setup_table = match sfc_atomizer_core::voice_setup::build_voice_setup_table(v2) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            eprintln!("pack: build voice setup table: {e}");
+            std::process::exit(3);
+        }
+    };
+
+    let result = sfc_atomizer_core::packer::pack_v2(sfc_atomizer_core::packer::PackInputV2 {
+        project: v2.clone(),
+        encoded_samples,
+        encoded_atoms,
+        driver_code,
+        sequence_data: None,
+        voice_setup_table,
+    });
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("pack: {e}");
+            std::process::exit(3);
+        }
+    };
+
+    // Write outputs.
+    if let Some(parent) = out_image.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir(parent)?;
+        }
+    }
+    std::fs::write(out_image, &result.aram_image[..]).map_err(|source| CliError::Io {
+        path: out_image.to_path_buf(),
+        source,
+    })?;
+    write_json(out_map, &result.map_report)?;
+    let manifest = sfc_atomizer_core::capability_manifest::CapabilityManifest::multi_voice_atom();
+    if let Err(e) = manifest.validate_dependencies() {
+        eprintln!("pack: capability manifest dependency check failed: {e}");
+        std::process::exit(3);
+    }
+    write_json(manifest_path, &manifest)?;
+
+    let image_sha = sfc_atomizer_core::asm::sha256_hex(&result.aram_image[..]);
+    let sample_brr = result
+        .map_report
+        .samples
+        .as_ref()
+        .map(|s| s.total_brr_bytes)
+        .unwrap_or(0);
+    let atom_brr = result
+        .map_report
+        .atoms
+        .as_ref()
+        .map(|a| a.total_brr_bytes)
+        .unwrap_or(0);
+    let echo_summ = result.map_report.echo.as_ref();
+    let echo_label = match echo_summ {
+        Some(e) if e.enabled => format!("EDL={} ({} B)", e.edl, e.buffer_bytes),
+        _ => "off".to_string(),
+    };
+    let free = result.map_report.free_bytes;
+    let free_pct = (free as f64) * 100.0 / 65536.0;
+    eprintln!(
+        "pack: {} sample{} ({} B), {} atom{} ({} B), echo {}, free={} B ({:.1}%); image -> {} (sha256={}); map -> {}; capability manifest (multi_voice_atom) -> {}",
+        v2.sample_pool.len(),
+        if v2.sample_pool.len() == 1 { "" } else { "s" },
+        sample_brr,
+        v2.atom_pool.len(),
+        if v2.atom_pool.len() == 1 { "" } else { "s" },
+        atom_brr,
+        echo_label,
+        free,
+        free_pct,
+        out_image.display(),
+        image_sha,
+        out_map.display(),
+        manifest_path.display(),
     );
     Ok(())
 }

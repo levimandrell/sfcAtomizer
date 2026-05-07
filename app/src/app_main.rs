@@ -2168,7 +2168,8 @@ fn color_for_kind(kind: AramKind) -> egui::Color32 {
         AramKind::PitchTables
         | AramKind::SequenceData
         | AramKind::InstrumentMetadata
-        | AramKind::SynthAtomPool => egui::Color32::from_rgb(180, 180, 80),
+        | AramKind::SynthAtomPool
+        | AramKind::VoiceSetupTable => egui::Color32::from_rgb(180, 180, 80),
     }
 }
 
