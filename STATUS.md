@@ -119,9 +119,21 @@ final M2 polish. PM to brief.
   pipeline; no runtime synthesis introduced.
 - Sequence preview deferred (would require a runtime
   interpreter in the GUI process — forbidden per SPEC §0).
-- f64 slider widgets snap to 4-decimal precision before
-  storing into the model so JSON serialization stays
-  byte-stable across edit sessions.
+- f64 slider widgets snap to 4-decimal precision via the
+  editor model's setters (`set_atom_amplitude`,
+  `set_atom_playback`, `set_partial_amplitude`,
+  `set_partial_phase_cycles`, `set_step_target_volume`).
+  Direct `model.project.<field>` mutation does NOT snap and
+  is reserved for tests / migrations / "I know what I'm
+  doing" callers (consultant M2.7 #15 narration fix applied
+  at M2.8).
+- v2 schema permits empty `sample_pool` (relaxed from
+  `1..=128` to `0..=128` at M2.5; consultant #31, narration
+  applied at M2.8). Compile paths still require
+  sample/track consistency: `sample_basic` projects with
+  empty `sample_pool` produce silent SPC; `multi_voice_atom`
+  with empty `sample_pool` requires all tracks be
+  `atom_sequence`.
 - `DRIVER_CODE_BUDGET_M1 → DRIVER_CODE_BUDGET_4KIB`
   workspace rename; the budget is profile-agnostic per
   SPEC §15.5 and the M1 tag was misleading after

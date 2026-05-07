@@ -806,8 +806,21 @@ impl SfcwcApp {
         match effect {
             v2_editor::SwitchProfileEffect::NoChange => {}
             v2_editor::SwitchProfileEffect::Additive => {
-                self.status_message =
-                    Some(format!("driver.profile → {new_profile} (no data cleared)"));
+                // M2.8 (consultant #13): when the user switches to
+                // multi_voice_atom from sample_basic the project is
+                // valid-but-incomplete — SPEC §16.9 rule 57 requires
+                // at least one atom_sequence track. Nudge the user in
+                // the status bar so the validation summary isn't the
+                // only signal.
+                if new_profile == "multi_voice_atom" {
+                    self.status_message = Some(format!(
+                        "driver.profile → {new_profile}. Add an atom_sequence track to make this profile valid."
+                    ));
+                } else {
+                    self.status_message = Some(format!(
+                        "driver.profile → {new_profile} (no data cleared)"
+                    ));
+                }
             }
             v2_editor::SwitchProfileEffect::DestructiveClear {
                 atoms_cleared,

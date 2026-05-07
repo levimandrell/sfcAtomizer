@@ -229,12 +229,11 @@ UI gating: atom-pool / atom-sequence editors are hidden when `synth_static_atom 
 
 #### Manifest enforcement
 
-Every compiler and GUI path that emits atom data, sequence bytecode, or voice-1 data MUST consult the capability manifest, not just `driver.profile`. Enforcement points:
+Capability-manifest enforcement is **authoritative at compile time** (`compile_sequence`, `pack_v2`, `compile-spc`, `compile-sfc`, `validate-project`, `m1-acceptance`, `m2-acceptance`). A capability mismatch is a hard error naming the missing capability (e.g. `feature \`synth_atom_sequence\` required but not in driver_profile=\`sample_basic\``).
 
-- Entry of `compile-spc`, `compile-sfc`, `pack`, `validate-project`, `m1-acceptance`, `m2-acceptance` (when it lands).
-- Any GUI action that writes atom-pool, atom-sequence, or track data.
+The GUI editor enforces profile / atom-data consistency through schema validation (`ProjectV2::validate`'s rules 56-57 — `sample_basic` forbids atom data; `multi_voice_atom` requires at least one atom_sequence track) and through the editor's profile-switch handler (clears atom data on switch to `sample_basic`). The capability check at compile time is the source of truth; the GUI's job is to keep the project shape consistent so the compile-time check has nothing left to flag.
 
-A capability mismatch is a hard error naming the missing capability (e.g. `feature \`synth_atom_sequence\` required but not in driver_profile=\`sample_basic\``). UI gating is best-effort cosmetic; the compile-time check is the source of truth.
+Cosmetic UI gating (showing / hiding atom-pool editors, volume-slide controls, voice-1 controls based on the active profile's feature set) is best-effort and informational — the compile-time check still runs regardless.
 
 ---
 
