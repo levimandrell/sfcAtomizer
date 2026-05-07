@@ -154,8 +154,7 @@ fn m1_driver_code_sha_matches_locked_baseline() {
     if skip_if_no_asar() {
         return;
     }
-    const BASELINES_JSON: &str =
-        include_str!("../../baselines/m2.json");
+    const BASELINES_JSON: &str = include_str!("../../baselines/m2.json");
     let baselines: serde_json::Value =
         serde_json::from_str(BASELINES_JSON).expect("baselines/m2.json must parse");
     let identity_gated = baselines["identity_gated"]
