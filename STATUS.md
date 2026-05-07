@@ -2,49 +2,197 @@
 
 ## Current milestone
 
-**M2.4 — Sequence bytecode compiler v0 + prelude SPEC
-patches shipped.** New `core::sequence_compiler` lowers
-`atom_sequences[].steps` to SEQ2 bytecode per SPEC §14.3.
-First step (`initial_kon`) lowers to SET_SRC + SET_VOL +
-KON + WAIT; subsequent steps (`fade_to_zero_retrigger`)
-lower to the §14.3 source-step pattern (VOL_SLIDE fade-out
-→ KOFF → 1-tick gap → SET_SRC → SET_VOL → KON → VOL_SLIDE
-fade-in → WAIT sustain). Sequence terminator is END ($00)
-preceded by the SEQ2 region header. The compiler enforces
-capability manifest gating (rejects compile when
-`synth_source_step` / `volume_slide` / `core_sequence_wait`
-are absent), per-tick DSP write budget (24 default; observed
-max for canonical fixture = 4), and one-active-slide
-overlap check. M2.4 default lowering does NOT emit
-SET_PITCH; voice setup table seeds the pitch register at
-init.
+**M2.5 — Multi-voice atom driver in `.spc` shipped.** New
+SPC700 driver `m2_multi_voice_atom.asm` (1158 B assembled,
+4 KiB budget) implements SPEC §20.2 `multi_voice_atom`:
+T0 timer at $85 (60.150 Hz nominal), voice-setup-table
+walk for two-voice DSP init, `init_kon_mask` for sample
+voices, full SEQ2 opcode interpreter (END / WAIT /
+SET_SRC / SET_VOL / KON / KOFF / VOL_SLIDE / SET_PITCH),
+integer-Bresenham slide arithmetic, host-command protocol
+(STOP / RESET_TO_IPL / PING / reject) carried over from
+M1. `compile-spc` dispatches v2 multi_voice_atom projects
+through the new path; v1 / v2-sample-only continue
+through the M1 pipeline byte-identically.
 
-`sfcwc pack` now lowers the project's `m2.active_sequence_id`
-to bytecode and feeds it into `pack_v2`'s `sequence_data`
-slot; the new `sequence_data` ARAM region appears between
-the source directory and the sample BRR pool. The byte-
-pinned canonical sequence is **49 bytes total** (8 SEQ2
-header + 41 payload). New `sfcwc compile-sequence` CLI for
-engineer / CI inspection.
+New per-channel oracle harness: `verify-spc-stereo`
+renders an SPC through `snes_spc_oracle` and emits L/R
+metrics (max_abs, rms, zero-crossing rate); optional
+`--with-source-step-windows` slices the canonical SPEC §21
+windows (pre = ticks 80..=120, post = ticks 130..=249) for
+the source-step zcr ratio. The aggregator
+`m2-channel-acceptance` runs three projects (sample_only
+v1 / atom_only v2 / combined v2), checks SPEC §21
+audibility + silence + ratio gates, and writes a unified
+JSON report.
 
-Phase 0 prelude landed nine SPEC patches: §15.7 voice byte
-map (bytes 0..=10) + `$FF` unused-voice sentinel ABI;
-§14.3 WAIT execution model + slide accumulator state with
-integer-Bresenham formula and round-half-AWAY-from-zero;
-§20.2 status-flags M2 bit map locked (8 bits); §20.2
-"ticks, not seconds" rule; §5.4 canonical feature
-dependency graph promoted; §5.4 `core_tick_loop` polling-
-only-profile rule; §21 v2-sample-only bit-identity
-invariant promoted from STATUS to spec. Companion fix:
-`core::capability_manifest::sample_basic()` drops
-`core_tick_loop` (M1 driver is polling-only).
+Three driver bugs surfaced and fixed during M2.5
+diagnosis:
 
-**M2.5 next.** Driver `multi_voice_atom` in `.spc` —
-implement the SPC700 timer-driven driver that consumes
-SEQ2 bytecode and the voice setup table from ARAM,
-producing audible multi-voice playback. PM to brief.
+- **`sequence_addr` off-by-8** — driver constants now
+  point at the SEQ2 bytecode payload, not the 8-byte
+  region header (SPEC §14.3 "Driver-side `sequence_addr`
+  semantics" added).
+- **Driver entry fall-through** — explicit `jmp main_loop`
+  after the ready-signature writes; previously fell into
+  `setup_voice_0`, RET'd from an empty stack, and crashed
+  on a STOP-opcode byte in DP.
+- **KON / KOFF latch interaction** — `op_kon` now writes
+  `KOFF = $00` before `KON = mask` (S-DSP holds voices in
+  release while `KOFF` bits stay set; SPEC §14.3 "KON /
+  KOFF latching" added).
+
+SPEC additions: §14.3 driver-side sequence_addr semantics +
+KON/KOFF latching; §20.2 init step 5 sequence_addr clarification +
+init step 8 `init_kon_mask` documentation; §16.6 sample_pool
+length relaxed to `0..=128` (atom-only multi_voice_atom
+fixtures need empty pool to validate).
+
+**M2.6 next.** Smoke run, integration polish, M2 acceptance
+chain (`m2-acceptance` analogue of `m1-acceptance`). PM to
+brief.
 
 ## Last pass
+
+**Pass M2.5 — Multi-voice atom driver in `.spc` + M2.5 prelude.**
+
+- **Layer 1 (block-M2 fixes, `core::sequence_compiler`):**
+  Transitive capability dependency check at the top of
+  `compile_sequence` — surfaces missing transitive deps as
+  `CapabilityMissing { feature: "<dep> (transitive dep of <feature>)" }`.
+  SET_SRC bounds-check: `src_index` over 255 errors with
+  `SrcIndexTooLarge`; total source pool over 256 errors with
+  `TooManySources`. Six new unit tests covering the per-feature
+  transitive missing path, canonical-passes-after-check
+  invariant, and SRCN bounds.
+- **Layer 2 (SPEC / STATUS hygiene):** Five small patches —
+  §5.2 mandatory-core wording fix (`core_pitch_table` no
+  longer required for compile-time-seeded profiles); §21
+  M2 oracle render frame count = 160 000 (5.0 s) with the
+  pre-step (ticks 80..=120) / post-step (ticks 130..=249)
+  windows; §14.3 slide first-write timing + last-write
+  coincides-with-next-opcode prose; rounding-mode comment
+  alignment in `driver_build::playback_to_voll_volr`; M2.4
+  baseline retired in place to `_CURRENT` with `Supersedes:`
+  block convention documented.
+- **Layer 3 Phase A (`m2_multi_voice_atom.asm`):** Full SPC700
+  driver — direct-page state at $00..$15 (token / status /
+  seq_ptr / wait_counter / active_voice_mask / slide block /
+  current_vol per voice); 22-byte voice-setup-table walk via
+  ($20)+y indirect-indexed, skipping voices with
+  `src_index = $FF`; T0 timer init (`T0TARGET = $85`);
+  `process_tick` running slide-advance → wait-decrement →
+  opcode-read in SPEC §14.3 order; 8-opcode interpreter using
+  `cmp ; bne <skip>; jmp <handler>` chains (SPC700 relative
+  branches are ±127 B); integer-Bresenham slide arithmetic
+  via `mul ya / div ya, x` with carry-propagation through Y.
+  Ends at `db $de, $ad, $be, $ef` sentinel.
+- **Layer 3 Phase B (`core::driver_build::build_m2`):**
+  `DriverConstantsM2` carries master vol / source-dir page /
+  echo block / `flg_running` / `status_flags_initial` /
+  `voice_setup_addr` / `sequence_addr` / `init_kon_mask`.
+  `compute_constants_m2` derives `init_kon_mask` from
+  `tracks[].kind == SampleSustain` (atom voices KON'd by
+  bytecode). `render_constants_inc_m2` emits the .inc with
+  `sequence_addr` shifted past the 8-byte SEQ2 header so the
+  driver reads the payload directly. `build_m2` runs asar
+  with the constants, slices through the sentinel, enforces
+  the 4 KiB driver-code budget, and scans for sentinel
+  collisions.
+- **Layer 3 Phase C (`compile-spc` v2 dispatch):** New
+  `cmd_compile_spc_v2_multi_voice` — validates v2, encodes
+  samples + atoms, builds the voice-setup table, compiles
+  the active sequence to SEQ2 bytecode, shadow-packs to learn
+  voice_setup_addr / sequence_addr, builds the M2 driver,
+  real-packs with driver bytes, wraps as .spc. `compile-spc`
+  dispatches to this path when `driver.profile ==
+  multi_voice_atom`; sample_basic continues through the M1
+  shim.
+- **Layer 3 Phase D (per-channel oracle harness):** New
+  `verify-spc-stereo` and `m2-channel-acceptance` CLI
+  commands. `OracleStereoReport` carries per-channel
+  metrics + optional pre/post source-step windows.
+  `per_channel_metrics` computes max_abs / rms / ZCR per L/R
+  from interleaved s16le PCM. `m2-channel-acceptance` runs
+  the three-fixture suite and emits a unified report with
+  `gate: ok|error` and the SPEC §21 audibility / silence /
+  source-step ratio findings.
+- **Layer 3 Phase E (driver-build tests):** Four new
+  driver_build integration tests pinning the M2 path —
+  `build_driver_m2_assembles_within_budget` (deterministic
+  build + budget check); `compute_constants_m2_init_kon_mask_only_sample_voices`
+  (sample on v0 + atom on v1 → mask = 0b01);
+  `render_constants_inc_m2_sequence_addr_skips_seq2_header`
+  (lo/hi bytes pin `region_start + 8`); and
+  `build_driver_m2_clears_koff_before_kon_in_op_kon` (counts
+  the encoded `KOFF = $00 / KON = mask` pairs and asserts
+  the op_kon body's clear precedes its KON).
+- **Layer 3 Phase F (CLI tests):** Two new CLI tests
+  exercising the full `.spc` → oracle path —
+  `cli_verify_spc_stereo_combined_passes_spec_21_thresholds`
+  (single fixture, asserts L max_abs ≥ 1000 + rms ≥ 200 + R
+  same) and `cli_m2_channel_acceptance_canonical_suite`
+  (three-project suite, asserts gate=ok and source-step zcr
+  ratio ≥ 1.5). The retired
+  `cli_compile_spc_on_v2_with_atoms_errors_with_m25_pending`
+  is replaced by `cli_compile_spc_on_v2_with_atoms_succeeds_at_m25`,
+  which now asserts a 66 048-byte .spc + driver bytes
+  starting at `8F 6C F2`.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. 482 tests workspace-
+  wide (was 471 at M2.4).
+
+### M2.5 baselines locked
+
+Canonical M2.5 fixtures (synthesized by the new CLI tests
+in `app/tests/cli.rs::write_v2_combined_for_m25_gate` and
+`cli_m2_channel_acceptance_canonical_suite`):
+
+```
+M2_DRIVER_CODE_BUDGET_BYTES        = 4096                                ; (unchanged from M2.0)
+M2_DRIVER_CODE_OBSERVED_BYTES      = 1158                                ; this build, asar resolves locally
+M2_DRIVER_INIT_KON_MASK_RULE       = OR over t in tracks where t.kind == sample_sustain of (1 << t.voice)
+
+M2_SPC_BYTES                       = 66048                               ; standard SPC file (header + ARAM + DSP regs + ext)
+M2_VERIFY_SPC_STEREO_FRAMES        = 32000                               ; 1.0 s at 32 kHz, used by the per-fixture CLI test
+M2_CHANNEL_ACCEPTANCE_FRAMES       = 160000                              ; 5.0 s at 32 kHz, used by SPEC §21 canonical render
+M2_AUDIBILITY_MAX_ABS_FLOOR        = 1000                                ; SPEC §21
+M2_AUDIBILITY_RMS_FLOOR            = 200                                 ; SPEC §21
+M2_SILENT_CHANNEL_MAX_ABS_CEIL     = 50                                  ; SPEC §21
+M2_SOURCE_STEP_ZCR_RATIO_FLOOR     = 1.5                                 ; SPEC §21 (post.right.zcr / pre.right.zcr)
+```
+
+`m2-channel-acceptance` on the canonical suite (sample_only.v1
+sine LEFT, atom_only.v2 sine_128 RIGHT, combined.v2 sample
+LEFT + atom-sequence RIGHT with `fade_to_zero_retrigger`
+source-step from sine_128 → sine_64) passes all seven §21
+gates.
+
+The exact .spc / ARAM / driver SHAs are not pinned literally
+— they shift with asar version + snes_spc git pin and aren't
+load-bearing. Tests pin behavior (audibility floors, silence
+ceilings, source-step ratio) rather than identity.
+
+### Multi-voice ARAM (post-M2.5)
+
+```
+M2_MULTI_VOICE_ARAM_SHA256_CURRENT = 8d59dabe2b9dd25cd06c09321b4872dbe639609096566fdda221ce4dfa488c04
+                                  ; canonical combined fixture (1 sample LEFT,
+                                  ; 2 sine atoms with source-step, voice 1 RIGHT);
+                                  ; documentary only, no test pins this literal.
+
+Supersedes:
+- M2.4 pre-driver-fixes layout: 18861b8ad076ca170ca1d3d80cc73c8998c00c057d190b5164d17d243d216722
+  (driver bytes shifted at M2.5: +KOFF-clear-before-KON in op_kon, +init_kon_mask
+  KON write, +explicit jmp main_loop after init; sequence_addr now points at
+  payload not header)
+- M2.3 pre-sequence layout: b25f8d5e2c9579c603e5e06017e3f12540d9913b017c926636e76864435fb13e
+  (retired at M2.4 when sequence_data region was added between source directory
+  and sample BRR pool; kept for archaeology only)
+```
+
+## Previous passes
 
 **Pass M2.4 — Sequence bytecode compiler v0 + M2.4 prelude.**
 
@@ -195,25 +343,18 @@ voice 0:  00 00 00 10 7f 00 00 00 7f 00 00            ; SRCN 0, pitch $1000, vol
 voice 1:  01 01 00 10 00 7f 00 00 7f 00 00            ; SRCN 1, pitch $1000, vol_l=0   / vol_r=127
 ```
 
-### Multi-voice ARAM (post-M2.4)
+### Multi-voice ARAM (M2.4 snapshot — superseded by M2.5)
 
 Same fixture as the M2.3 baseline plus the new
 sequence_data region between source directory and sample
 BRR pool. The added region shifts the sample/atom/voice-
-table addresses by 256 B (one sequence_data page).
-
-```
-M2_MULTI_VOICE_ARAM_SHA256_CURRENT = 18861b8ad076ca170ca1d3d80cc73c8998c00c057d190b5164d17d243d216722
-
-Supersedes:
-- M2.3 pre-sequence layout: b25f8d5e2c9579c603e5e06017e3f12540d9913b017c926636e76864435fb13e
-  (retired at M2.4 when sequence_data region was added between source directory
-  and sample BRR pool; kept for archaeology only)
-```
+table addresses by 256 B (one sequence_data page). Driver
+bytes shifted again at M2.5; see "Multi-voice ARAM
+(post-M2.5)" above for the current value.
 
 **Convention.** When a baseline is superseded, replace in place with a `_CURRENT` suffix and add the retired value(s) under a `Supersedes:` block. Tests pin the `_CURRENT` SHA; old SHAs are documentation only.
 
-Region order:
+Region order (M2.4):
 
 ```
 $0000-$00EF  direct_page         (240 B,  fixed_runtime)
