@@ -3583,3 +3583,595 @@ fn cli_m2_channel_acceptance_canonical_suite() {
     let ratio = report["source_step_zcr_ratio"].as_f64().unwrap();
     assert!(ratio >= 1.5, "source-step zcr ratio {ratio} below 1.5");
 }
+
+// =============================================================================
+// M2.6 — compile-sfc v2 multi_voice_atom + 32 KiB module cap boundary tests
+// =============================================================================
+
+/// Build a v2 multi_voice_atom project with `n_atoms` cycle-256
+/// sine atoms and one looped sample sized to land near the 32 KiB
+/// module cap. Looped sample frames must be multiples of 16 (BRR
+/// alignment); the BRR encoder rounds up to the next block boundary
+/// regardless of the loop flag, so non-looped samples don't help
+/// land on finer module-byte boundaries. Returns the project path.
+fn write_v2_m26_size_probe_project(dir: &Path, n_atoms: usize, sample_frames: usize) -> PathBuf {
+    use sfc_atomizer_core::asm::sha256_hex_file;
+    let audio_dir = dir.join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let wav = audio_dir.join("lead.wav");
+    let pcm = synth_sine_pcm(sample_frames, 64.0, 8000.0);
+    write_pcm16_wav_with_samples(&wav, 32_000, 1, &pcm);
+    let sha = sha256_hex_file(&wav).unwrap();
+
+    let mut atom_pool = Vec::with_capacity(n_atoms);
+    for i in 0..n_atoms {
+        atom_pool.push(serde_json::json!({
+            "id": format!("a{i:04}"),
+            "name": format!("a{i:04}"),
+            "kind": "additive_single_cycle_v0",
+            "root_midi_note": 60,
+            "cycle_len_samples": 256,
+            "amplitude": 0.75,
+            "partials": [{ "harmonic": 1, "amplitude": 1.0, "phase_cycles": 0.0 }],
+            "render": { "normalize": true,
+                        "force_filter_0_first_block": true,
+                        "force_filter_0_loop_entry": true },
+            "playback": { "volume": 1.0, "pan": 1.0, "echo": false,
+                          "envelope": { "type": "gain_raw", "gain_byte": 127 } }
+        }));
+    }
+    let proj = serde_json::json!({
+        "schema_version": 2,
+        "project": { "name": "m26_size_probe", "tick_rate_hz": 60 },
+        "driver": { "profile": "multi_voice_atom", "bytecode_version": 2 },
+        "master_echo": { "enabled": false, "edl": 0, "efb": 0,
+                         "evol_l": 0, "evol_r": 0, "fir": [127,0,0,0,0,0,0,0] },
+        "sample_pool": [{
+            "id": "lead", "name": "lead",
+            "source": { "path": "audio/lead.wav", "sha256": sha,
+                        "format": "wav", "sample_rate_hz": 32000,
+                        "channels": 1, "frames": sample_frames },
+            "root_midi_note": 60,
+            "loop": { "enabled": true, "start_sample": 0,
+                      "end_sample": sample_frames, "snap": "brr_block_16" },
+            "playback": { "volume": 1.0, "pan": -1.0, "echo": false,
+                          "envelope": { "type": "gain_raw", "gain_byte": 127 } }
+        }],
+        "atom_pool": atom_pool,
+        "atom_sequences": [{
+            "id": "s0", "name": "single", "voice": 1,
+            "steps": [{ "atom_id": "a0000", "duration_ticks": 60,
+                        "target_volume": 1.0,
+                        "transition": { "type": "initial_kon" } }],
+            "loop": false
+        }],
+        "tracks": [
+            { "id": "t0", "voice": 0, "kind": "sample_sustain", "sample_id": "lead" },
+            { "id": "t1", "voice": 1, "kind": "atom_sequence", "atom_sequence_id": "s0" }
+        ],
+        "m2": { "active_sequence_id": "s0" }
+    });
+    let path = dir.join("m26_size_probe.sfcproj.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&proj).unwrap()).unwrap();
+    path
+}
+
+/// M2.6 loader byte-identity carry-forward. M1.6 baseline locked
+/// loader_size_bytes = 588; M2.6 doesn't touch the loader, so the
+/// assembled bytes must hash to the same SHA-256. Drift here is a
+/// regression of an M1 baseline — STOP and diagnose, don't relax
+/// the assertion. The loader is 65816 code; the M1 driver
+/// `$de $ad $be $ef` sentinel pattern must NOT appear inside the
+/// loader bytes (a sentinel collision would break driver-end
+/// detection if the loader ever shared the SFC's bank-0 region
+/// with driver bytes).
+#[test]
+fn loader_byte_identity_at_m2_6() {
+    use sfc_atomizer_core::asm::sha256_hex;
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = make_project_with_one_imported_sample(dir.path(), "loader_probe");
+    let sfc = dir.path().join("loader_probe.sfc");
+    let report = dir.path().join("loader_probe.compile-sfc.json");
+
+    let out = Command::new(bin())
+        .args(["compile-sfc", "--project-a"])
+        .arg(&proj)
+        .args(["--out-sfc"])
+        .arg(&sfc)
+        .args(["--out-report"])
+        .arg(&report)
+        .output()
+        .expect("run compile-sfc");
+    assert_eq!(out.status.code(), Some(0), "compile-sfc must succeed");
+
+    let r = read_json(&report);
+    let loader_size = r["loader_size_bytes"].as_u64().unwrap() as usize;
+    assert_eq!(
+        loader_size, 588,
+        "M1_LOADER_SIZE_BYTES = 588 (M1.6 baseline); changed to {loader_size}"
+    );
+
+    let sfc_bytes = std::fs::read(&sfc).unwrap();
+    assert!(sfc_bytes.len() >= loader_size);
+    let loader = &sfc_bytes[..loader_size];
+    let loader_sha = sha256_hex(loader);
+    // Locked at M2.6. If asar version + the loader source bytes are
+    // unchanged, this SHA is stable. A drift means one of:
+    //   - asar version changed (rare; investigate before relaxing)
+    //   - loader .asm was edited (bug or intentional; if intentional,
+    //     update this baseline + STATUS in the same commit)
+    //   - SFC ROM layout shifted into bank 0 (M2.6 forbids this)
+    const M1_LOADER_SHA256: &str =
+        "955f525c5304af5aea1b53fe12a1b0b469dc9a86bd74dff50c3ffb381b873f40";
+    assert_eq!(
+        loader_sha, M1_LOADER_SHA256,
+        "loader byte drift vs M1.6 baseline — investigate before relaxing"
+    );
+
+    // Sentinel collision guard. The loader and the SPC700 driver
+    // share only a build pipeline; they never co-reside in ARAM,
+    // so this is a defensive scan. If asar ever inlines the
+    // pattern in the loader, swap the sentinel here AND in
+    // `core::driver_build::DRIVER_END_SENTINEL` in lockstep.
+    const DRIVER_SENTINEL: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+    assert!(
+        !loader
+            .windows(DRIVER_SENTINEL.len())
+            .any(|w| w == DRIVER_SENTINEL),
+        "driver-end sentinel pattern $DE $AD $BE $EF found inside loader bytes"
+    );
+}
+
+/// 32 KiB module cap (SPEC §15.6) — comfortably-under case. A v2
+/// multi_voice project with 90 cycle-256 atoms + a 24 576-frame
+/// looped sample lands at 31 782 B, ~1 KiB below the cap.
+#[test]
+fn cli_compile_sfc_v2_module_under_32_kib_succeeds() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = write_v2_m26_size_probe_project(dir.path(), 90, 24_576);
+    let out_sfc = dir.path().join("under.sfc");
+    let out_report = dir.path().join("under.compile-sfc.json");
+
+    let out = Command::new(bin())
+        .args(["compile-sfc", "--project-a"])
+        .arg(&proj)
+        .args(["--out-sfc"])
+        .arg(&out_sfc)
+        .args(["--out-report"])
+        .arg(&out_report)
+        .output()
+        .expect("run compile-sfc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "compile-sfc stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let r = read_json(&out_report);
+    let module_a_bytes = r["module_a_bytes"].as_u64().unwrap();
+    assert!(
+        module_a_bytes < 32_768,
+        "expected module_a_bytes < 32_768; got {module_a_bytes}"
+    );
+    assert!(
+        module_a_bytes > 30_000,
+        "expected sizable module (>30K); got {module_a_bytes}"
+    );
+}
+
+/// 32 KiB module cap — at-boundary case. A v2 multi_voice project
+/// tuned to land within 16 bytes of the cap (96 atoms + 24 784
+/// looped sample frames → 32 763 B; 5 bytes below 32 768). The
+/// brief specifies `<= 32 KiB` ok and `> 32 KiB` errors; module_writer
+/// uses strict `>` so a hypothetical 32 768-byte module would also
+/// pass. Closest reachable under-cap boundary on 16-byte BRR
+/// alignment is 32 763 B; `cli_compile_sfc_v2_module_over_32_kib_errors`
+/// covers the next step up (32 772 B → error).
+#[test]
+fn cli_compile_sfc_v2_module_at_32_kib_boundary_succeeds() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = write_v2_m26_size_probe_project(dir.path(), 96, 24_784);
+    let out_sfc = dir.path().join("near.sfc");
+    let out_report = dir.path().join("near.compile-sfc.json");
+
+    let out = Command::new(bin())
+        .args(["compile-sfc", "--project-a"])
+        .arg(&proj)
+        .args(["--out-sfc"])
+        .arg(&out_sfc)
+        .args(["--out-report"])
+        .arg(&out_report)
+        .output()
+        .expect("run compile-sfc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "compile-sfc stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let r = read_json(&out_report);
+    let module_a_bytes = r["module_a_bytes"].as_u64().unwrap();
+    assert!(
+        module_a_bytes <= 32_768,
+        "expected module_a_bytes <= 32_768; got {module_a_bytes}"
+    );
+    assert!(
+        module_a_bytes >= 32_752,
+        "expected within 16 B of cap; got {module_a_bytes}"
+    );
+}
+
+/// Build two distinct M2 multi_voice_atom projects sharing the
+/// same WAV (so the LEFT channel is comparable across both
+/// modules), but with different atom_sequences on voice 1.
+/// Returns `(project_a, project_b)` paths.
+///
+/// Project A: canonical 2-atom source-step (sine_128 → sine_64 with
+/// `fade_to_zero_retrigger`). Voice 1's frequency rises mid-render
+/// → source-step zcr ratio > 1.5.
+///
+/// Project B: single sustained sine_64 atom on voice 1.
+/// No source-step → zcr ratio ≈ 1.0.
+fn write_v2_two_distinct_m2_projects(dir: &Path) -> (PathBuf, PathBuf) {
+    use sfc_atomizer_core::asm::sha256_hex_file;
+    let audio_dir = dir.join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let wav = audio_dir.join("lead.wav");
+    let pcm = synth_sine_pcm(8_192, 64.0, 8000.0);
+    write_pcm16_wav_with_samples(&wav, 32_000, 1, &pcm);
+    let sha = sha256_hex_file(&wav).unwrap();
+
+    let sample_pool = serde_json::json!([{
+        "id": "lead", "name": "lead",
+        "source": { "path": "audio/lead.wav", "sha256": sha,
+                    "format": "wav", "sample_rate_hz": 32000,
+                    "channels": 1, "frames": 8192 },
+        "root_midi_note": 60,
+        "loop": { "enabled": true, "start_sample": 0,
+                  "end_sample": 8192, "snap": "brr_block_16" },
+        "playback": { "volume": 1.0, "pan": -1.0, "echo": false,
+                      "envelope": { "type": "gain_raw", "gain_byte": 127 } }
+    }]);
+    let make_atom = |id: &str, cycle_len: usize| {
+        serde_json::json!({
+            "id": id, "name": id,
+            "kind": "additive_single_cycle_v0",
+            "root_midi_note": 60, "cycle_len_samples": cycle_len, "amplitude": 0.75,
+            "partials": [{ "harmonic": 1, "amplitude": 1.0, "phase_cycles": 0.0 }],
+            "render": { "normalize": true,
+                        "force_filter_0_first_block": true,
+                        "force_filter_0_loop_entry": true },
+            "playback": { "volume": 1.0, "pan": 1.0, "echo": false,
+                          "envelope": { "type": "gain_raw", "gain_byte": 127 } }
+        })
+    };
+    let proj_a = serde_json::json!({
+        "schema_version": 2,
+        "project": { "name": "swap_a", "tick_rate_hz": 60 },
+        "driver": { "profile": "multi_voice_atom", "bytecode_version": 2 },
+        "master_echo": { "enabled": false, "edl": 0, "efb": 0,
+                         "evol_l": 0, "evol_r": 0, "fir": [127,0,0,0,0,0,0,0] },
+        "sample_pool": sample_pool.clone(),
+        "atom_pool": [
+            make_atom("sine_128", 128),
+            make_atom("sine_64", 64),
+        ],
+        "atom_sequences": [{
+            "id": "atomseq_0001", "name": "two_step", "voice": 1,
+            "steps": [
+                { "atom_id": "sine_128", "duration_ticks": 120,
+                  "target_volume": 1.0,
+                  "transition": { "type": "initial_kon" } },
+                { "atom_id": "sine_64", "duration_ticks": 120,
+                  "target_volume": 1.0,
+                  "transition": { "type": "fade_to_zero_retrigger",
+                                  "fade_out_ticks": 4, "fade_in_ticks": 4 } }
+            ],
+            "loop": false
+        }],
+        "tracks": [
+            { "id": "t0", "voice": 0, "kind": "sample_sustain", "sample_id": "lead" },
+            { "id": "t1", "voice": 1, "kind": "atom_sequence",
+              "atom_sequence_id": "atomseq_0001" }
+        ],
+        "m2": { "active_sequence_id": "atomseq_0001" }
+    });
+    let proj_b = serde_json::json!({
+        "schema_version": 2,
+        "project": { "name": "swap_b", "tick_rate_hz": 60 },
+        "driver": { "profile": "multi_voice_atom", "bytecode_version": 2 },
+        "master_echo": { "enabled": false, "edl": 0, "efb": 0,
+                         "evol_l": 0, "evol_r": 0, "fir": [127,0,0,0,0,0,0,0] },
+        "sample_pool": sample_pool,
+        "atom_pool": [make_atom("sine_64", 64)],
+        "atom_sequences": [{
+            "id": "atomseq_0001", "name": "single", "voice": 1,
+            "steps": [
+                { "atom_id": "sine_64", "duration_ticks": 240,
+                  "target_volume": 1.0,
+                  "transition": { "type": "initial_kon" } }
+            ],
+            "loop": false
+        }],
+        "tracks": [
+            { "id": "t0", "voice": 0, "kind": "sample_sustain", "sample_id": "lead" },
+            { "id": "t1", "voice": 1, "kind": "atom_sequence",
+              "atom_sequence_id": "atomseq_0001" }
+        ],
+        "m2": { "active_sequence_id": "atomseq_0001" }
+    });
+    let pa = dir.join("swap_a.sfcproj.json");
+    let pb = dir.join("swap_b.sfcproj.json");
+    std::fs::write(&pa, serde_json::to_string_pretty(&proj_a).unwrap()).unwrap();
+    std::fs::write(&pb, serde_json::to_string_pretty(&proj_b).unwrap()).unwrap();
+    (pa, pb)
+}
+
+/// M2.6 m2-acceptance: four-stage bundle on the canonical M2
+/// fixture (single-project clone mode). All four stages must
+/// report `ok`; bundle.json carries SHAs / per-channel metrics
+/// per stage.
+#[test]
+fn cli_m2_acceptance_canonical_single_project_ok() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    if !oracle_resolved_for_test() {
+        eprintln!("skip: oracle wrapper not built");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = write_v2_combined_for_m25_gate(dir.path());
+    let out = dir.path().join("m2acc");
+    let oracle = oracle_wrapper_path();
+
+    let r = Command::new(bin())
+        .env("SFCWC_SNES_SPC_ORACLE", &oracle)
+        .args(["m2-acceptance", "--project-a"])
+        .arg(&proj)
+        .args(["--out"])
+        .arg(&out)
+        .args(["--frames", "32000"])
+        .output()
+        .expect("run m2-acceptance");
+    assert_eq!(
+        r.status.code(),
+        Some(0),
+        "m2-acceptance stderr={}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let bundle = read_json(&out.join("bundle.json"));
+    assert_eq!(bundle["report_type"], "m2_acceptance_bundle");
+    assert_eq!(bundle["bundle"]["status"], "ok");
+    for stage in [
+        "stage_1_validation",
+        "stage_2_compile",
+        "stage_3_oracle",
+        "stage_4_infrastructure",
+    ] {
+        assert_eq!(bundle[stage]["status"], "ok", "{stage} not ok in bundle");
+    }
+    // Behavioral pin: stereo metrics land within SPEC §21 floors.
+    let sa = &bundle["stage_3_oracle"]["stereo_a"];
+    let l_max = sa["left"]["max_abs"].as_i64().unwrap();
+    let r_max = sa["right"]["max_abs"].as_i64().unwrap();
+    assert!(l_max >= 1000, "L max_abs {l_max} below 1000");
+    assert!(r_max >= 1000, "R max_abs {r_max} below 1000");
+}
+
+/// M2.6 swap pipeline end-to-end: two distinct M2 projects compile
+/// to a single SFC ROM with both modules ≤ 32 KiB; verify-sfc-modules-
+/// audible reports v2 stereo metrics for both; modules_audio_identical
+/// is false (distinct content); module A exercises a source-step
+/// (sine_128 → sine_64) and module B does not.
+#[test]
+fn cli_compile_sfc_two_distinct_m2_swap_audible_end_to_end() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    if !oracle_resolved_for_test() {
+        eprintln!("skip: oracle wrapper not built");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let (proj_a, proj_b) = write_v2_two_distinct_m2_projects(dir.path());
+
+    // 1) compile-sfc with both projects.
+    let sfc = dir.path().join("swap.sfc");
+    let creport = dir.path().join("swap.compile-sfc.json");
+    let out = Command::new(bin())
+        .args(["compile-sfc", "--project-a"])
+        .arg(&proj_a)
+        .args(["--project-b"])
+        .arg(&proj_b)
+        .args(["--out-sfc"])
+        .arg(&sfc)
+        .args(["--out-report"])
+        .arg(&creport)
+        .output()
+        .expect("run compile-sfc");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "compile-sfc stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cr = read_json(&creport);
+    let module_a_bytes = cr["module_a_bytes"].as_u64().unwrap();
+    let module_b_bytes = cr["module_b_bytes"].as_u64().unwrap();
+    assert!(
+        module_a_bytes <= 32_768,
+        "module A {module_a_bytes} > 32 KiB"
+    );
+    assert!(
+        module_b_bytes <= 32_768,
+        "module B {module_b_bytes} > 32 KiB"
+    );
+    assert_eq!(cr["module_b_is_clone_of_a"], false);
+
+    // 2) verify-sfc-modules-audible — per-channel stereo gates.
+    let oracle = oracle_wrapper_path();
+    let mreport = dir.path().join("swap.modules-audible.json");
+    let out = Command::new(bin())
+        .env("SFCWC_SNES_SPC_ORACLE", &oracle)
+        .args(["verify-sfc-modules-audible", "--sfc"])
+        .arg(&sfc)
+        .args(["--frames", "32000"])
+        .args(["--out-report"])
+        .arg(&mreport)
+        .output()
+        .expect("run verify-sfc-modules-audible");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "verify-sfc-modules-audible stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mr = read_json(&mreport);
+    assert_eq!(
+        mr["modules_audio_identical"], false,
+        "swap test invalid if A and B render identical PCM"
+    );
+    for label in ["module_a_audible", "module_b_audible"] {
+        let m = &mr[label];
+        assert_eq!(m["driver_version"], 2, "{label} driver_version");
+        let l_max = m["left"]["max_abs"].as_i64().unwrap();
+        let r_max = m["right"]["max_abs"].as_i64().unwrap();
+        let l_rms = m["left"]["rms"].as_f64().unwrap();
+        let r_rms = m["right"]["rms"].as_f64().unwrap();
+        assert!(l_max >= 1000, "{label} L max_abs {l_max} below 1000");
+        assert!(r_max >= 1000, "{label} R max_abs {r_max} below 1000");
+        assert!(l_rms >= 200.0, "{label} L rms {l_rms} below 200");
+        assert!(r_rms >= 200.0, "{label} R rms {r_rms} below 200");
+    }
+
+    // 3) Per-project SPC + verify-spc-stereo with source-step
+    //    windows: A must produce ratio >= 1.5 (source-step), B
+    //    must NOT (single sustained atom; ratio near 1.0).
+    let stereo_for = |proj: &Path, label: &str, expect_step: bool| {
+        let spc = dir.path().join(format!("{label}.spc"));
+        let img = dir.path().join(format!("{label}.aram.bin"));
+        let map = dir.path().join(format!("{label}.map.json"));
+        let creport = dir.path().join(format!("{label}.compile-spc.json"));
+        let out = Command::new(bin())
+            .args(["compile-spc", "--project"])
+            .arg(proj)
+            .args(["--out-spc"])
+            .arg(&spc)
+            .args(["--out-image"])
+            .arg(&img)
+            .args(["--out-map"])
+            .arg(&map)
+            .args(["--out-report"])
+            .arg(&creport)
+            .output()
+            .expect("compile-spc");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "compile-spc {label} stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stereo_report = dir.path().join(format!("{label}.stereo.json"));
+        let pcm = dir.path().join(format!("{label}.pcm"));
+        let out = Command::new(bin())
+            .env("SFCWC_SNES_SPC_ORACLE", &oracle)
+            .args(["verify-spc-stereo", "--spc"])
+            .arg(&spc)
+            .args(["--frames", "160000"])
+            .args(["--out-report"])
+            .arg(&stereo_report)
+            .args(["--out-pcm"])
+            .arg(&pcm)
+            .args(["--with-source-step-windows"])
+            .output()
+            .expect("verify-spc-stereo");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "verify-spc-stereo {label} stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let r = read_json(&stereo_report);
+        let pre = r["source_step_pre_window"]["right"]["zero_crossing_rate"]
+            .as_f64()
+            .unwrap();
+        let post = r["source_step_post_window"]["right"]["zero_crossing_rate"]
+            .as_f64()
+            .unwrap();
+        let ratio = post / pre.max(1e-6);
+        if expect_step {
+            assert!(
+                ratio >= 1.5,
+                "{label} expected source-step ratio >= 1.5, got {ratio:.3} (pre={pre:.1}, post={post:.1})"
+            );
+        } else {
+            assert!(
+                ratio < 1.5,
+                "{label} expected sustained ratio < 1.5, got {ratio:.3} (pre={pre:.1}, post={post:.1})"
+            );
+        }
+    };
+    stereo_for(&proj_a, "swap_a", true);
+    stereo_for(&proj_b, "swap_b", false);
+}
+
+/// 32 KiB module cap — over-cap case. 97 atoms + 24 576 frames →
+/// 32 790 B (22 over). compile-sfc must hard-error with the
+/// ModuleTooLarge wording from SPEC §15.6.
+#[test]
+fn cli_compile_sfc_v2_module_over_32_kib_errors() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = write_v2_m26_size_probe_project(dir.path(), 97, 24_576);
+    let out_sfc = dir.path().join("over.sfc");
+    let out_report = dir.path().join("over.compile-sfc.json");
+
+    let out = Command::new(bin())
+        .args(["compile-sfc", "--project-a"])
+        .arg(&proj)
+        .args(["--out-sfc"])
+        .arg(&out_sfc)
+        .args(["--out-report"])
+        .arg(&out_report)
+        .output()
+        .expect("run compile-sfc");
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "expected non-zero exit on over-cap module"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("module.bin too large") || stderr.contains("32768"),
+        "expected over-cap error; got: {stderr}"
+    );
+    // Out-SFC must NOT exist — we hard-error before writing.
+    assert!(
+        !out_sfc.exists(),
+        "over-cap should not produce an .sfc file"
+    );
+}
