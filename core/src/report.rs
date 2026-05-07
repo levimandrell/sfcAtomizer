@@ -766,6 +766,60 @@ impl AtomRenderReport {
 }
 
 // =============================================================================
+// Sequence compile report — `sfcwc compile-sequence` (M2.4)
+// =============================================================================
+
+/// Output of `sfcwc compile-sequence` — describes the SEQ2 bytecode
+/// produced for an atom_sequence, the per-step lowering, and the
+/// pack-side addresses (filled in by `cmd_pack_v2_multi_voice` after
+/// `pack_v2` returns; left at sentinel values when the compiler is
+/// invoked standalone via `sfcwc compile-sequence`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SequenceCompileReport {
+    pub schema_version: u32,
+    pub report_type: String,
+    pub project_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_sequence_id: Option<String>,
+    pub bytecode_sha256: String,
+    /// Length of the opcode stream after the 8-byte SEQ2 header.
+    pub bytecode_payload_bytes: u32,
+    /// 8-byte header + payload (excludes pack-side region padding).
+    pub bytecode_total_bytes: u32,
+    /// Total bytes claimed in the ARAM map's `sequence_data` region
+    /// (matches `bytecode_total_bytes` plus any pack-side alignment
+    /// padding). 0 when the report is emitted before pack runs.
+    pub bytecode_region_bytes: u32,
+    pub bytecode_padding_bytes: u32,
+    pub max_writes_per_tick_estimate: u32,
+    pub max_writes_per_tick_budget: u32,
+    pub max_simultaneous_volume_slides: u32,
+    pub total_ticks: u32,
+    /// ARAM start address of the voice setup table; populated by
+    /// pack. `0` when this report is emitted standalone.
+    pub voice_setup_addr: u16,
+    /// ARAM start address of the SEQ2 region. `0` when standalone.
+    pub sequence_addr: u16,
+    pub per_step: Vec<SequenceStepLowering>,
+}
+
+impl SequenceCompileReport {
+    pub const REPORT_TYPE: &'static str = "sequence_compile";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SequenceStepLowering {
+    pub step_index: u32,
+    pub atom_id: String,
+    pub voice: u8,
+    pub bytecode_offset_start: u32,
+    pub bytecode_offset_end: u32,
+    pub max_writes_in_step: u32,
+    pub tick_offset_start: u32,
+    pub tick_offset_end: u32,
+}
+
+// =============================================================================
 // Loop finder report — `sfcwc find-loop-candidates`
 // =============================================================================
 
@@ -1876,6 +1930,61 @@ mod tests {
                 filter_distribution: [4, 0, 0, 0],
                 loop_click_score: None,
             },
+        };
+        round_trip(&r);
+    }
+
+    #[test]
+    fn sequence_compile_round_trip_populated() {
+        let r = SequenceCompileReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: SequenceCompileReport::REPORT_TYPE.to_string(),
+            project_name: "atomic_seq".to_string(),
+            active_sequence_id: Some("atomseq_0001".to_string()),
+            bytecode_sha256: "0".repeat(64),
+            bytecode_payload_bytes: 41,
+            bytecode_total_bytes: 49,
+            bytecode_region_bytes: 49,
+            bytecode_padding_bytes: 0,
+            max_writes_per_tick_estimate: 4,
+            max_writes_per_tick_budget: 24,
+            max_simultaneous_volume_slides: 1,
+            total_ticks: 249,
+            voice_setup_addr: 0x13FC,
+            sequence_addr: 0x1300,
+            per_step: vec![SequenceStepLowering {
+                step_index: 0,
+                atom_id: "atom_a".to_string(),
+                voice: 1,
+                bytecode_offset_start: 0,
+                bytecode_offset_end: 9,
+                max_writes_in_step: 4,
+                tick_offset_start: 0,
+                tick_offset_end: 120,
+            }],
+        };
+        round_trip(&r);
+    }
+
+    #[test]
+    fn sequence_compile_round_trip_minimal() {
+        let r = SequenceCompileReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: SequenceCompileReport::REPORT_TYPE.to_string(),
+            project_name: "x".to_string(),
+            active_sequence_id: None,
+            bytecode_sha256: "0".repeat(64),
+            bytecode_payload_bytes: 1,
+            bytecode_total_bytes: 9,
+            bytecode_region_bytes: 0,
+            bytecode_padding_bytes: 0,
+            max_writes_per_tick_estimate: 0,
+            max_writes_per_tick_budget: 24,
+            max_simultaneous_volume_slides: 1,
+            total_ticks: 0,
+            voice_setup_addr: 0,
+            sequence_addr: 0,
+            per_step: Vec::new(),
         };
         round_trip(&r);
     }
