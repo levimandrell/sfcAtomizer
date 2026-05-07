@@ -326,6 +326,11 @@ pub fn playback_to_voll_volr(volume: f64, pan: f64) -> (u8, u8) {
     let theta = (pan + 1.0) * PI / 4.0;
     let l = 127.0 * volume * theta.cos();
     let r = 127.0 * volume * theta.sin();
+    // Non-negative DSP volume domain; round-half-up == round-half-
+    // away-from-zero here. Spec convention is round-half-AWAY-from-
+    // zero (SPEC §16.9 atom render, §14.3 slide accumulator); the
+    // equivalence for non-negative values is why this helper uses
+    // (x + 0.5).floor().
     let li = (l + 0.5).floor().clamp(0.0, 127.0) as u8;
     let ri = (r + 0.5).floor().clamp(0.0, 127.0) as u8;
     (li, ri)

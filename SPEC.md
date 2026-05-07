@@ -105,7 +105,7 @@ Profiles are presets over granular flags: `sample_basic`, `sample_fx`, `synth_st
 
 ### 5.2 Feature flags
 
-**Mandatory core:** `core_dsp_write`, `core_note_on_off`, `core_pitch_table`, `core_source_directory`, `core_key_on_delay_safety`. Profiles that use WAIT/slide/sequence opcodes additionally require `core_tick_loop` and `core_sequence_wait`; polling-only profiles (`sample_basic` in M1) omit both.
+**Core features:** `core_tick_loop`, `core_dsp_write`, `core_sequence_wait`, `core_note_on_off`, `core_pitch_table`, `core_source_directory`, `core_key_on_delay_safety`. A profile enables only the core features it actually implements; `core_pitch_table` is not mandatory for profiles whose pitch values are compile-time-seeded (e.g. `multi_voice_atom`, where the voice setup table seeds the pitch register at driver init). Profiles that use WAIT/slide/sequence opcodes require `core_tick_loop` and `core_sequence_wait`; polling-only profiles (`sample_basic` in M1) omit both.
 
 **Sample:** `sample_playback`, `sample_multisample`, `sample_keysplit`, `sample_velocity_layers`, `sample_runtime_src_change`.
 
@@ -654,6 +654,10 @@ new_r   = slide_start_r + (dr * elapsed + sign(dr) * (slide_ticks_total/2)) / sl
 `+ sign(d)*(N/2) / N` is integer round-to-nearest with round-half-AWAY-from-zero (matching the atom render rounding mode from §16.9; same convention throughout). When `slide_ticks_done == slide_ticks_total`, the slide ends and `slide_active` clears. The final tick writes exactly `target_l` / `target_r` (the formula above evaluates to that exactly when `elapsed == total`).
 
 Compiler's job: compute the slide writes-per-tick estimate (always 2 writes for an active slide tick — VOLL + VOLR). Driver's job: implement the formula deterministically in SPC700 assembly.
+
+**Slide first-write timing.** A `VOL_SLIDE` opcode read on tick N registers a slide whose first VOLL/VOLR write occurs on tick N+1. This follows from the §14.3 execution model (slide-advance runs before opcode-read on each tick): on tick N, VOL_SLIDE is read and registers state, but the slide-advance step has already run for tick N, so the slide's first write happens at the start of tick N+1.
+
+**Last slide write coincides with subsequent opcode read.** With `fade_out_ticks = K`, a `VOL_SLIDE` registered on tick N writes on ticks N+1, N+2, ..., N+K. The accompanying `WAIT K` expires at tick N+K. On tick N+K, the slide advance writes the final VOLL/VOLR, then wait-decrement reduces wait_counter to zero, then opcode-read consumes the next opcode (typically KOFF). The last slide write and the subsequent opcode therefore occur on the same tick. This is intentional and matches the canonical fixture's tick trace.
 
 #### Source-step lowering
 
@@ -1710,6 +1714,13 @@ combined:     left.max_abs  >= 1000,  left.rms  >= 200,
 ```
 
 The M1 thresholds (`min_max_abs = 1000`, `min_rms = 200`) remain as the floor — the M2 per-channel checks are stricter, never looser.
+
+**M2 oracle render frame count: 160 000 frames at 32 kHz** (= 5.0 seconds). This comfortably covers the canonical M2 sequence's 249 ticks (≈ 4.14 s at 60.150 Hz nominal). Per-channel windows for source-step zero-crossing-rate analysis use:
+
+- Pre-step window: ticks 80..=120 → frames ~42 600..63 900 (atom A sustaining).
+- Post-step window: ticks 130..=249 → frames ~69 250..132 500 (atom B sustaining post-transition).
+
+M1's 16 384-frame render is too short for M2 sequences and is reserved for M1 acceptance only.
 
 **Source-step observability.** The M2 fixture sets atom A = 128-sample sine, atom B = 64-sample sine at the same pitch register. After the source-step lowering pattern (§14.3) lands the bytecode for the swap, the right-channel PCM is windowed (ticks 40..100 after each KON) and compared:
 

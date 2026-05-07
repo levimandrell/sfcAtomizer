@@ -203,9 +203,15 @@ BRR pool. The added region shifts the sample/atom/voice-
 table addresses by 256 B (one sequence_data page).
 
 ```
-M2_MULTI_VOICE_ARAM_SHA256_M24    = 18861b8ad076ca170ca1d3d80cc73c8998c00c057d190b5164d17d243d216722
-                                  ; supersedes the M2.3 baseline since the layout now includes sequence_data
+M2_MULTI_VOICE_ARAM_SHA256_CURRENT = 18861b8ad076ca170ca1d3d80cc73c8998c00c057d190b5164d17d243d216722
+
+Supersedes:
+- M2.3 pre-sequence layout: b25f8d5e2c9579c603e5e06017e3f12540d9913b017c926636e76864435fb13e
+  (retired at M2.4 when sequence_data region was added between source directory
+  and sample BRR pool; kept for archaeology only)
 ```
+
+**Convention.** When a baseline is superseded, replace in place with a `_CURRENT` suffix and add the retired value(s) under a `Supersedes:` block. Tests pin the `_CURRENT` SHA; old SHAs are documentation only.
 
 Region order:
 
@@ -327,6 +333,9 @@ echo):
 
 ```
 M2_MULTI_VOICE_ARAM_SHA256        = b25f8d5e2c9579c603e5e06017e3f12540d9913b017c926636e76864435fb13e
+                                  ; M2.3 pre-sequence layout. Retired at M2.4 (sequence_data
+                                  ; region added); see M2_MULTI_VOICE_ARAM_SHA256_CURRENT
+                                  ; in the M2.4 baselines section above.
 M2_MULTI_VOICE_SAMPLE_BRR_BYTES   = 144
 M2_MULTI_VOICE_ATOM_BRR_BYTES     = 108                              ; 72 (atom_a, cycle 128) + 36 (atom_b, cycle 64)
 M2_MULTI_VOICE_VOICE_TABLE_BYTES  = 22                               ; 2 entries × 11 bytes per SPEC §15.7
