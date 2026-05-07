@@ -445,7 +445,7 @@ fn compile_module_dispatched(
         LoadedProject::V1(_) => compile_module(label, project_path, refresh_source_hash),
         LoadedProject::V2(v2) => {
             if v2.driver.profile == "multi_voice_atom" {
-                compile_module_v2_multi_voice(label, project_path, &v2)
+                compile_module_v2_multi_voice(label, project_path, &v2, refresh_source_hash)
             } else {
                 // v2 sample-only-equivalent: fall through to the M1.6
                 // path. `compile_module` re-loads as v1 via the
@@ -468,11 +468,51 @@ fn compile_module_v2_multi_voice(
     label: &'static str,
     project_path: &Path,
     v2: &ProjectV2,
+    refresh_source_hash: bool,
 ) -> Result<SfcModuleArtifact, SfcExportError> {
     if let Err(errors) = v2.validate() {
         return Err(SfcExportError::Validation { label, errors });
     }
     let project_dir = project_path.parent().unwrap_or_else(|| Path::new("."));
+
+    // M2.8 (consultant #10): source-SHA enforcement on the v2
+    // multi_voice path. The v1 `compile_module` runs the same
+    // check; before M2.8 the v2 path skipped it, leaving a hole
+    // where a sample file edited after the project's `source.sha256`
+    // was recorded would silently re-encode through compile-sfc.
+    // With `refresh_source_hash = false`, mismatches surface as
+    // `SfcExportError::Decode { source: SourceHashMismatch }`.
+    let mut hash_refreshes: Vec<(String, String, String)> = Vec::new();
+    for slot in &v2.sample_pool {
+        let raw = Path::new(&slot.source.path);
+        let audio_path: PathBuf = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            project_dir.join(raw)
+        };
+        match crate::audio::check_or_refresh_source_hash(
+            &audio_path,
+            &slot.id,
+            &slot.source.sha256,
+            refresh_source_hash,
+        ) {
+            Ok(crate::audio::SourceHashCheck::Match) => {}
+            Ok(crate::audio::SourceHashCheck::Refreshed { previous, actual }) => {
+                eprintln!(
+                    "refresh-source-hash (v2): {}: {} -> {}",
+                    slot.id, previous, actual
+                );
+                hash_refreshes.push((slot.id.clone(), previous, actual));
+            }
+            Err(source) => {
+                return Err(SfcExportError::Decode {
+                    label,
+                    sample_id: slot.id.clone(),
+                    source,
+                });
+            }
+        }
+    }
 
     // Encode samples (same path as M1).
     let mut encoded_samples: Vec<EncodedSample> = Vec::with_capacity(v2.sample_pool.len());
@@ -614,6 +654,25 @@ fn compile_module_v2_multi_voice(
         echo_enabled: v2.master_echo.enabled,
     })
     .map_err(|source| SfcExportError::Module { label, source })?;
+
+    // Persist any refreshed source SHAs back to the project file
+    // (parity with the v1 path's behavior; consultant #10).
+    if !hash_refreshes.is_empty() {
+        let mut on_disk = ProjectV2::load_from_path(project_path)
+            .map_err(|source| SfcExportError::Load { label, source })?;
+        for (sample_id, _prev, new) in &hash_refreshes {
+            if let Some(slot) = on_disk
+                .sample_pool
+                .iter_mut()
+                .find(|s| &s.id == sample_id)
+            {
+                slot.source.sha256 = new.clone();
+            }
+        }
+        on_disk
+            .save_to_path(project_path)
+            .map_err(|source| SfcExportError::Load { label, source })?;
+    }
 
     Ok(SfcModuleArtifact {
         project_name: v2.project.name.clone(),

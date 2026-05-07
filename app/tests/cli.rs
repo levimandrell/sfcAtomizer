@@ -3727,6 +3727,58 @@ fn loader_byte_identity_at_m2_6() {
     );
 }
 
+/// M2.8 (consultant #10): v2 SFC compile-time source-SHA enforcement.
+/// The v1 compile path runs `check_or_refresh_source_hash` and refuses
+/// to encode samples whose on-disk SHA differs from the declared
+/// `source.sha256`; before M2.8 the v2 multi_voice path skipped this
+/// check, leaving a hole for silently-stale samples through compile-sfc.
+/// This test mutates the WAV after the project is staged, then asserts
+/// compile-sfc errors with a SourceHashMismatch surface.
+#[test]
+fn cli_compile_sfc_v2_multi_voice_source_hash_mismatch_errors() {
+    use sfc_atomizer_core::tools::resolve_asar;
+    if !resolve_asar().resolved {
+        eprintln!("skip: asar not resolved");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let proj = write_v2_m26_size_probe_project(dir.path(), 5, 4096);
+
+    // Mutate the WAV's PCM payload (bytes after the 44-byte header)
+    // so its SHA changes from what the project declares.
+    let wav = dir.path().join("audio").join("lead.wav");
+    let mut bytes = std::fs::read(&wav).unwrap();
+    // Flip a sample byte well past the header.
+    bytes[100] ^= 0x55;
+    std::fs::write(&wav, &bytes).unwrap();
+
+    let out_sfc = dir.path().join("mismatch.sfc");
+    let out_report = dir.path().join("mismatch.compile-sfc.json");
+    let out = Command::new(bin())
+        .args(["compile-sfc", "--project-a"])
+        .arg(&proj)
+        .args(["--out-sfc"])
+        .arg(&out_sfc)
+        .args(["--out-report"])
+        .arg(&out_report)
+        .output()
+        .expect("run compile-sfc");
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "expected non-zero exit on source-SHA mismatch"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("source") && (stderr.contains("sha") || stderr.contains("SHA") || stderr.contains("hash")),
+        "expected source-hash-mismatch error; got: {stderr}"
+    );
+    assert!(
+        !out_sfc.exists(),
+        "mismatch should not produce an .sfc file"
+    );
+}
+
 /// 32 KiB module cap (SPEC §15.6) — comfortably-under case. A v2
 /// multi_voice project with 90 cycle-256 atoms + a 24 576-frame
 /// looped sample lands at 31 782 B, ~1 KiB below the cap.
