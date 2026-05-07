@@ -699,6 +699,42 @@ pub struct BrrEncodeBlock {
 }
 
 // =============================================================================
+// Atom render report — `sfcwc render-atom` (M2.2)
+// =============================================================================
+
+/// Output of `sfcwc render-atom <atom_id>` — describes an atom's
+/// rendered single-cycle PCM and its M1.3-encoded BRR payload. The
+/// PCM and BRR SHAs serve as M2 producer-side baselines analogous
+/// to M1's `M1_DRIVER_CODE_SHA256` / `M1_ARAM_IMAGE_SHA256` /
+/// `M1_SPC_FILE_SHA256` block.
+///
+/// The embedded `EncodeSummary` reuses the M1.3 BRR encoder type
+/// (no parallel mirror), so any future encoder-side change
+/// surfaces directly through the report's serialised shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AtomRenderReport {
+    pub schema_version: u32,
+    pub report_type: String,
+    pub atom_id: String,
+    pub atom_name: String,
+    /// e.g. `"additive_single_cycle_v0"`.
+    pub atom_kind: String,
+    pub cycle_len_samples: u32,
+    pub partial_count: u32,
+    pub normalize: bool,
+    pub atom_amplitude: f64,
+    pub root_midi_note: u8,
+    pub pcm_sha256: String,
+    pub brr_sha256: String,
+    pub brr_bytes: u32,
+    pub encode_summary: crate::brr_encoder::EncodeSummary,
+}
+
+impl AtomRenderReport {
+    pub const REPORT_TYPE: &'static str = "atom_render";
+}
+
+// =============================================================================
 // Loop finder report — `sfcwc find-loop-candidates`
 // =============================================================================
 
@@ -1751,6 +1787,64 @@ mod tests {
                 block_peak_error: 255,
                 block_clamp_count: 0,
             }],
+        };
+        round_trip(&r);
+    }
+
+    #[test]
+    fn atom_render_round_trip_populated() {
+        let r = AtomRenderReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: AtomRenderReport::REPORT_TYPE.to_string(),
+            atom_id: "atom_0001".to_string(),
+            atom_name: "sine_128".to_string(),
+            atom_kind: "additive_single_cycle_v0".to_string(),
+            cycle_len_samples: 128,
+            partial_count: 1,
+            normalize: true,
+            atom_amplitude: 0.75,
+            root_midi_note: 60,
+            pcm_sha256: "a".repeat(64),
+            brr_sha256: "b".repeat(64),
+            brr_bytes: 72,
+            encode_summary: crate::brr_encoder::EncodeSummary {
+                total_blocks: 8,
+                encoded_bytes: 72,
+                overall_rms_error: 12.5,
+                overall_peak_error: 256,
+                total_clamp_count: 0,
+                filter_distribution: [3, 2, 2, 1],
+                loop_click_score: Some(1197.0),
+            },
+        };
+        round_trip(&r);
+    }
+
+    #[test]
+    fn atom_render_round_trip_minimal() {
+        let r = AtomRenderReport {
+            schema_version: SCHEMA_VERSION,
+            report_type: AtomRenderReport::REPORT_TYPE.to_string(),
+            atom_id: "x".to_string(),
+            atom_name: "x".to_string(),
+            atom_kind: "additive_single_cycle_v0".to_string(),
+            cycle_len_samples: 64,
+            partial_count: 1,
+            normalize: false,
+            atom_amplitude: 0.0,
+            root_midi_note: 0,
+            pcm_sha256: "0".repeat(64),
+            brr_sha256: "0".repeat(64),
+            brr_bytes: 36,
+            encode_summary: crate::brr_encoder::EncodeSummary {
+                total_blocks: 4,
+                encoded_bytes: 36,
+                overall_rms_error: 0.0,
+                overall_peak_error: 0,
+                total_clamp_count: 0,
+                filter_distribution: [4, 0, 0, 0],
+                loop_click_score: None,
+            },
         };
         round_trip(&r);
     }
