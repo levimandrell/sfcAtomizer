@@ -2,33 +2,176 @@
 
 ## Current milestone
 
-**M2.2 — Synth atom v0 compiler shipped.** SPEC §16.9 render
-formula implemented in `core::atom::render_to_pcm` (f64 sin
-+ round-half-away-from-zero rounding, distinct from the
-round-half-up used in pitch-register conversion). Chained
-through the existing M1.3 BRR encoder via
-`core::atom::render_to_brr`, which forces filter 0 on
-block 0 (= loop entry block for single-cycle atoms) for
-loop safety and emits SHA-256 over both the raw PCM bytes
-and the encoded BRR bytes. New `core::report::AtomRenderReport`
-captures the full encode summary plus PCM/BRR SHAs.
-Two new CLI commands: `sfcwc render-atom --project <v2>
---atom <id>` writes the BRR bytes and structured report
-under `build/m2/atoms/`; `sfcwc preview-atom` decodes the
-BRR back through the M0.2 decoder and writes a 32 kHz mono
-PCM16 WAV looped to a configurable duration for engineer-
-side audition. M2 atom-render baselines locked: BRR SHAs
-for the canonical 64- and 128-sample sine atoms (amp=0.75,
-SPEC §16.9 example), and the loop-click scores at those
-cycle lengths (1197 and 2407 LSBs respectively — properties
-of the discrete-cycle wrap, not encoder defects).
+**M2.3 — Multi-source ARAM packer + capability manifest
+shipped.** New `core::packer::pack_v2` consumes both
+`encoded_samples` and `encoded_atoms` and emits the M2
+region order per SPEC §15.5: driver → source directory
+(samples-first, atoms-second) → optional sequence-data
+placeholder → sample BRR pool → synth atom pool → voice
+setup table → free → echo. Sample-only-equivalent v2
+projects produce byte-identical ARAM to the v1 packer,
+preserving the M2.1 migration→pack bit-identity guarantee.
+Voice setup table built per SPEC §15.7 — 22 bytes for M2
+(two voices × 11 bytes), unused voices use `src_index=0xFF`
+sentinel. Capability manifest emitted per SPEC §5.4 as a
+sidecar JSON; two profiles ship at M2.3 (`sample_basic`,
+`multi_voice_atom`) with full feature sets + dependency
+validation. New `AramKind::VoiceSetupTable` region kind
+plus `AramAtomsSummary` / `PerAtomAramEntry` map-report
+extensions. SPEC §15.6 32 KiB module.bin cap promoted to a
+hard error in `core::module_writer` (`ModuleTooLarge`).
+`sfcwc pack` dispatches by schema/profile: sample_basic
+runs the existing M1.4 path, multi_voice_atom renders all
+atoms via `core::atom::render_to_brr`, builds the voice
+setup table, calls `pack_v2`. New `--out-capability-manifest`
+flag.
 
-**M2.3 next.** Multi-source ARAM packer + capability
-manifest — extend the M1.4 packer to consume
-`build/m2/atoms/*.brr` alongside the existing sample BRRs
-and emit a capability manifest. PM to brief.
+**M2.4 next.** Sequence bytecode compiler v0 — generate
+SEQ2 bytecode for atom sequences, populate the
+`sequence_data` region the M2.3 packer reserves. PM to
+brief.
 
 ## Last pass
+
+**Pass M2.3 — Multi-source ARAM packer + capability manifest.**
+
+- **Phase A (multi-source packer layout):** New
+  `core::packer::pack_v2(PackInputV2)` taking ProjectV2,
+  encoded samples + atoms, optional sequence_data + voice
+  setup table. M2 region order locked per SPEC §15.5: driver
+  ($0200–$11FF, 4 KiB) → source directory ($1200, page-
+  aligned, samples-first then atoms in declaration order)
+  → optional sequence_data → sample BRR pool → synth atom
+  pool → voice setup table → free → echo (top of usable,
+  ending at $FF00). For sample-only-equivalent inputs the
+  output is byte-identical to the v1 packer (locked by the
+  `pack_v2_sample_only_matches_v1_layout` test and the CLI
+  `cli_pack_v2_sample_only_matches_v1_aram_sha`).
+- **Phase B (atom rendering at pack time):** The pack CLI
+  v2 path renders every atom in the project's atom_pool via
+  `core::atom::render_to_brr` — same code path as
+  `render-atom`, deterministic across runs. Results land in
+  `encoded_atoms` with `loop_entry_block: Some(0)`
+  (single-cycle convention).
+- **Phase C (voice setup table):** New `core::voice_setup`
+  module emits a 22-byte M2 table per SPEC §15.7 — 11 bytes
+  per voice, two voices: `voice / src_index / pitch_le /
+  vol_l / vol_r / adsr1 / adsr2 / gain / flags`. Sample
+  tracks pull params from `sample_pool[sample_id]`; atom
+  tracks from the first step's atom in
+  `atom_pool[steps[0].atom_id]`. Unused voices emit
+  `src_index=0xFF` sentinel + zero everything else (driver
+  reads the sentinel and leaves the voice silent). Five new
+  unit tests cover layout, atom-vs-sample param sourcing,
+  unused-voice sentinel, and reserved-flags zeros.
+- **Phase D (capability manifest):** New
+  `core::capability_manifest` module with two profile
+  constructors (`sample_basic`, `multi_voice_atom`) and
+  `validate_dependencies()` per SPEC §5.4 dependency graph.
+  Feature lists from Appendix A.6 (`synth_static_atom →
+  sample_playback + core_source_directory`,
+  `synth_atom_sequence → synth_static_atom +
+  core_sequence_wait`, `synth_source_step →
+  synth_atom_sequence + sample_runtime_src_change +
+  core_key_on_delay_safety`, `volume_slide → volume_set +
+  core_tick_loop`). Limits per profile: max_music_voices=1
+  for sample_basic, =2 for multi_voice_atom; atom + sequence
+  limits zero for sample_basic. Seven new unit tests cover
+  feature sets, limits, dependency consistency, and
+  missing-dep error.
+- **Phase E (AramMapReport extensions):** New
+  `AramKind::VoiceSetupTable` variant + `AramAtomsSummary`
+  / `PerAtomAramEntry` types. Non-breaking additions on the
+  existing AramMapReport (`atoms: Option<...>` with
+  skip-if-none); existing v1 callers keep working.
+  GUI's `color_for_kind` and `module_writer`'s region routing
+  match arms updated for the new variant.
+- **Phase F (sfcwc pack CLI v2 path):** `cmd_pack`
+  dispatches based on the loaded project's profile. v1 /
+  v2-sample-only run the existing v1-shim path (M1.4
+  bit-identical). v2-multi_voice_atom runs a new
+  `cmd_pack_v2_multi_voice` path: encode samples, render
+  atoms, build voice setup table, call `pack_v2`, emit
+  capability manifest sidecar (`multi_voice_atom`). New
+  `--out-capability-manifest` flag; defaults to
+  `<out_map_stem>.capability-manifest.json`.
+- **Phase G (tests):** 7 new packer unit tests
+  (sample-only-matches-v1, multi-voice layout / region
+  order, atom source-directory entries, voice table size /
+  layout, count + size mismatches). 4 new integration
+  tests in `core/tests/pack_v2.rs` (end-to-end multi-voice
+  with real atom rendering, atom count mismatch, voice
+  table size mismatch, 32 KiB module cap). 3 new CLI tests
+  in `app/tests/cli.rs` (v2 multi-voice with capability
+  manifest, v2 sample-only with sample_basic manifest, v1↔v2
+  ARAM SHA equivalence under pack). **462 tests across the
+  workspace; all green.** (was 422; +40, plus 1 ignored
+  print-baselines sentinel.)
+- **SPEC §15.6 32 KiB module cap:** `ModuleTooLarge`
+  promoted to a hard error in `core::module_writer`. Existing
+  M2.3 multi-voice fixtures fit comfortably (the
+  `pack_module_size_within_32_kib_cap` integration test
+  builds a typical 1-sample + 2-atom project and confirms
+  the resulting module.bin is well under 32 KiB).
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green.
+
+### M2.3 multi-voice pack baseline
+
+For the canonical M2 multi-voice fixture (1 sample at amp 8000
+period 64, 256 frames, plus the canonical 0.75-amp sine atoms
+from M2.2 at cycle 128 and 64, multi_voice_atom profile, no
+echo):
+
+```
+M2_MULTI_VOICE_ARAM_SHA256        = b25f8d5e2c9579c603e5e06017e3f12540d9913b017c926636e76864435fb13e
+M2_MULTI_VOICE_SAMPLE_BRR_BYTES   = 144
+M2_MULTI_VOICE_ATOM_BRR_BYTES     = 108                              ; 72 (atom_a, cycle 128) + 36 (atom_b, cycle 64)
+M2_MULTI_VOICE_VOICE_TABLE_BYTES  = 22                               ; 2 entries × 11 bytes per SPEC §15.7
+M2_MULTI_VOICE_FREE_BYTES         = 60142
+```
+
+Region order (multi_voice_atom):
+
+```
+$0000-$00EF  direct_page         (240 B, fixed_runtime)
+$00F0-$00FF  hardware_io         (16 B,  fixed_hardware)
+$0100-$01FF  stack               (256 B, fixed_runtime)
+$0200-$11FF  driver_code         (4 KiB)
+$1200-$12FF  source_directory    (3 entries × 4 B + page pad = 256 B)
+$1300-$138F  sample_brr_pool     (144 B; 1 sample × 16 BRR blocks × 9 B)
+$1390-$13FB  synth_atom_pool     (108 B; atom_a 72 B + atom_b 36 B)
+$13FC-$1411  voice_setup_table   (22 B; SPEC §15.7)
+$1412-$FEFF  free                (60142 B)
+$FF00-$FFBF  ipl_rom_safe_pad
+$FFC0-$FFFF  ipl_rom_shadow
+```
+
+Voice setup table hex dump (locked):
+
+```
+voice 0:  00 00 00 10 5a 5a 00 00 7f 00 00
+voice 1:  01 01 00 10 48 48 00 00 7f 00 00
+```
+
+Voice 0 = sample track on SRCN 0, pitch $1000 (32 kHz at root
+key), VOLL/VOLR = 0x5A (constant-power center at volume 1.0),
+GAIN = $7F. Voice 1 = atom track on SRCN 1, pitch $1000, VOLL/
+VOLR = 0x48 (constant-power center at volume 0.8), GAIN = $7F.
+ADSR1/ADSR2 zero (GAIN-only envelope), flags reserved = 0.
+
+For sample-only-equivalent v2 packs (matching M1.4 layout
+byte-for-byte), the same fixture as M2.1's bit-identity demo
+produces:
+
+```
+M2_SAMPLE_ONLY_V2_ARAM_SHA256     = 9b14634a339359e837fae7ad65f2c077eb7f545bc6bf5e08de6186d1dda4eaf7
+                                  ; identical to v1 pack of the same project per
+                                  ; cli_pack_v2_sample_only_matches_v1_aram_sha
+```
+
+## Previous passes
 
 **Pass M2.2 — Synth atom v0 compiler.**
 
@@ -1266,6 +1409,41 @@ these SHAs is a producer-side regression and must be flagged.
   partial sums isn't precise enough to make the output deterministic
   across architectures. Locked by the
   `render_deterministic_across_calls` test.
+- **Multi-source ARAM layout: samples first, atoms second**
+  (M2.3): SRCN ordering follows declaration order WITHIN each kind,
+  with all samples preceding all atoms. Cross-pool ID validation
+  (rule 30 from M2.1) means sample IDs and atom IDs cannot collide.
+  Locked by `pack_v2_atom_source_directory_entries_correct` and the
+  end-to-end multi-voice integration test.
+- **Atom rendering at pack time** (M2.3): the v2 multi-voice pack
+  path renders every atom in `project.atom_pool` via
+  `core::atom::render_to_brr` — same code as the standalone
+  `render-atom` CLI, deterministic across runs. Sample-only-v2 and
+  v1 don't render atoms (atom_pool is empty).
+- **Voice setup table always 22 bytes for M2** (M2.3): two voices ×
+  11 bytes per SPEC §15.7. Unused voices (single-voice projects)
+  emit `src_index=0xFF` sentinel + zeros; driver reads the sentinel
+  and leaves the voice silent. Always-22-bytes keeps driver
+  constants stable across single- and dual-voice projects.
+- **Capability manifest emitted as sidecar JSON** (M2.3): not in the
+  ARAM image. Default path
+  `<out_map_stem>.capability-manifest.json`; overrideable via
+  `--out-capability-manifest`. Per SPEC §5.4 every compile-time entry
+  point should consult the manifest, not just `driver.profile`. The
+  manifest's `validate_dependencies()` runs at pack time for the
+  multi_voice_atom path.
+- **32 KiB module.bin cap enforced as compile error** (M2.3):
+  `core::module_writer::ModuleTooLarge`, hard error per SPEC §15.6.
+  Existing M1 fixtures and M2.3 typical multi-voice fixtures are
+  comfortably under the cap; the
+  `pack_module_size_within_32_kib_cap` integration test confirms a
+  1-sample + 2-atom project produces a sub-32 KiB module.
+- **Sample-only v2 packs bit-identical to v1** (M2.3): preserved
+  from the M2.1 migration→compile-spc invariant, now extended to
+  the pack output directly. `pack_v2` with empty atom_pool / empty
+  sequence_data / no voice setup table reduces to the v1 layout
+  byte-for-byte. Locked by `pack_v2_sample_only_matches_v1_layout`
+  and the CLI-level `cli_pack_v2_sample_only_matches_v1_aram_sha`.
 - **License model:** Apache-2.0 for the host application source; 0BSD for
   generated outputs (`.spc`, `.sfc`, driver/module blobs); snes_spc kept
   out-of-process to avoid LGPL propagation. See `LICENSING.md`.
