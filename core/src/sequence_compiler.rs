@@ -181,6 +181,10 @@ pub enum SequenceCompileError {
         duration: u32,
         consumed: u32,
     },
+    #[error("total source count {actual} exceeds max_sources capability limit {limit}")]
+    TooManySources { actual: u32, limit: u32 },
+    #[error("src_index {src_index} > 255; cannot fit in SET_SRC byte operand")]
+    SrcIndexTooLarge { src_index: u32 },
 }
 
 /// Compile an atom sequence to SEQ2 bytecode.
@@ -195,6 +199,21 @@ pub fn compile_sequence(
     } = input;
 
     // -- Capability gating -----------------------------------------------
+    // Transitive deps first (consultant blocker M2.5 Phase 1A): a
+    // manifest with `volume_slide=true` and `core_tick_loop=false`
+    // is structurally impossible at runtime. Surface as
+    // CapabilityMissing so direct + transitive failures share one
+    // error type.
+    if let Err(crate::capability_manifest::CapabilityDepError::MissingDep {
+        feature,
+        missing,
+    }) = manifest.validate_dependencies()
+    {
+        return Err(SequenceCompileError::CapabilityMissing {
+            feature: format!("{missing} (transitive dep of {feature})"),
+        });
+    }
+
     let has_multi_step = sequence.steps.len() > 1;
     let needs_source_step = sequence
         .steps
@@ -209,6 +228,19 @@ pub fn compile_sequence(
     }
     if has_multi_step {
         require_feature(manifest, "sample_runtime_src_change")?;
+    }
+
+    // Source-count budget (consultant blocker M2.5 Phase 1B):
+    // total_sources must fit max_sources, and each SRCN must fit a
+    // single SET_SRC operand byte (0..=255). Validation rule 9 caps
+    // sample_pool at 128 but doesn't check the cross-pool sum.
+    let total_sources =
+        source_directory.sample_count + source_directory.atom_index_by_id.len() as u32;
+    if total_sources > manifest.limits.max_sources {
+        return Err(SequenceCompileError::TooManySources {
+            actual: total_sources,
+            limit: manifest.limits.max_sources,
+        });
     }
 
     let voice = sequence.voice;
@@ -241,7 +273,7 @@ pub fn compile_sequence(
         match (step_index, &step.transition) {
             (0, AtomTransition::InitialKon) => {
                 // SET_SRC, SET_VOL, KON, WAIT duration.
-                emit_set_src(&mut payload, voice, src_index as u8);
+                emit_set_src(&mut payload, voice, src_index)?;
                 writes_in_step += 1;
                 emit_set_vol(&mut payload, voice, target_l, target_r);
                 writes_in_step += 2;
@@ -298,7 +330,7 @@ pub fn compile_sequence(
                 tick_cursor += 1;
 
                 // Re-trigger.
-                emit_set_src(&mut payload, voice, src_index as u8);
+                emit_set_src(&mut payload, voice, src_index)?;
                 writes_in_step += 1;
                 emit_set_vol(&mut payload, voice, 0, 0);
                 writes_in_step += 2;
@@ -544,10 +576,14 @@ fn ok_with_max(
     Ok(*max)
 }
 
-fn emit_set_src(out: &mut Vec<u8>, voice: u8, src_index: u8) {
+fn emit_set_src(out: &mut Vec<u8>, voice: u8, src_index: u32) -> Result<(), SequenceCompileError> {
+    if src_index > 0xFF {
+        return Err(SequenceCompileError::SrcIndexTooLarge { src_index });
+    }
     out.push(BytecodeOpcode::SetSrc as u8);
     out.push(voice);
-    out.push(src_index);
+    out.push(src_index as u8);
+    Ok(())
 }
 
 fn emit_set_vol(out: &mut Vec<u8>, voice: u8, vol_l: u8, vol_r: u8) {
@@ -979,5 +1015,146 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ============================================================
+    // Layer 1 — transitive dep + SRCN bounds blockers (M2.5).
+    // ============================================================
+
+    /// Compiler now refuses a manifest with `volume_slide=true` and
+    /// `core_tick_loop=false` even though direct gating only checks
+    /// `synth_source_step` / `volume_slide`. validate_dependencies()
+    /// catches the structural impossibility.
+    #[test]
+    fn compile_sequence_rejects_volume_slide_without_core_tick_loop() {
+        let project = canonical_project();
+        let mut manifest = CapabilityManifest::multi_voice_atom();
+        manifest
+            .features
+            .insert("core_tick_loop".to_string(), false);
+        let source_directory = SourceDirectory::from_project(&project);
+        let sequence = project.atom_sequences[0].clone();
+        let err = compile_sequence(SequenceCompileInput {
+            project: &project,
+            manifest: &manifest,
+            source_directory: &source_directory,
+            sequence: &sequence,
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SequenceCompileError::CapabilityMissing { ref feature }
+                    if feature.contains("core_tick_loop")
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn compile_sequence_rejects_synth_atom_sequence_without_synth_static_atom() {
+        let project = canonical_project();
+        let mut manifest = CapabilityManifest::multi_voice_atom();
+        manifest
+            .features
+            .insert("synth_static_atom".to_string(), false);
+        let source_directory = SourceDirectory::from_project(&project);
+        let sequence = project.atom_sequences[0].clone();
+        let err = compile_sequence(SequenceCompileInput {
+            project: &project,
+            manifest: &manifest,
+            source_directory: &source_directory,
+            sequence: &sequence,
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SequenceCompileError::CapabilityMissing { ref feature }
+                    if feature.contains("synth_static_atom")
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn compile_sequence_rejects_synth_source_step_without_sample_runtime_src_change() {
+        let project = canonical_project();
+        let mut manifest = CapabilityManifest::multi_voice_atom();
+        manifest
+            .features
+            .insert("sample_runtime_src_change".to_string(), false);
+        let source_directory = SourceDirectory::from_project(&project);
+        let sequence = project.atom_sequences[0].clone();
+        let err = compile_sequence(SequenceCompileInput {
+            project: &project,
+            manifest: &manifest,
+            source_directory: &source_directory,
+            sequence: &sequence,
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SequenceCompileError::CapabilityMissing { ref feature }
+                    if feature.contains("sample_runtime_src_change")
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// Sanity: the canonical M2 manifest is well-formed; transitive
+    /// deps don't introduce false-positives on legitimate compiles.
+    #[test]
+    fn canonical_compiles_after_transitive_dep_check() {
+        let _ = compile_canonical(); // panics on any error path
+    }
+
+    /// SRCN bounds — synthesise a project whose source-pool sum
+    /// exceeds the manifest's max_sources limit. Use a smaller
+    /// manifest (limits.max_sources=2) so the canonical 3-source
+    /// fixture overflows on demand.
+    #[test]
+    fn compile_sequence_rejects_overcapacity_source_pool() {
+        let project = canonical_project();
+        let mut manifest = CapabilityManifest::multi_voice_atom();
+        manifest.limits.max_sources = 2; // canonical has 1 sample + 2 atoms = 3
+        let source_directory = SourceDirectory::from_project(&project);
+        let sequence = project.atom_sequences[0].clone();
+        let err = compile_sequence(SequenceCompileInput {
+            project: &project,
+            manifest: &manifest,
+            source_directory: &source_directory,
+            sequence: &sequence,
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SequenceCompileError::TooManySources {
+                    actual: 3,
+                    limit: 2
+                }
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// Internal-call test for SrcIndexTooLarge. Inject an
+    /// out-of-range atom_index so the SET_SRC emit detects it.
+    /// This path is unreachable through the public API for valid
+    /// projects (atom_pool[].id maps to indices < pool length, and
+    /// max_sources is bounded by 128), but the bounds check is
+    /// defence-in-depth before the byte-level cast.
+    #[test]
+    fn emit_set_src_rejects_src_index_above_255() {
+        let mut payload = Vec::new();
+        let err = super::emit_set_src(&mut payload, 1, 256).unwrap_err();
+        assert!(matches!(
+            err,
+            SequenceCompileError::SrcIndexTooLarge { src_index: 256 }
+        ));
+        // emit_set_src should not have written any bytes when it errors.
+        assert!(payload.is_empty());
     }
 }

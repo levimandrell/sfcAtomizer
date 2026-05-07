@@ -2561,11 +2561,13 @@ fn cmd_compile_sequence(
                 SE::CapabilityMissing { .. }
                 | SE::AtomIdNotInPool { .. }
                 | SE::FirstStepNotInitialKon { .. }
-                | SE::NonFirstStepWrongTransition { .. } => 2,
+                | SE::NonFirstStepWrongTransition { .. }
+                | SE::TooManySources { .. } => 2,
                 SE::WriteBudgetExceeded { .. }
                 | SE::OverlappingSlides { .. }
                 | SE::BytecodeTooLarge { .. }
-                | SE::StepTooShortForTransition { .. } => 3,
+                | SE::StepTooShortForTransition { .. }
+                | SE::SrcIndexTooLarge { .. } => 3,
             };
             eprintln!("compile-sequence: {e}");
             std::process::exit(exit);
