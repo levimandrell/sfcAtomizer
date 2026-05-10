@@ -2,22 +2,32 @@
 
 ## Current milestone
 
-**M2.8.1 — release-final patches before tagging v0.2-rc1.**
-Nine small fixes from the consultant's M2 close-out review: the
-M2.8 implementation was signed off; the release artifacts
-themselves needed narrowing of scope claims, identity-gating of
-the new `total_elapsed_ticks` scalar, a literal-pin test for
-`M1_DRIVER_CODE_SHA256` (the historic value had drifted
-unobserved post-M2.0), a committed canonical fixture under
-`fixtures/projects/canonical_m2/` so the reproducer guide isn't
-hand-waving, asar-version-claim narrowing in the reproducer, and
-prose hygiene on the release notes (PCM vs BRR shift expectations
-separated; annotated-tag command). 522 tests workspace-wide
-(was 521 at M2.8; +1 from the new
-`m1_driver_code_sha_matches_locked_baseline` literal-SHA test).
+**M2.8.2 — identity-pin pattern standardization (M2.8.1 follow-up
+audit).** Consultant's M2.8.1 audit (the audit-the-auditor pass)
+found one stale identity-pin with the same failure shape as the
+M2.8.1 M1 driver case: `end_to_end_compile_sequence_canonical_byte_pinned`
+asserted byte length / shape / SEQ2 magic / END terminator but
+did NOT literally pin the
+`M2_CANONICAL_SEQUENCE_BYTECODE_SHA256` value. Bytecode content
+in the middle could drift undetected. Plus three other
+identity-gated baselines that were pinned via inline literals or
+computed expressions rather than the `include_str!` +
+`baselines/m2.json` pattern — standardized for uniformity so the
+baseline file is the single source of truth across the audit
+surface.
 
-The v0.2-rc1 git tag points at the M2.8.1 close commit (this
-pass). M2 is officially closed once the tag pushes.
+522 tests workspace-wide (unchanged from M2.8.1; all four
+identity-pin extensions were applied as additional assertions
+inside existing tests, not net-new `#[test]` functions). All 7
+identity-gated baselines in `baselines/m2.json` now have at
+least one test that asserts the literal value via either
+`include_str!`-based parse OR an inline literal/byte-vector
+match.
+
+The v0.2-rc2 git tag points at the M2.8.2 close commit and
+represents the post-integrity-audit release candidate. v0.2-rc1
+stays in tag history pointing at the M2.8.1 close commit — kept
+as a documentary marker for "tagged before integrity audit".
 
 **M3 next.** BRR encoder quality (phase rotation, predictor
 optimization, pre-emphasis); loop-click oracle metric
@@ -26,7 +36,92 @@ M2 close-out #25); atom render edge cases beyond canonical
 fixture coverage; the deferred `rename_sequence_id_cascade`
 GUI-polish surface (consultant #13). PM to brief at M3 entry.
 
+Pattern for M3: every new `identity_gated` entry added to
+`baselines/m2.json` ships with a test that includes
+`baselines/m2.json` via `include_str!` and asserts the generated
+value matches.
+
 ## Last pass
+
+**Pass M2.8.2 — identity-pin pattern standardization.**
+
+Consultant M2.8.1 follow-up audit (audit-the-auditor):
+
+- **Phase 1 (consultant M2.8.1 audit #3, #16):** the SEQ2
+  bytecode SHA was identity-gated in `baselines/m2.json` but the
+  test pointed at (`end_to_end_compile_sequence_canonical_byte_pinned`
+  in `core/tests/sequence_compile.rs`) only asserted byte length
+  (49) / payload length (41) / SEQ2 magic / END terminator —
+  not the literal SHA value. Same failure mode as the
+  M2.8.1 `M1_DRIVER_CODE_SHA256` discovery. Upgraded with an
+  `include_str!`-based assertion mirroring the M2.8.1
+  `m1_driver_code_sha_matches_locked_baseline` pattern. Asserted
+  SHA passes on first run — the baseline value
+  `f9fa6ea8...0fd24f0` is current; no stale-baseline condition
+  triggered.
+- **Phase 2 (consultant M2.8.1 audit #4):** standardized
+  `voice_setup_table_byte_pinned_abi` — the byte-vector literal
+  assertion is kept (it documents the ABI directly per
+  consultant guidance), and a parallel SHA assertion against
+  `baselines/m2.json` was added for drift-catching at the SHA
+  layer.
+- **Phase 3 (consultant M2.8.1 audit #5-#7):** standardized
+  `total_ticks_matches_lowering` and
+  `total_elapsed_ticks_includes_resume_tick_per_wait` in
+  `core/src/sequence_compiler.rs::tests`. Hardcoded literals
+  (`120 + 4 + 1 + 4 + 120`, `254`) were replaced with values
+  read from `baselines/m2.json` via a small
+  `baseline_scalar(name)` test helper in the same module. The
+  literal sum-of-WAITs equation is preserved as a documentation
+  cross-check inside the test.
+- **Phase 4 — audit:** verified all 7 identity_gated baselines
+  have a literal/include_str pin. Coverage:
+  - `M1_LOADER_SIZE_BYTES` — `app/tests/cli.rs` literal `588`
+  - `M1_LOADER_SHA256` — `app/tests/cli.rs` literal `const`
+  - `M1_DRIVER_CODE_SHA256` — `core/tests/driver_build.rs`
+    `include_str!` (M2.8.1)
+  - `M2_CANONICAL_SEQUENCE_BYTECODE_SHA256` —
+    `core/tests/sequence_compile.rs` `include_str!` (Phase 1)
+  - `M2_CANONICAL_VOICE_SETUP_TABLE_SHA256` —
+    `core/tests/sequence_compile.rs` byte-vector literal +
+    `include_str!` (Phase 2)
+  - `M2_CANONICAL_SEQUENCE_TOTAL_TICKS` —
+    `core/src/sequence_compiler.rs` `include_str!` + literal
+    sum-of-WAITs (Phase 3)
+  - `M2_CANONICAL_SEQUENCE_ELAPSED_TICKS` —
+    `core/src/sequence_compiler.rs` `include_str!` (Phase 3)
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **522 tests
+  workspace-wide** (unchanged from M2.8.1; Phases 1-3 extended
+  existing tests rather than spinning new sibling `_sha_pinned`
+  test functions).
+
+### Decisions log additions (M2.8.2)
+
+- M2.8.1 follow-up audit (consultant audit-the-auditor pass):
+  SEQ2 bytecode SHA was not literally pinned by
+  `end_to_end_compile_sequence_canonical_byte_pinned` (length /
+  shape only); upgraded with `include_str!`-based assertion
+  mirroring the M2.8.1 M1 driver pattern. Voice setup table +
+  `total_ticks` + `total_elapsed_ticks` standardized to the
+  same baseline-parse pattern for uniformity.
+- All 7 identity-gated baselines in `baselines/m2.json` now
+  have at least one test that asserts the literal value via
+  either `include_str!` parse OR literal byte-vector / scalar
+  match.
+- Pattern for M3 (per consultant's pending recommendation):
+  every `identity_gated` baseline added to `baselines/m2.json`
+  must ship with a test that includes `baselines/m2.json` via
+  `include_str!` and asserts the generated value matches.
+- v0.2-rc2 git tag points at the M2.8.2 close commit
+  (annotated tag with
+  `-m "v0.2-rc2: M2 release candidate (M2.8.2 identity-pin standardization)"`).
+- v0.2-rc1 retained in tag history pointing at the M2.8.1
+  close commit — kept as a documentary marker for "tagged
+  before integrity audit" rather than retracted.
+
+## Previous passes
 
 **Pass M2.8.1 — release-final patches before v0.2-rc1.**
 
