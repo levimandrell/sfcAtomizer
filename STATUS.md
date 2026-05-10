@@ -2,46 +2,172 @@
 
 ## Current milestone
 
-**M2.8.2 — identity-pin pattern standardization (M2.8.1 follow-up
-audit).** Consultant's M2.8.1 audit (the audit-the-auditor pass)
-found one stale identity-pin with the same failure shape as the
-M2.8.1 M1 driver case: `end_to_end_compile_sequence_canonical_byte_pinned`
-asserted byte length / shape / SEQ2 magic / END terminator but
-did NOT literally pin the
-`M2_CANONICAL_SEQUENCE_BYTECODE_SHA256` value. Bytecode content
-in the middle could drift undetected. Plus three other
-identity-gated baselines that were pinned via inline literals or
-computed expressions rather than the `include_str!` +
-`baselines/m2.json` pattern — standardized for uniformity so the
-baseline file is the single source of truth across the audit
-surface.
+**M3.0 — M3 contracts freeze.** Same shape as M2.0: lock the
+contracts that subsequent sub-passes will build against. No
+implementation work beyond a single fixture-pinned metric (the
+loop-click formula, gated before encoder optimization per
+consultant M2 close-out #25). Six new SPEC subsections, one
+amendment to §16.9, a new `baselines/m3.json` scaffold with the
+M3.0 behavior-gated entries, and five fixture tests pinning the
+loop-click metric formula independent of the encoder.
 
-522 tests workspace-wide (unchanged from M2.8.1; all four
-identity-pin extensions were applied as additional assertions
-inside existing tests, not net-new `#[test]` functions). All 7
-identity-gated baselines in `baselines/m2.json` now have at
-least one test that asserts the literal value via either
-`include_str!`-based parse OR an inline literal/byte-vector
-match.
+527 tests workspace-wide (was 522 at M2.8.2; +5 from the new
+`core/tests/loop_click_metric.rs` formula fixtures). All 7
+identity_gated baselines in `baselines/m2.json` carry forward
+unchanged.
 
-The v0.2-rc2 git tag points at the M2.8.2 close commit and
-represents the post-integrity-audit release candidate. v0.2-rc1
-stays in tag history pointing at the M2.8.1 close commit — kept
-as a documentary marker for "tagged before integrity audit".
+**M3 sub-pass plan.** M3.1 metric implementation against the
+existing M2 atoms (records pre-M3 baseline); M3.2 atom edge cases;
+M3.3 phase rotation; M3.4 predictor optimization (conditional per
+SPEC §10.8); M3.5 Gaussian characterization; M3.6 pre-emphasis
+presets (conditional per SPEC §10.9); M3.7 GUI polish; M3.8
+acceptance + release.
 
-**M3 next.** BRR encoder quality (phase rotation, predictor
-optimization, pre-emphasis); loop-click oracle metric
-implementation (gated before encoder optimization per consultant
-M2 close-out #25); atom render edge cases beyond canonical
-fixture coverage; the deferred `rename_sequence_id_cascade`
-GUI-polish surface (consultant #13). PM to brief at M3 entry.
+Release tag policy: v0.3-rc1 only after M3.8 close + integrity
+audit (M2 lessons — M2.8.1 / M2.8.2).
 
-Pattern for M3: every new `identity_gated` entry added to
-`baselines/m2.json` ships with a test that includes
-`baselines/m2.json` via `include_str!` and asserts the generated
-value matches.
+**M3.1 next.** Loop-click metric implementation against existing
+M2 atoms (record pre-M3 baseline). PM to brief at M3.1 entry.
 
 ## Last pass
+
+**Pass M3.0 — M3 contracts freeze.**
+
+Nine phases. Contracts only — no encoder, phase rotation,
+predictor optimization, or pre-emphasis implementation.
+
+- **Phase A (consultant M3 plan #4, #5, #6):** SPEC §10.6 —
+  loop-click metric. Defines `loop_click_abs` (gated metric,
+  integer `i32`) and `loop_window_rms_delta` (diagnostic,
+  reports-only at M3.0). M3 sub-passes gate on
+  `loop_click_abs` only. The squared-difference accumulation
+  in the windowed metric is widened to `i64` to avoid overflow
+  on i16-range inputs (max `(2 × 32767)^2 × 8 ≈ 3.4 × 10^10`
+  for window=8) — the only adjustment to the consultant's
+  formula; final `sqrt` produces an `f64` for report display.
+  Pre-existing M2 atom loop-click scores
+  (`M2_ATOM_128_SINE_LOOP_CLICK_SCORE = 1197`,
+  `M2_ATOM_64_SINE_LOOP_CLICK_SCORE = 2407` in
+  `baselines/m2.json`) carry forward as pre-M3 reference points.
+- **Phase B (consultant M3 plan #7, #17):** SPEC §16.9 — atom
+  PCM stability amendment. The atom render formula (f64
+  additive sum, normalize-then-scale, round-half-away-from-zero,
+  fixed cycle lengths {64, 128, 256}) is locked at M2.0 and
+  MUST NOT change at M3+. Atom PCM SHAs are identity-gated
+  across milestones; BRR SHAs derived from them MAY shift
+  intentionally at M3 (phase rotation §10.7, predictor §10.8,
+  pre-emphasis §10.9). M3.1 reclassifies the current M2 atom
+  PCM SHAs from `documentary_snapshot` to `identity_gated` in
+  `baselines/m3.json`.
+- **Phase C (consultant M3 plan #8, #9, #10):** SPEC §10.7 —
+  phase rotation M3 contract. Refines existing §10.3 with a
+  concrete candidate set (block-aligned only:
+  `[0, 16, 32, ..., cycle_len_samples - 16]`; 4/8/16 candidates
+  for cycle 64/128/256) and a lexicographic objective
+  `(loop_click_abs, peak_abs_error, rms_error, rotation_offset)`
+  — not a weighted score. Final tie-breaker: smaller offset
+  wins, defaulting to no-rotation. Atom PCM SHAs unaffected
+  (rotation operates on a transient encoder input).
+- **Phase D (consultant M3 plan #11, #12):** SPEC §10.8 —
+  predictor optimization M3 conditional. Bounded beam search
+  (recommended `beam_width = 4`) over per-block filter/shift
+  selection. Conditional ship: M3.4 ships only if M3.3
+  phase-rotation gains are insufficient AND the beam search
+  produces measurable additional improvement AND runtime stays
+  bounded (≤ 2× M2.2 encode time). Otherwise defers to M4.
+- **Phase E (consultant M3 plan #13, #14):** SPEC §10.9 —
+  pre-emphasis M3 stretch. Characterization required first at
+  M3.5 (compare raw BRR decode vs snes_spc oracle render).
+  Presets only (`off` | `gentle` | `strong`) at M3.6 land,
+  conditional on M3.5 yielding a clear target. Per-atom
+  `pre_emphasis` field; pre-emphasis runs BEFORE rotation /
+  predictor search but does not change the stored atom PCM
+  (the PCM stability rule gates the rendered PCM before any
+  encoder filter, including pre-emphasis).
+- **Phase F (consultant M3 plan #15, #16):** SPEC §21 — M3
+  baseline classification under the existing M3 milestone
+  entry. Three categories:
+  - **Must NOT shift across M3:** all atom PCM SHAs;
+    canonical SEQ2 bytecode SHA / voice setup table SHA / tick
+    counts; M1 driver code SHA; M1 loader size + SHA.
+  - **Expected to shift at M3:** atom BRR SHAs; loop-click
+    score snapshots; decoded-BRR preview WAVs.
+  - **Must remain behaviorally passing across M3:** M2
+    audibility floors / silence ceiling / source-step ZCR
+    ratio / 32 KiB module cap.
+
+  M3 identity-gated baseline rule (carried from M2.8.1): every
+  new `identity_gated` entry added to `baselines/m3.json` MUST
+  ship with an `include_str!` + serde-parse test asserting the
+  generated value matches.
+- **Phase G:** `baselines/m3.json` scaffolded; `inherits_m2:
+  true`; identity_gated empty (M3.1+ populates); three
+  behavior_gated entries — `M3_LOOP_CLICK_METRIC_GATING`,
+  `M3_PHASE_ROTATION_OBJECTIVE`,
+  `M3_PHASE_ROTATION_CANDIDATE_SET`.
+- **Phase H (consultant M3 plan #6):** `loop_click_abs` and
+  `loop_window_rms_delta` implemented as pure functions in
+  `core::audition` (no encoder dependency). Five fixture
+  tests in `core/tests/loop_click_metric.rs` pin the metric
+  formula on hand-constructed PCM vectors: simple seam (=100),
+  perfect seam (=0), full-range negative-to-positive seam
+  (=2000), windowed metric on all-zero seam (≈0), windowed
+  metric on a linear-ramp wraparound (sqrt(5_120_000) ≈
+  2262.74). Per consultant: "must be testable without
+  rendering atoms or encoding BRR. That prevents circular
+  validation."
+- **Phase I (this entry).**
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **527 tests
+  workspace-wide** (was 522 at M2.8.2; +5 from the
+  loop-click-metric formula fixtures).
+
+### Decisions log additions (M3.0)
+
+- M3 entry approved per consultant M3 plan #37.
+- M3.0 contracts frozen per consultant M3 plan #4–#16:
+  loop-click metric (§10.6), atom PCM stability amendment
+  (§16.9), phase rotation (§10.7), predictor optimization
+  (§10.8), pre-emphasis (§10.9), baseline shift rules (§21 M3
+  milestone entry).
+- M3 contracts land in SPEC §10 (BRR encoder policy) as new
+  subsections §10.6–§10.9, not §16.x — the consultant brief
+  used §16.x as placeholders. §16.9 already exists as
+  "Project file format v2 (M2)" and houses the atom render
+  formula; the M3 encoder contracts are about the encoder, not
+  the schema, so §10 is the structurally correct home. The
+  §16.9 atom PCM stability rule does live inside §16.9 since
+  it's about the render formula stored there.
+- `baselines/m3.json` scaffolded; inherits M2 baselines by
+  reference (`inherits_m2: true`).
+- M3 identity-gated baseline rule carried from M2.8.1: every
+  new `identity_gated` baseline added to `baselines/m3.json`
+  must ship with an `include_str!` + serde-parse test
+  asserting the value matches.
+- Loop-click metric formula fixture-pinned at M3.0
+  (independent of encoder); M3.1 implements applying it to
+  atoms and records the pre-M3 atom loop-click baseline.
+- M3 sub-pass plan locked: M3.1 metric implementation, M3.2
+  atom edge cases, M3.3 phase rotation, M3.4 predictor
+  optimization (conditional), M3.5 Gaussian characterization,
+  M3.6 pre-emphasis presets (conditional), M3.7 GUI polish,
+  M3.8 acceptance + release.
+- Release tag policy: v0.3-rc1 only after M3.8 close +
+  integrity audit per M2 lessons (M2.8.1 / M2.8.2 audit
+  cycles).
+- Spec ambiguity flagged for consultant/PM review (not
+  changed at M3.0): the phase rotation candidate set scales
+  with cycle length — cycle 256 yields 16 candidates vs cycle
+  64 yielding 4. M3.3 may want to bound the candidate count
+  rather than the offset stride. Deferred to M3.3 entry brief.
+- Spec adjustment vs consultant brief: the windowed loop-click
+  metric's squared-difference accumulation is `i64`, not `i32`
+  — the consultant comment said i32 but with i16 inputs the
+  per-sample diff^2 alone overflows i32. Final formula and
+  determinism unchanged.
+
+## Previous passes
 
 **Pass M2.8.2 — identity-pin pattern standardization.**
 
@@ -120,8 +246,6 @@ Consultant M2.8.1 follow-up audit (audit-the-auditor):
 - v0.2-rc1 retained in tag history pointing at the M2.8.1
   close commit — kept as a documentary marker for "tagged
   before integrity audit" rather than retracted.
-
-## Previous passes
 
 **Pass M2.8.1 — release-final patches before v0.2-rc1.**
 
@@ -206,8 +330,6 @@ test:
   encoder optimization.
 - v0.2-rc1 git tag points at the M2.8.1 close commit (annotated
   tag with `-m "v0.2-rc1: M2 release candidate"`).
-
-## Previous passes
 
 **Pass M2.8 — M2 release prep.** [Full M2.8 entry preserved
 below for the v0.2-rc1 record; ages out to the archive on the
