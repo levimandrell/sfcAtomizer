@@ -2,41 +2,168 @@
 
 ## Current milestone
 
-**M3.1 — Loop-click metric implementation against M2 atoms +
-atom PCM SHA reclassification.** Applied the M3.0 SPEC §10.6
-metric to the existing M2 atom encode path, captured the
-pre-M3 baseline scores for the canonical sine_128 / sine_64
-fixtures, and reclassified the atom PCM SHAs from
-`documentary_snapshot` (M2.8.1-era `baselines/m2.json`) to
-`identity_gated` (new `baselines/m3.json`) per the SPEC §16.9
-atom PCM stability amendment locked at M3.0. No encoder
-changes; no phase rotation.
+**M3.2 — Atom edge case fixture coverage.** Synthesized
+fixture additions only; no encoder changes; no phase rotation
+(M3.3); no committed-on-disk fixtures (deferred to M3.3 prelude
+per consultant M3 plan #12). Nine new edge-case atoms
+programmatically constructed in `core/tests/atom_edge_cases.rs`,
+broadening the atom render → BRR encode → metric input space
+before encoder optimization runs against it at M3.3+.
 
-**Reconciliation findings (both predictions confirmed):**
+The nine fixtures and what each surfaces:
 
-- M3.1 `loop_click_abs` values match the M2.2 internal
-  `loop_click_score` exactly: 128-sample atom = 1197, 64-sample
-  atom = 2407. Same formula
-  (`|decoded[loop_start] - decoded[loop_end - 1]|`); M3.1 promotes
-  it from an encoder-internal `f64` field to a SPEC-defined `i32`
-  metric on the decoded BRR PCM (§10.6).
-- Atom PCM SHAs at M3.1 match the M2.2-recorded values exactly:
-  128 = `7f9b274e...f9789a`, 64 = `0638ddfe...3e6565`. Atom render
-  formula has not shifted since M2.0 — the §16.9 amendment now
-  enforces this with two new `include_str!`-based identity tests
-  reading `baselines/m3.json`.
+1. **amplitude_zero** — load-bearing for the M3.3
+   phase-rotation tie-breaker. All-zero PCM →
+   `loop_click_abs = 0`; all candidates tie at score zero; lex
+   objective falls through to peak/rms/offset which must
+   default to no-rotation.
+2. **all_partials_zero_normalize_true** — exercises the
+   normalize `max == 0` special case. Render skips the divide
+   cleanly; no NaN. Same all-zero output as amplitude_zero.
+3. **two_partials_cancel_partially** — surfaces an
+   FP-noise-amplification path. `sin(θ) + sin(θ+π)` is not
+   exactly zero in f64 → tiny noise floor → normalize divides
+   by tiny max → noise amplified to ±1.0 → audible non-zero
+   PCM. Render is graceful (deterministic, finite, no NaN); PM
+   may revisit whether normalize should treat near-zero max as
+   zero at M3+ (SPEC §16.9 amendment territory).
+4. **max_amplitude_no_normalize** — 4 partials, no normalize,
+   atom.amplitude=1.0. Raw sum exceeds 1.0; PCM clamps to
+   ±32767. Tests the round-half-away-from-zero scaler's
+   defensive clamp.
+5. **normalize_false_multi_partial_clamp_safety** — most
+   aggressive overflow path (8 partials × amp 1.0,
+   normalize=false). f64 accumulator has plenty of headroom;
+   verifies anyway.
+6. **harmonic_16_cycle_64** — near-Nyquist content (harmonic
+   16 over a 64-sample cycle = quarter sample rate). Critical
+   for M3.4 predictor optimization + M3.6 pre-emphasis later.
+   Renders cleanly; metric finite. `loop_window_rms_delta = 0`
+   (decoded PCM has strong period-4 structure aligning the
+   first-8 and last-8 windows).
+7. **all_8_partials_max_amp_harmonics_1_to_8** — full
+   partial-bank stress; bright high-harmonic content.
+8. **phase_cycles_0_9999** — phase wraparound boundary.
+   `loop_click_abs = 1196` (off by 1 from canonical sine_128's
+   1197 — phase shift produces near-identical waveform).
+9. **cycle_256_canonical_sine** — cycle-length parity with the
+   existing 64/128 baselines. `loop_click_abs = 606` (smaller
+   than 128's 1197: larger cycle → smaller last-sample
+   magnitude).
 
-529 tests workspace-wide (was 527 at M3.0; +2 from
-`core/tests/atom_render.rs`'s two new
-`atom_pcm_sha_matches_locked_baseline_m3_*` tests). One new
-`#[ignore]` test (`m3_atom_print_baselines`) prints the M3.1
-captured values for baseline collection (2 ignored total
-workspace-wide).
+Per-fixture coverage in `core/tests/atom_edge_cases.rs`:
+- **PCM SHA identity-pin** against `baselines/m3.json::identity_gated`
+  via `include_str!` (M2.8.1 / M3.1 pattern). 9 new tests.
+- **Determinism** — single parameterized test renders all 9
+  fixtures twice and asserts byte-equality on `pcm_sha256`,
+  `brr_sha256`, `decoded_brr_pcm_sha256`, `loop_click_abs`,
+  `loop_window_rms_delta` (compared by `f64::to_bits` for
+  bit-exact equality, not float-equal).
+- **Special-case assertions** — amplitude_zero produces
+  all-zero PCM + `loop_click_abs = 0`; all_partials_zero
+  renders cleanly with no NaN; two_partials_cancel renders
+  bounded/finite (NOT all-zero — see fixture #3 above);
+  harmonic_16_cycle_64 finite metric, no panic.
 
-**M3.2 next.** Atom edge case fixture coverage (consultant M3
-plan #19, #26). PM to brief at M3.2 entry.
+543 tests workspace-wide (was 529 at M3.1; +14 from the new
+`core/tests/atom_edge_cases.rs`: 9 identity-pin + 1 determinism
++ 4 special-case). Plus 1 new `#[ignore]` print sentinel
+(`m3_2_print_atom_edge_case_baselines`) — 3 ignored
+workspace-wide.
+
+`baselines/m3.json` expanded: +9 `identity_gated` (each
+fixture's PCM SHA) + 36 `documentary_snapshot` (each fixture's
+BRR SHA + decoded-BRR-PCM SHA + `loop_click_abs` +
+`loop_window_rms_delta`). All existing M3.1 entries preserved.
+PCM SHAs are identity-gated per the SPEC §16.9 amendment; BRR
+/ decoded-BRR / metric values will shift at M3.3 phase
+rotation.
+
+No render path changes — atom PCM stays locked per §16.9.
+amplitude_zero and all_partials_zero render cleanly via the
+existing normalize `max > 0.0` guard; no defensive-coding fix
+required for those.
+
+**M3.3 next.** Phase rotation implementation per SPEC §10.7.
+PM to brief at M3.3 entry.
 
 ## Last pass
+
+**Pass M3.2 — Atom edge case fixture coverage.**
+
+Four phases. Synthesized fixtures + baseline expansion. No
+encoder changes; no render path changes.
+
+- **Phase A:** synthesized nine atom edge-case fixtures in a
+  new `core/tests/atom_edge_cases.rs` integration test file.
+  Each fixture is built programmatically from `base(cycle)` +
+  per-fixture mutations; all fed through `render_to_brr` for
+  end-to-end metric capture. Names mirror the consultant's
+  `M3_ATOM_<NAME>_*` convention.
+- **Phase B:** captured pre-M3 baseline values via a new
+  `#[ignore]`'d `m3_2_print_atom_edge_case_baselines` sentinel
+  and populated `baselines/m3.json`:
+  - 9 new `identity_gated` entries (PCM SHA per fixture; the
+    SPEC §16.9 amendment classifies all atom PCM SHAs as
+    identity-gated across milestones).
+  - 36 new `documentary_snapshot` entries (4 per fixture: BRR
+    SHA, decoded-BRR-PCM SHA, `loop_click_abs`,
+    `loop_window_rms_delta`) — expected to shift at M3.3
+    phase rotation.
+- **Phase C:** per-fixture determinism verified by a single
+  parameterized test that renders every fixture twice and
+  asserts bit-equality on PCM, BRR, both SHAs, and both
+  metrics (`f64::to_bits` for the windowed RMS delta — exact
+  bit equality, not float-equal). Every fixture is
+  deterministic; no f64 reduction-order or HashMap-iteration
+  drift surfaced.
+- **Phase D (this entry).**
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **543 tests
+  workspace-wide** (was 529 at M3.1; +14 from
+  `core/tests/atom_edge_cases.rs`).
+
+### Decisions log additions (M3.2)
+
+- Nine new atom edge-case fixtures synthesized: `amplitude_zero`
+  (load-bearing for M3.3 tie-breaker), `all_partials_zero_normalize_true`
+  (normalize special-case), `two_partials_cancel_partially`
+  (FP-noise-amplification surface), `max_amplitude_no_normalize`
+  (clamping), `normalize_false_multi_partial_clamp_safety`
+  (overflow), `harmonic_16_cycle_64` (near-Nyquist),
+  `all_8_partials_max_amp_harmonics_1_to_8` (full bank),
+  `phase_cycles_0_9999` (boundary), `cycle_256_canonical_sine`
+  (cycle length parity).
+- Per-fixture metric values + PCM/BRR/decoded-BRR SHAs captured
+  in `baselines/m3.json`. PCM SHAs identity_gated per SPEC §16.9
+  amendment; BRR / decoded-BRR / metric values
+  documentary_snapshot (will shift at M3.3 phase rotation).
+- Determinism verified per fixture (two-run bit-identity on
+  every output field).
+- Render path handles `amplitude_zero` / `all_partials_zero` /
+  the partial-cancellation case cleanly — no defensive-coding
+  fix required. The existing normalize `if max > 0.0` guard
+  catches both special cases.
+- **Spec ambiguity flagged for M3+ consideration (not changed
+  at M3.2):** the `two_partials_cancel_partially` fixture
+  exposes that `f64::sin(θ + π) ≠ -f64::sin(θ)` exactly, so
+  mathematically-cancelling partials produce a ULP-scale noise
+  floor that normalize then amplifies to audible levels. The
+  brief predicted all-zero PCM here; reality is non-zero
+  noise-amplified PCM. Brief did not flag this as a stop
+  condition (render is deterministic, finite, no NaN). PM may
+  revisit whether normalize should treat near-zero max as
+  zero — that is a SPEC §16.9 render-formula amendment and is
+  out of M3.2 scope.
+- **No committed fixture files** — synthesized in tests only;
+  on-disk fixture under `fixtures/projects/atom_edge_cases/`
+  deferred to M3.3 prelude per consultant M3 plan #12.
+- **No reclassification of existing M3.1 baselines** — M3.1's
+  M2 atom PCM SHAs stay identity_gated; M3.1's pre-M3
+  loop-click / decoded-BRR scalars stay documentary_snapshot.
+
+## Previous passes
 
 **Pass M3.1 — Loop-click metric implementation + atom PCM
 reclassification.**
