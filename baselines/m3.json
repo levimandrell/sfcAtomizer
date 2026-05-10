@@ -2,10 +2,27 @@
   "schema_version": 1,
   "report_type": "release_baselines",
   "release": "v0.3-pre",
-  "milestone": "M3.0",
-  "_doc": "Machine-readable release baselines for M3 BRR encoder quality milestone. Currently scaffolded with prelude contracts; M3.1+ populates with metric and encoder-quality baselines. Inherits M2 baselines from baselines/m2.json by reference (M3 acceptance re-runs M2 acceptance gates per SPEC §21 M3 baseline classification). Three current classifications: identity_gated (any drift = regression), behavior_gated (numeric thresholds documenting policy), documentary_snapshot (informational; expected to shift on declared milestones).",
+  "milestone": "M3.1",
+  "_doc": "Machine-readable release baselines for M3 BRR encoder quality milestone. M3.1 wires the SPEC §10.6 loop-click metric into atom encode reports and reclassifies the canonical atom PCM SHAs from documentary_snapshot (m2.json) to identity_gated here per the SPEC §16.9 atom PCM stability amendment (M3.0). Documentary_snapshot now holds pre-M3 loop-click + decoded-BRR-PCM scores that M3.3 phase rotation will improve. Three classifications: identity_gated (any drift = regression), behavior_gated (numeric thresholds documenting policy), documentary_snapshot (informational; expected to shift on declared milestones).",
   "inherits_m2": true,
-  "identity_gated": [],
+  "identity_gated": [
+    {
+      "name": "M2_ATOM_128_SINE_PCM_SHA256",
+      "value": "7f9b274e9fa1c7088ba4d125a2899293bae79115bdd20824b2afb54116f9789a",
+      "kind": "sha256",
+      "locked_at": "M2.2 (reclassified to identity_gated at M3.1 per SPEC §16.9 amendment)",
+      "test": "core/tests/atom_render.rs::atom_pcm_sha_matches_locked_baseline_m3_canonical_128_sine",
+      "_note": "Atom PCM render formula locked at M2.0 SPEC §16.9; stability rule promoted to a hard contract at M3.0. M3 encoder work (phase rotation §10.7, predictor §10.8, pre-emphasis §10.9) MUST NOT shift this value."
+    },
+    {
+      "name": "M2_ATOM_64_SINE_PCM_SHA256",
+      "value": "0638ddfe8a2a8fb4c98ff6fed37ff3475c42dd257df893eca9e836d09d3e6565",
+      "kind": "sha256",
+      "locked_at": "M2.2 (reclassified to identity_gated at M3.1 per SPEC §16.9 amendment)",
+      "test": "core/tests/atom_render.rs::atom_pcm_sha_matches_locked_baseline_m3_canonical_64_sine",
+      "_note": "Same stability rule as the 128-sample atom."
+    }
+  ],
   "behavior_gated": [
     {
       "name": "M3_LOOP_CLICK_METRIC_GATING",
@@ -29,6 +46,49 @@
       "rule": "candidate offsets are multiples of 16 only: 0, 16, 32, ..., cycle_len_samples - 16 (4 candidates for cycle 64, 8 for cycle 128, 16 for cycle 256); non-block-aligned reserved for M4+ per SPEC §10.7"
     }
   ],
-  "documentary_snapshot": [],
+  "documentary_snapshot": [
+    {
+      "name": "M3_ATOM_128_SINE_LOOP_CLICK_ABS_PRE_M3",
+      "value": 1197,
+      "kind": "metric_value",
+      "snapshot_at": "M3.1",
+      "_note": "Pre-M3 loop_click_abs (SPEC §10.6) for canonical sine_128 atom under the M2.2 encoder. M3.3 phase rotation MUST produce a value <= this (lexicographic objective per SPEC §10.7). Matches the M2.2 M2_ATOM_128_SINE_LOOP_CLICK_SCORE = 1197 value exactly — same formula, M3.1 just promotes it from encoder-internal to a formal SPEC-defined metric on the decoded BRR PCM."
+    },
+    {
+      "name": "M3_ATOM_64_SINE_LOOP_CLICK_ABS_PRE_M3",
+      "value": 2407,
+      "kind": "metric_value",
+      "snapshot_at": "M3.1",
+      "_note": "Pre-M3 loop_click_abs for canonical sine_64 atom. M3.3 phase rotation MUST produce a value <= this. Matches M2_ATOM_64_SINE_LOOP_CLICK_SCORE = 2407 exactly."
+    },
+    {
+      "name": "M3_ATOM_128_SINE_LOOP_WINDOW_RMS_DELTA_PRE_M3",
+      "value": 26745.844742688536,
+      "kind": "metric_value",
+      "snapshot_at": "M3.1",
+      "_note": "Diagnostic windowed metric (SPEC §10.6, window=8) for canonical sine_128 atom under M2.2 encoder. Reports-only at M3; informational baseline."
+    },
+    {
+      "name": "M3_ATOM_64_SINE_LOOP_WINDOW_RMS_DELTA_PRE_M3",
+      "value": 51285.12903366823,
+      "kind": "metric_value",
+      "snapshot_at": "M3.1",
+      "_note": "Same; reports-only."
+    },
+    {
+      "name": "M3_ATOM_128_SINE_DECODED_BRR_PCM_SHA256_PRE_M3",
+      "value": "de7c89adaaacb139a69cf0edd30e7fe860d6bf5623c04a5898e53de211880bb1",
+      "kind": "sha256",
+      "snapshot_at": "M3.1",
+      "_note": "SHA-256 of decoded-from-BRR PCM (little-endian i16 bytes) for sine_128 atom under M2.2 encoder. M3.3 phase rotation will shift this. Documentary snapshot — expected to shift."
+    },
+    {
+      "name": "M3_ATOM_64_SINE_DECODED_BRR_PCM_SHA256_PRE_M3",
+      "value": "9c4a231d56a822404cd33b6cc8b786c251165e46aa0a59b9ed07ecf5cc9b0ec4",
+      "kind": "sha256",
+      "snapshot_at": "M3.1",
+      "_note": "Same; expected to shift at M3.3."
+    }
+  ],
   "retired": []
 }

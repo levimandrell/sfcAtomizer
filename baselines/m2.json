@@ -3,7 +3,11 @@
   "report_type": "release_baselines",
   "release": "v0.2-rc",
   "milestone": "M2.8",
-  "_doc": "Machine-readable release baselines for v0.2-rc (M2.8 / M2.8.1). Contains current locked / snapshot values; `retired` section captures M2.x ARAM SHA evolutions only. Not a complete historical baseline registry — pre-M2 retired baselines live in docs/history/M0-M2-passes.md. Three current classifications: identity_gated (any drift = regression), behavior_gated (numeric thresholds documenting policy), documentary_snapshot (informational; expected to shift on declared milestones).",
+  "_doc": "Machine-readable release baselines for v0.2-rc (M2.8 / M2.8.1). Contains current locked / snapshot values; `retired` section captures M2.x ARAM SHA evolutions only. Not a complete historical baseline registry — pre-M2 retired baselines live in docs/history/M0-M2-passes.md. Three current classifications: identity_gated (any drift = regression), behavior_gated (numeric thresholds documenting policy), documentary_snapshot (informational; expected to shift on declared milestones). M3.1 migration: M2_ATOM_128_SINE_PCM_SHA256 and M2_ATOM_64_SINE_PCM_SHA256 moved from this file's documentary_snapshot to baselines/m3.json's identity_gated section per the SPEC §16.9 atom PCM stability amendment (M3.0); see _migrated_to_m3 field.",
+  "_migrated_to_m3": [
+    "M2_ATOM_128_SINE_PCM_SHA256 → baselines/m3.json::identity_gated (M3.1, per SPEC §16.9 amendment)",
+    "M2_ATOM_64_SINE_PCM_SHA256 → baselines/m3.json::identity_gated (M3.1, per SPEC §16.9 amendment)"
+  ],
   "identity_gated": [
     {
       "name": "M1_LOADER_SIZE_BYTES",
@@ -140,20 +144,6 @@
       "kind": "size_bytes",
       "snapshot_at": "M2.2",
       "_note": "4 BRR blocks at 9 bytes each."
-    },
-    {
-      "name": "M2_ATOM_128_SINE_PCM_SHA256",
-      "value": "7f9b274e9fa1c7088ba4d125a2899293bae79115bdd20824b2afb54116f9789a",
-      "kind": "sha256",
-      "snapshot_at": "M2.2",
-      "_note": "M3-stable IF atom render formula unchanged (consultant #27)."
-    },
-    {
-      "name": "M2_ATOM_64_SINE_PCM_SHA256",
-      "value": "0638ddfe8a2a8fb4c98ff6fed37ff3475c42dd257df893eca9e836d09d3e6565",
-      "kind": "sha256",
-      "snapshot_at": "M2.2",
-      "_note": "M3-stable IF atom render formula unchanged."
     },
     {
       "name": "M2_ATOM_128_SINE_LOOP_CLICK_SCORE",
