@@ -2,8 +2,8 @@
   "schema_version": 1,
   "report_type": "release_baselines",
   "release": "v0.3-pre",
-  "milestone": "M3.1",
-  "_doc": "Machine-readable release baselines for M3 BRR encoder quality milestone. M3.1 wires the SPEC §10.6 loop-click metric into atom encode reports and reclassifies the canonical atom PCM SHAs from documentary_snapshot (m2.json) to identity_gated here per the SPEC §16.9 atom PCM stability amendment (M3.0). Documentary_snapshot now holds pre-M3 loop-click + decoded-BRR-PCM scores that M3.3 phase rotation will improve. Three classifications: identity_gated (any drift = regression), behavior_gated (numeric thresholds documenting policy), documentary_snapshot (informational; expected to shift on declared milestones).",
+  "milestone": "M3.2",
+  "_doc": "Machine-readable release baselines for M3 BRR encoder quality milestone. M3.2 expands the atom render → BRR encode → metric coverage with nine new edge-case fixtures synthesized in core/tests/atom_edge_cases.rs: amplitude_zero (load-bearing for M3.3 phase-rotation tie-breaker), all_partials_zero_normalize_true (normalize max==0 special case), two_partials_cancel_partially (FP-noise-amplification surface), max_amplitude_no_normalize + normalize_false_multi_partial_clamp_safety (i16 clamping), harmonic_16_cycle_64 (near-Nyquist content), all_8_partials_max_amp_harmonics_1_to_8 (full partial bank), phase_cycles_0_9999 (phase wraparound boundary), cycle_256_canonical_sine (cycle-length parity for the existing 64/128 baselines). Atom PCM SHAs are identity-gated across milestones per the SPEC §16.9 amendment; BRR / decoded-BRR-PCM SHAs and metric values are documentary_snapshot, expected to shift at M3.3 phase rotation. Three classifications: identity_gated (any drift = regression), behavior_gated (numeric thresholds documenting policy), documentary_snapshot (informational; expected to shift on declared milestones).",
   "inherits_m2": true,
   "identity_gated": [
     {
@@ -21,6 +21,78 @@
       "locked_at": "M2.2 (reclassified to identity_gated at M3.1 per SPEC §16.9 amendment)",
       "test": "core/tests/atom_render.rs::atom_pcm_sha_matches_locked_baseline_m3_canonical_64_sine",
       "_note": "Same stability rule as the 128-sample atom."
+    },
+    {
+      "name": "M3_ATOM_AMPLITUDE_ZERO_PCM_SHA256",
+      "value": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1",
+      "kind": "sha256",
+      "locked_at": "M3.2",
+      "test": "core/tests/atom_edge_cases.rs::atom_pcm_sha_matches_locked_baseline_m3_amplitude_zero",
+      "_note": "Atom with amplitude=0 renders all-zero PCM (SHA of 256 zero bytes). Load-bearing for the M3.3 phase-rotation tie-breaker — all candidates tie at loop_click_abs=0, lex objective falls through to peak_abs_error/rms_error/rotation_offset which must default to no-rotation."
+    },
+    {
+      "name": "M3_ATOM_ALL_PARTIALS_ZERO_NORMALIZE_TRUE_PCM_SHA256",
+      "value": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1",
+      "kind": "sha256",
+      "locked_at": "M3.2",
+      "test": "core/tests/atom_edge_cases.rs::atom_pcm_sha_matches_locked_baseline_m3_all_partials_zero_normalize_true",
+      "_note": "Exercises the normalize max==0 special case in render_to_pcm (max == 0 → skip divide, leaves x all-zero). Produces identical all-zero PCM as M3_ATOM_AMPLITUDE_ZERO; same SHA. No divide-by-zero; no NaN."
+    },
+    {
+      "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_PCM_SHA256",
+      "value": "ba983d6e1dae5ffec0e52a575f3fc6cba129fed7cfddf66f91e2671a68b05bf2",
+      "kind": "sha256",
+      "locked_at": "M3.2",
+      "test": "core/tests/atom_edge_cases.rs::atom_pcm_sha_matches_locked_baseline_m3_two_partials_cancel_partially",
+      "_note": "Two equal-amplitude partials with phase_cycles 0.0 and 0.5 cancel mathematically (sin(θ) + sin(θ+π) = 0) but FP sin is not exact — sum is a ULP-scale noise floor. normalize then divides by tiny max, amplifying noise to ±1.0; * amplitude * 32767 produces non-trivial PCM. The PCM is deterministic and bounded; no NaN. PM may revisit whether normalize should treat near-zero max as zero at M3+ (SPEC §16.9 amendment territory)."
+    },
+    {
+      "name": "M3_ATOM_MAX_AMPLITUDE_NO_NORMALIZE_PCM_SHA256",
+      "value": "6446477876e51c0cca019ff3d1d4f4a6004afcd0be4dcdf2747afcd6ac7ff587",
+      "kind": "sha256",
+      "locked_at": "M3.2",
+      "test": "core/tests/atom_edge_cases.rs::atom_pcm_sha_matches_locked_baseline_m3_max_amplitude_no_normalize",
+      "_note": "4 partials at harmonics 1..=4, all amp=1.0, normalize=false, atom.amplitude=1.0. Raw sum exceeds 1.0 in places; PCM clamps to ±32767. Tests the round-half-away-from-zero scaler's defensive clamp."
+    },
+    {
+      "name": "M3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_PCM_SHA256",
+      "value": "166fe752071ca43475ddebe9f8a0ad9eb6c15a354a810f4380ce69ceb7d2f0d2",
+      "kind": "sha256",
+      "locked_at": "M3.2",
+      "test": "core/tests/atom_edge_cases.rs::atom_pcm_sha_matches_locked_baseline_m3_normalize_false_multi_partial_clamp_safety",
+      "_note": "Most aggressive overflow path: 8 partials at harmonics 1..=8, all amp=1.0, normalize=false. f64 accumulator has plenty of headroom; verifies anyway."
+    },
+    {
+      "name": "M3_ATOM_HARMONIC_16_CYCLE_64_PCM_SHA256",
+      "value": "071ae38dc919a75db8be191c0a11970934e525481df81e1515b14fe00cb46de1",
+      "kind": "sha256",
+      "locked_at": "M3.2",
+      "test": "core/tests/atom_edge_cases.rs::atom_pcm_sha_matches_locked_baseline_m3_harmonic_16_cycle_64",
+      "_note": "Single partial at harmonic=16, cycle_len_samples=64. Near-Nyquist content (16/64 = quarter sample rate). Critical for M3.4 predictor optimization and M3.6 pre-emphasis — high-frequency content is where BRR predictor degenerates and pre-emphasis presets diverge."
+    },
+    {
+      "name": "M3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_PCM_SHA256",
+      "value": "7dcd9c8276b216286cd16bd32292f437963371ceb14b0310ad904c7f2a619ab3",
+      "kind": "sha256",
+      "locked_at": "M3.2",
+      "test": "core/tests/atom_edge_cases.rs::atom_pcm_sha_matches_locked_baseline_m3_all_8_partials_max_amp_harmonics_1_to_8",
+      "_note": "Full partial-bank stress: 8 partials at harmonics 1..=8, amp=1.0, normalize=true, atom.amplitude=1.0. Bright high-harmonic content."
+    },
+    {
+      "name": "M3_ATOM_PHASE_CYCLES_0_9999_PCM_SHA256",
+      "value": "c153509937115c3b221dee199cfd1f885e4a8f4d2b2c2f0be966b10d46eef737",
+      "kind": "sha256",
+      "locked_at": "M3.2",
+      "test": "core/tests/atom_edge_cases.rs::atom_pcm_sha_matches_locked_baseline_m3_phase_cycles_0_9999",
+      "_note": "Single partial, phase_cycles=0.9999. Phase wraparound boundary. Produces a near-phase=0 waveform; loop_click_abs is 1196 (vs 1197 for the canonical phase=0 sine_128 atom) — off by 1 due to the tiny shift."
+    },
+    {
+      "name": "M3_ATOM_CYCLE_256_CANONICAL_SINE_PCM_SHA256",
+      "value": "2b6d7ea506b17d6d5b7ea9e758c0243b93b5fd90409fad0bafb3d456157d7d57",
+      "kind": "sha256",
+      "locked_at": "M3.2",
+      "test": "core/tests/atom_edge_cases.rs::atom_pcm_sha_matches_locked_baseline_m3_cycle_256_canonical_sine",
+      "_note": "Canonical sine at cycle_len_samples=256 — parity with the existing 64/128 canonical baselines. loop_click_abs is 606 (smaller than 128's 1197 because larger cycle means smaller last-sample magnitude)."
     }
   ],
   "behavior_gated": [
@@ -88,6 +160,258 @@
       "kind": "sha256",
       "snapshot_at": "M3.1",
       "_note": "Same; expected to shift at M3.3."
+    },
+    {
+      "name": "M3_ATOM_AMPLITUDE_ZERO_BRR_SHA256_PRE_M3",
+      "value": "addd0d1e3420bc9a0131e626e738d085cf9d03a830f2407fd4a5fadd27d437c5",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "Pre-M3 BRR SHA for amplitude_zero fixture. M3.3 phase rotation may shift this."
+    },
+    {
+      "name": "M3_ATOM_AMPLITUDE_ZERO_DECODED_BRR_PCM_SHA256_PRE_M3",
+      "value": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "Equals the all-zero PCM SHA — BRR encode of all-zero PCM round-trips to all-zero decoded PCM."
+    },
+    {
+      "name": "M3_ATOM_AMPLITUDE_ZERO_LOOP_CLICK_ABS_PRE_M3",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "All-zero PCM has no seam. M3.3 phase rotation MUST NOT make this worse (lexicographic objective per §10.7); all rotation candidates tie and the smaller-offset tie-breaker selects rotation_offset=0 by default."
+    },
+    {
+      "name": "M3_ATOM_AMPLITUDE_ZERO_LOOP_WINDOW_RMS_DELTA_PRE_M3",
+      "value": 0.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Diagnostic-only; perfect-seam value."
+    },
+    {
+      "name": "M3_ATOM_ALL_PARTIALS_ZERO_NORMALIZE_TRUE_BRR_SHA256_PRE_M3",
+      "value": "addd0d1e3420bc9a0131e626e738d085cf9d03a830f2407fd4a5fadd27d437c5",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "Identical BRR to amplitude_zero — both produce all-zero PCM."
+    },
+    {
+      "name": "M3_ATOM_ALL_PARTIALS_ZERO_NORMALIZE_TRUE_DECODED_BRR_PCM_SHA256_PRE_M3",
+      "value": "5341e6b2646979a70e57653007a1f310169421ec9bdd9f1a5648f75ade005af1",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "All-zero decoded PCM."
+    },
+    {
+      "name": "M3_ATOM_ALL_PARTIALS_ZERO_NORMALIZE_TRUE_LOOP_CLICK_ABS_PRE_M3",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Perfect-seam value."
+    },
+    {
+      "name": "M3_ATOM_ALL_PARTIALS_ZERO_NORMALIZE_TRUE_LOOP_WINDOW_RMS_DELTA_PRE_M3",
+      "value": 0.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Diagnostic-only; perfect-seam value."
+    },
+    {
+      "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_BRR_SHA256_PRE_M3",
+      "value": "458c67603fd9d50cc4d3130f879d26b16c2d9bf54ce2f2210683f7d2085282ca",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "Pre-M3 BRR SHA for the FP-noise-amplified cancellation fixture. M3.3 phase rotation may shift this."
+    },
+    {
+      "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_DECODED_BRR_PCM_SHA256_PRE_M3",
+      "value": "0904195edc8a17425ee3af92d3fcbd666d912441772c1340e424207063182495",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "M3.3 phase rotation will shift this."
+    },
+    {
+      "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_LOOP_CLICK_ABS_PRE_M3",
+      "value": 1024,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Loop click on the noise-amplified waveform. M3.3 phase rotation must produce <= this value."
+    },
+    {
+      "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_LOOP_WINDOW_RMS_DELTA_PRE_M3",
+      "value": 34467.9069280396,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Diagnostic; reports-only."
+    },
+    {
+      "name": "M3_ATOM_MAX_AMPLITUDE_NO_NORMALIZE_BRR_SHA256_PRE_M3",
+      "value": "21b5e3aa65eb571caa73368f08f23bcfa138eb110367da1f700f228ee8357813",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "Pre-M3 BRR SHA for the i16-clamping fixture. M3.3 phase rotation may shift this."
+    },
+    {
+      "name": "M3_ATOM_MAX_AMPLITUDE_NO_NORMALIZE_DECODED_BRR_PCM_SHA256_PRE_M3",
+      "value": "ead292cd6deee7571f2c14fbf5884b0d62774afc2ef200b7cc2bb5b6e16bbd90",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "M3.3 phase rotation will shift this."
+    },
+    {
+      "name": "M3_ATOM_MAX_AMPLITUDE_NO_NORMALIZE_LOOP_CLICK_ABS_PRE_M3",
+      "value": 16032,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Large seam — the no-normalize multi-partial signal has aggressive content. M3.3 phase rotation must produce <= this."
+    },
+    {
+      "name": "M3_ATOM_MAX_AMPLITUDE_NO_NORMALIZE_LOOP_WINDOW_RMS_DELTA_PRE_M3",
+      "value": 82782.61459992672,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Diagnostic; reports-only."
+    },
+    {
+      "name": "M3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_BRR_SHA256_PRE_M3",
+      "value": "d8dbe77c5df88927e8f439a1c057a6ec0e42be3c8d960d18e077a7ce8076a26c",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "Pre-M3 BRR SHA for the 8-partial overflow-safety fixture. M3.3 phase rotation may shift this."
+    },
+    {
+      "name": "M3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_DECODED_BRR_PCM_SHA256_PRE_M3",
+      "value": "95c14b6b13577c94c672269799c9a4e436120920ef607fc5c14f02bbbff6b956",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "M3.3 phase rotation will shift this."
+    },
+    {
+      "name": "M3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_LOOP_CLICK_ABS_PRE_M3",
+      "value": 16384,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Large seam — 8-partial unnormalized signal. M3.3 phase rotation must produce <= this."
+    },
+    {
+      "name": "M3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_LOOP_WINDOW_RMS_DELTA_PRE_M3",
+      "value": 82912.38903806837,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Diagnostic; reports-only."
+    },
+    {
+      "name": "M3_ATOM_HARMONIC_16_CYCLE_64_BRR_SHA256_PRE_M3",
+      "value": "779e9be8b35891ba18acbe74d3ac3643a5c06109a1a270844b3c002f6e7b3c06",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "Pre-M3 BRR SHA for near-Nyquist fixture. M3.3 phase rotation may shift this."
+    },
+    {
+      "name": "M3_ATOM_HARMONIC_16_CYCLE_64_DECODED_BRR_PCM_SHA256_PRE_M3",
+      "value": "87ffee5e6cd3fedb6474f7d582542341e62a2cdae1aca8c7b7cf46cab95acbf8",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "M3.3 phase rotation will shift this."
+    },
+    {
+      "name": "M3_ATOM_HARMONIC_16_CYCLE_64_LOOP_CLICK_ABS_PRE_M3",
+      "value": 16384,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Near-Nyquist content; BRR predictor degenerates at this frequency. The decoded PCM at seam ends at i16::MAX/2-ish magnitude versus zero at the loop start."
+    },
+    {
+      "name": "M3_ATOM_HARMONIC_16_CYCLE_64_LOOP_WINDOW_RMS_DELTA_PRE_M3",
+      "value": 0.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Diagnostic-only. The decoded PCM has a strong period-4 structure that aligns first-8 and last-8 windows; windowed delta is zero."
+    },
+    {
+      "name": "M3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_BRR_SHA256_PRE_M3",
+      "value": "ea97a6c668c55bab7121b7961b7494d7f714228f6fc60dafe01a205cb01f6df1",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "Pre-M3 BRR SHA for the full-partial-bank fixture. M3.3 phase rotation may shift this."
+    },
+    {
+      "name": "M3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_DECODED_BRR_PCM_SHA256_PRE_M3",
+      "value": "42e4cb52278470153be3566e3007f474b230b1cd1367998af71c22f3d160e9a7",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "M3.3 phase rotation will shift this."
+    },
+    {
+      "name": "M3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_LOOP_CLICK_ABS_PRE_M3",
+      "value": 10240,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Full-bank bright signal; M3.3 phase rotation must produce <= this."
+    },
+    {
+      "name": "M3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_LOOP_WINDOW_RMS_DELTA_PRE_M3",
+      "value": 79371.5604483117,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Diagnostic; reports-only."
+    },
+    {
+      "name": "M3_ATOM_PHASE_CYCLES_0_9999_BRR_SHA256_PRE_M3",
+      "value": "ea4afa0a734aa3d75cc184f7ff5e7c2375eda7a946cc3cd39b97c2885bc84e45",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "Pre-M3 BRR SHA for the phase-wraparound boundary fixture. M3.3 phase rotation may shift this."
+    },
+    {
+      "name": "M3_ATOM_PHASE_CYCLES_0_9999_DECODED_BRR_PCM_SHA256_PRE_M3",
+      "value": "4262ffdad37248db84d2b4fc0cdb80b5e8235e3b1365299937e10b5ef55502ab",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "M3.3 phase rotation will shift this."
+    },
+    {
+      "name": "M3_ATOM_PHASE_CYCLES_0_9999_LOOP_CLICK_ABS_PRE_M3",
+      "value": 1196,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Off-by-one from canonical sine_128 atom's 1197 — phase=0.9999 shift produces a near-identical waveform with a tiny seam difference."
+    },
+    {
+      "name": "M3_ATOM_PHASE_CYCLES_0_9999_LOOP_WINDOW_RMS_DELTA_PRE_M3",
+      "value": 26791.98417437574,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Diagnostic; reports-only. Near-identical to the canonical sine_128 atom's 26745.84 — phase wraparound preserved as designed."
+    },
+    {
+      "name": "M3_ATOM_CYCLE_256_CANONICAL_SINE_BRR_SHA256_PRE_M3",
+      "value": "9e7292193e1545e721f687ab5de7ff61616768756974b26f2df89aaff8aa76c4",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "Pre-M3 BRR SHA for the cycle-256 canonical sine. M3.3 phase rotation may shift this."
+    },
+    {
+      "name": "M3_ATOM_CYCLE_256_CANONICAL_SINE_DECODED_BRR_PCM_SHA256_PRE_M3",
+      "value": "d0907e5c0335f27f67d15eaaafd98279e80676e8c3107cbf6bacc4068f27c4f9",
+      "kind": "sha256",
+      "snapshot_at": "M3.2",
+      "_note": "M3.3 phase rotation will shift this."
+    },
+    {
+      "name": "M3_ATOM_CYCLE_256_CANONICAL_SINE_LOOP_CLICK_ABS_PRE_M3",
+      "value": 606,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Smaller seam than the cycle-128 atom (1197): larger cycle, smaller last-sample magnitude."
+    },
+    {
+      "name": "M3_ATOM_CYCLE_256_CANONICAL_SINE_LOOP_WINDOW_RMS_DELTA_PRE_M3",
+      "value": 13536.98633374504,
+      "kind": "metric_value",
+      "snapshot_at": "M3.2",
+      "_note": "Diagnostic; reports-only."
     }
   ],
   "retired": []
