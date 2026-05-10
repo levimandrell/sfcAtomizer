@@ -453,6 +453,201 @@ Preset names describe the target playback result, not a fixed source-rate EQ cur
 
 Per-sample and per-atom selection. Applied before BRR encode. **Pre-emphasis is validated using S-DSP voice render mode** (§10.1), not raw BRR decode — the dulling it compensates for is interpolation behavior, not decode behavior. Preview plays the post-render result, not the ideal pre-emphasized waveform. Every pre-emphasis choice appears in the compile report.
 
+### 10.6 Loop-click metric (M3)
+
+Formalizes the `loop_click_score` field from §10.4 into two
+deterministic, encoder-independent metrics. M3 sub-passes compute
+both; M3 gates only on the integer metric. The diagnostic windowed
+metric is reports-only at M3 and may promote to a gate at M4+ after
+it has stabilized.
+
+**Definition (gated metric).** For a sample/atom whose decoded BRR
+PCM is `decoded[]` of length `decoded_len`, with loop region
+`[loop_start, loop_end)`:
+
+```
+loop_click_abs = abs((decoded[loop_start] as i32) - (decoded[loop_end - 1] as i32))
+```
+
+Type: `i32`. Computed on the raw BRR-decoded waveform (§10.4's "Raw
+BRR decode" path), NOT on source PCM and NOT on S-DSP-rendered
+output. Smaller is better; perfect seam = 0.
+
+For generated single-cycle atoms (M2 atom v0, §16.9):
+
+```
+loop_start = 0
+loop_end   = decoded_len
+```
+
+**Definition (diagnostic metric, reports-only).** A windowed
+extension useful for catching seam shape problems the single-sample
+metric misses:
+
+```
+loop_window_rms_delta(window = 8):
+  pre  = decoded[loop_end - window .. loop_end]
+  post = decoded[loop_start .. loop_start + window]
+  sum_sq_delta = sum_i((pre[i] as i32 - post[i] as i32) ^ 2)   // accumulated in i64
+  return sqrt(sum_sq_delta as f64)                              // f64; reports-only
+```
+
+The squared-difference accumulation is widened to `i64` to avoid
+overflow on i16-range inputs (max `(2 * 32767)^2 * 8 ≈ 3.4 × 10^10`).
+The final `sqrt` is computed once per report and is the only
+floating-point operation in the metric. Cross-platform deterministic
+in practice (single `f64::sqrt` of a deterministic i64 value).
+
+**Gating policy.** M3 sub-passes gate on `loop_click_abs` only.
+`loop_window_rms_delta` is reported in encode reports as diagnostic.
+M4+ may promote it to a gate after the metric has stabilized.
+
+**Pre-existing snapshots.** The M2 atom loop-click scores recorded
+in `baselines/m2.json` (`M2_ATOM_128_SINE_LOOP_CLICK_SCORE = 1197`,
+`M2_ATOM_64_SINE_LOOP_CLICK_SCORE = 2407`) were computed with this
+formula pre-§10.6 and remain valid; M3 carries them forward as the
+pre-encoder-improvement reference points. M3.1 records the
+post-M3 atom loop-click scores under
+`documentary_snapshot` in `baselines/m3.json`.
+
+### 10.7 Phase rotation (M3 encoder optimization)
+
+Refines §10.3 into a concrete encoder contract.
+
+**Definition.** Phase rotation is encoder-input rotation of an
+already-rendered atom PCM cycle. The atom render formula (§16.9)
+runs unchanged; the encoder's input is a rotated copy of the
+rendered PCM:
+
+```
+rotated[n] = pcm[(n + rotation_offset) mod cycle_len_samples]
+```
+
+The encoder selects the `rotation_offset` that minimizes the
+loop-click metric (§10.6) under the lexicographic objective defined
+below. The chosen offset is reported in the encode report.
+
+The atom PCM SHAs (§16.9) are NOT affected by phase rotation —
+rotation operates on a transient encoder input, not on the stored
+atom render. This is the load-bearing invariant of the §16.9 atom
+PCM stability rule: M3 encoder work changes BRR outputs but never
+the rendered PCM the encoder consumes.
+
+**Candidate set.** The encoder considers only block-aligned rotation
+offsets:
+
+```
+candidate_offsets = [0, 16, 32, ..., cycle_len_samples - 16]
+```
+
+Yielding 4 candidates for cycle 64, 8 for cycle 128, 16 for cycle
+256. Non-block-aligned offsets are reserved for future encoder
+refinement (M4+).
+
+**Objective.** The encoder picks the offset minimizing this
+lexicographic tuple:
+
+```
+(loop_click_abs, peak_abs_error, rms_error, rotation_offset)
+```
+
+Lower is better at each level; later levels break ties at earlier
+levels. NOT a weighted score — audit-friendly and deterministic.
+
+```
+peak_abs_error = max_i(abs((decoded[i] as i32) - (rotated[i] as i32)))
+rms_error      = sqrt(mean_i(((decoded[i] as i32) - (rotated[i] as i32))^2))
+```
+
+Final tie-breaker: smaller `rotation_offset` wins (so the encoder
+defaults to no-rotation when all candidates score identically).
+
+**Reporting.** Encode reports include `rotation_offset` (u32) and
+`rotation_objective` (a struct of the four lexicographic components
+for diagnostics).
+
+**Bytecode / pitch invariance.** Phase rotation changes BRR sample
+phase only. It MUST NOT alter sequence bytecode, pitch register
+values, source index, or any event semantics — the contract is
+"same atom, better BRR".
+
+### 10.8 Predictor optimization (M3 conditional)
+
+**Definition.** Predictor optimization is BRR encoder search
+improvement at the per-block filter/shift decision layer. The M2.2
+encoder is greedy (§10.2): each block independently selects the
+filter/shift minimizing per-block error.
+
+**Optional M3.4 cross-block search.** A bounded beam (or
+Viterbi-style) search may improve loop-history behavior by
+considering N-block lookahead:
+
+```
+beam_width = 4 (recommended starting point)
+state      = previous decoded samples + cumulative score
+candidates = filter ∈ {0,1,2,3} × shift ∈ {0..12} per block
+score      = loop_click-aware + cumulative-error-aware
+```
+
+**Conditional ship.** M3.4 ships only if:
+
+1. M3.3 phase-rotation gains are insufficient against the M3.0
+   loop-click target, AND
+2. the beam search produces measurable additional improvement over
+   phase-rotation-alone, AND
+3. the search runtime stays bounded (engineer's call on the bound;
+   recommend ≤ 2× M2.2 encode time).
+
+If any of (1)/(2)/(3) is not met, M3.4 defers to M4 and M3 ships
+with M3.3 phase rotation only.
+
+**No source PCM changes.** Predictor optimization changes
+filter/shift selection only. Atom PCM SHAs (§16.9) and the render
+formula stay unchanged.
+
+### 10.9 Pre-emphasis (M3 stretch)
+
+Refines §10.5 into a milestone-bound contract.
+
+**Definition.** Pre-emphasis is a host-side filter applied to atom
+PCM before BRR encoding to compensate for S-DSP gaussian
+interpolation dulling on playback. Decode-side de-emphasis is NOT
+implemented (the SPC700 driver doesn't filter on decode; see SPEC
+§2 forbidden runtime features).
+
+**Characterization required first (M3.5).** Before any pre-emphasis
+preset ships, the encoder analysis pass must measure S-DSP gaussian
+dulling by comparing raw BRR decode (host-side, §10.1) vs snes_spc
+oracle render of the same SPC. The measurement characterizes a
+frequency-response curve that pre-emphasis presets target.
+
+**Presets only (M3.6, conditional).** If M3.5 characterization
+yields a clear target, M3.6 ships these presets (matching §10.5's
+preset names):
+
+```
+pre_emphasis: "off" | "gentle" | "strong"
+```
+
+Filter coefficients per preset are locked in SPEC at M3.6 land. No
+free EQ editor in M3 (or M4); §10.9 is preset-bound (SPEC §2
+forbids `free_eq_pre_emphasis_editor`).
+
+**Conditional ship.** M3.6 ships only if M3.5 characterization is
+clear and a preset audibly improves perceived quality without
+making atoms harsher. If unclear, M3.6 defers to M4.
+
+**Pre-emphasis interaction with phase rotation (§10.7) and predictor
+optimization (§10.8).** Pre-emphasis runs BEFORE rotation/predictor
+search; the encoder treats the pre-emphasized PCM as its new "input
+PCM" for those passes. The atom PCM stability rule (§16.9) gates on
+the rendered PCM before pre-emphasis — pre-emphasized PCM is a
+transient encoder input, not stored, and its SHAs are not pinned.
+
+**Pre-emphasis preset is per-atom**, declared in the
+`atom_pool[].pre_emphasis` field (default `"off"`). Schema rule
+finalized at M3.6 land.
+
 ---
 
 ## 11. Voice allocation and SFX
@@ -1164,6 +1359,30 @@ pcm_i16[n] = round_ties_away_from_zero(x[n] * amplitude * 32767)
 
 Encode through the existing M1 BRR encoder. M2 atoms do not use phase rotation, spectral scoring, or pre-emphasis; those land at M3+ alongside Level-1 synth atom mode.
 
+**Atom PCM stability across milestones (locked at M3.0).** The atom
+render formula above (f64 additive sum of partials, normalize-then-
+scale, round-half-away-from-zero, fixed cycle lengths {64, 128,
+256}) is locked at M2.0 and MUST NOT change at M3 or later
+milestones unless this section is explicitly reopened in a future
+PM-approved pass. Atom PCM SHAs are identity-gated across
+milestones; any drift indicates an unintentional change to the
+render formula and is a regression.
+
+The following PCM SHAs are stable across M2.0 → M3 → M4+:
+
+- `M2_ATOM_128_SINE_PCM_SHA256`
+- `M2_ATOM_64_SINE_PCM_SHA256`
+- (Plus any atom PCM SHAs added at M3.2 from expanded edge-case
+  coverage; M3.1 reclassifies the current entries from
+  `documentary_snapshot` to `identity_gated` in
+  `baselines/m3.json`.)
+
+BRR SHAs derived from these PCMs MAY shift across milestones. M3
+specifically targets BRR encoder quality (phase rotation §10.7,
+predictor optimization §10.8, pre-emphasis §10.9) — all of those
+change BRR bytes intentionally without touching the rendered PCM
+the encoder consumes.
+
 **`atom_sequences[]`:**
 
 ```json
@@ -1747,6 +1966,40 @@ The zero-crossing-rate ratio is the primary gate; the correlation check is infor
 **Deliverables:** two-oscillator patch editor with detune-constraint UI; collapsed periodic atom renderer; BRR atom encoder integration; atom quality report; pre-emphasis presets; calibration harness functional.
 
 **Acceptance:** two-oscillator patch compiles to a looped BRR source; generated atom plays through the sample playback path; compiler reports atom size, post-decode error, pre-emphasis selection; detune UI matches §8.3 (no silent quantization); harness produces stable measurements across the fixture set.
+
+**M3 baseline classification (locked at M3.0).** Mirrors the M2.8.1
+identity-pin pattern. Three categories:
+
+*Must NOT shift across M3 (regression if they do):*
+
+- All atom PCM SHAs (M2.2 fixtures + M3.2 additions); see §16.9.
+- `M2_CANONICAL_SEQUENCE_BYTECODE_SHA256`
+- `M2_CANONICAL_VOICE_SETUP_TABLE_SHA256`
+- `M2_CANONICAL_SEQUENCE_TOTAL_TICKS` / `_ELAPSED_TICKS`
+- `M1_DRIVER_CODE_SHA256`
+- `M1_LOADER_SIZE_BYTES` / `SHA256`
+
+*Expected to shift at M3 (intentional changes from §10.7–§10.9):*
+
+- All atom BRR SHAs (`M2_ATOM_*_BRR_SHA256`, etc.)
+- All `loop_click_score` snapshots
+- Decoded-BRR preview WAV SHAs (if any committed)
+
+*Must remain behaviorally passing across M3:*
+
+- M2 audibility floors (`max_abs >= 1000`, `rms >= 200`; §10.4)
+- M2 silence ceiling (`max_abs <= 50` on hard-panned silent channel)
+- M2 source-step zero-crossing ratio (≥ 1.5×)
+- M2 32 KiB module cap (§15.6)
+
+**M3 identity-gated baseline rule (carried from M2.8.1).** Every
+new `identity_gated` baseline added to `baselines/m3.json` MUST
+ship with a test that parses the baseline file via `include_str!`
+and asserts the generated value equals the baseline entry. No
+exception. This is the single rule the M2.8.1 audit
+(`m1_driver_code_sha_matches_locked_baseline` + the M2.8.2
+follow-up pass) was reverse-engineered to enforce; it is now a
+forward contract.
 
 ### M4 — Reaper-like sequencer
 
