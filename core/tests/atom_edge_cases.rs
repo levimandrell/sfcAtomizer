@@ -235,6 +235,26 @@ fn render(name: &str) -> AtomBrrOutput {
     render_to_brr(&atom).expect("render")
 }
 
+/// Reads the locked PCM SHA for a fixture from
+/// `baselines/m3.json::identity_gated`. Mirrors the M2.8.1 /
+/// M3.1 `include_str!` pattern.
+fn locked_pcm_sha(fixture_name: &str) -> String {
+    const BASELINES_JSON: &str = include_str!("../../baselines/m3.json");
+    let baselines: serde_json::Value =
+        serde_json::from_str(BASELINES_JSON).expect("baselines/m3.json must parse");
+    let entry_name = format!("M3_ATOM_{fixture_name}_PCM_SHA256");
+    let entry = baselines["identity_gated"]
+        .as_array()
+        .expect("baselines.identity_gated must be an array")
+        .iter()
+        .find(|e| e["name"].as_str() == Some(entry_name.as_str()))
+        .unwrap_or_else(|| panic!("baselines/m3.json missing identity_gated entry {entry_name}"));
+    entry["value"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{entry_name} value must be a string"))
+        .to_string()
+}
+
 // ---------------------------------------------------------------- special-case assertions
 
 /// amplitude_zero MUST produce all-zero PCM — load-bearing for the
@@ -328,5 +348,109 @@ fn harmonic_16_cycle_64_renders_with_finite_metric() {
     );
     // Loop click is a non-negative i32; assert defensively.
     assert!(out.loop_click_abs >= 0);
+}
+
+// ---------------------------------------------------------------- determinism
+
+/// Every fixture must produce bit-identical output across two
+/// consecutive `render_to_brr` calls. f64 reduction-order drift
+/// or HashMap-iteration nondeterminism would surface here.
+#[test]
+fn atom_edge_case_fixtures_render_deterministically() {
+    for (name, atom) in all_fixtures() {
+        let a = render_to_brr(&atom).expect("render a");
+        let b = render_to_brr(&atom).expect("render b");
+        assert_eq!(a.pcm, b.pcm, "{name}: pcm drift across two renders");
+        assert_eq!(a.brr_bytes, b.brr_bytes, "{name}: brr_bytes drift");
+        assert_eq!(a.pcm_sha256, b.pcm_sha256, "{name}: pcm_sha256 drift");
+        assert_eq!(a.brr_sha256, b.brr_sha256, "{name}: brr_sha256 drift");
+        assert_eq!(
+            a.decoded_brr_pcm_sha256, b.decoded_brr_pcm_sha256,
+            "{name}: decoded_brr_pcm_sha256 drift"
+        );
+        assert_eq!(
+            a.loop_click_abs, b.loop_click_abs,
+            "{name}: loop_click_abs drift"
+        );
+        assert_eq!(
+            a.loop_window_rms_delta.to_bits(),
+            b.loop_window_rms_delta.to_bits(),
+            "{name}: loop_window_rms_delta drift (bit comparison)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------- per-fixture identity-pin tests
+
+#[test]
+fn atom_pcm_sha_matches_locked_baseline_m3_amplitude_zero() {
+    assert_eq!(
+        render("AMPLITUDE_ZERO").pcm_sha256,
+        locked_pcm_sha("AMPLITUDE_ZERO")
+    );
+}
+
+#[test]
+fn atom_pcm_sha_matches_locked_baseline_m3_all_partials_zero_normalize_true() {
+    assert_eq!(
+        render("ALL_PARTIALS_ZERO_NORMALIZE_TRUE").pcm_sha256,
+        locked_pcm_sha("ALL_PARTIALS_ZERO_NORMALIZE_TRUE")
+    );
+}
+
+#[test]
+fn atom_pcm_sha_matches_locked_baseline_m3_two_partials_cancel_partially() {
+    assert_eq!(
+        render("TWO_PARTIALS_CANCEL_PARTIALLY").pcm_sha256,
+        locked_pcm_sha("TWO_PARTIALS_CANCEL_PARTIALLY")
+    );
+}
+
+#[test]
+fn atom_pcm_sha_matches_locked_baseline_m3_max_amplitude_no_normalize() {
+    assert_eq!(
+        render("MAX_AMPLITUDE_NO_NORMALIZE").pcm_sha256,
+        locked_pcm_sha("MAX_AMPLITUDE_NO_NORMALIZE")
+    );
+}
+
+#[test]
+fn atom_pcm_sha_matches_locked_baseline_m3_normalize_false_multi_partial_clamp_safety() {
+    assert_eq!(
+        render("NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY").pcm_sha256,
+        locked_pcm_sha("NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY")
+    );
+}
+
+#[test]
+fn atom_pcm_sha_matches_locked_baseline_m3_harmonic_16_cycle_64() {
+    assert_eq!(
+        render("HARMONIC_16_CYCLE_64").pcm_sha256,
+        locked_pcm_sha("HARMONIC_16_CYCLE_64")
+    );
+}
+
+#[test]
+fn atom_pcm_sha_matches_locked_baseline_m3_all_8_partials_max_amp_harmonics_1_to_8() {
+    assert_eq!(
+        render("ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8").pcm_sha256,
+        locked_pcm_sha("ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8")
+    );
+}
+
+#[test]
+fn atom_pcm_sha_matches_locked_baseline_m3_phase_cycles_0_9999() {
+    assert_eq!(
+        render("PHASE_CYCLES_0_9999").pcm_sha256,
+        locked_pcm_sha("PHASE_CYCLES_0_9999")
+    );
+}
+
+#[test]
+fn atom_pcm_sha_matches_locked_baseline_m3_cycle_256_canonical_sine() {
+    assert_eq!(
+        render("CYCLE_256_CANONICAL_SINE").pcm_sha256,
+        locked_pcm_sha("CYCLE_256_CANONICAL_SINE")
+    );
 }
 
