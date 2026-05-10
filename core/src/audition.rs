@@ -6,6 +6,13 @@
 //! Sample data is the raw 15-bit decoder output stored in `i16`
 //! (range −16384..=16383); no gain compensation is applied so the
 //! audition reflects what the S-DSP would emit at unity voice gain.
+//!
+//! ## Loop-click metrics (SPEC §10.6, M3.0)
+//!
+//! Two pure, encoder-independent measurement functions on raw
+//! BRR-decoded PCM. M3 sub-passes gate on `loop_click_abs`;
+//! `loop_window_rms_delta` is reports-only at M3 (may promote to a
+//! gate at M4+ after stabilizing). See SPEC §10.6 for the contract.
 
 use std::fs::File;
 use std::io::Write;
@@ -150,6 +157,61 @@ pub fn write_pcm16_mono_wav_pub(
         return Err(AuditionError::SampleRateOutOfRange(sample_rate_hz));
     }
     write_pcm16_mono_wav(out_path, samples, sample_rate_hz)
+}
+
+/// Loop-click gated metric per SPEC §10.6.
+///
+/// Computes `abs(decoded[loop_start] - decoded[loop_end - 1])` in
+/// widened `i32` arithmetic so i16-range inputs cannot overflow.
+/// Smaller is better; a perfect seam returns 0.
+///
+/// Panics on `loop_end == 0` or `loop_end > decoded.len()` or
+/// `loop_start >= loop_end` — all of which are bugs at the caller
+/// level (atom render formula in SPEC §16.9 guarantees a non-empty
+/// decoded buffer for valid `cycle_len_samples ∈ {64, 128, 256}`).
+pub fn loop_click_abs(decoded: &[i16], loop_start: usize, loop_end: usize) -> i32 {
+    assert!(loop_end > 0 && loop_end <= decoded.len() && loop_start < loop_end);
+    let a = decoded[loop_start] as i32;
+    let b = decoded[loop_end - 1] as i32;
+    (a - b).abs()
+}
+
+/// Loop-click diagnostic windowed metric per SPEC §10.6.
+///
+/// Compares the `window` samples immediately before `loop_end`
+/// against the `window` samples starting at `loop_start`. The
+/// per-sample squared difference is summed in `i64` (to avoid
+/// overflow on i16-range inputs — max `(2 * 32767)^2 * window ≈ 3.4 × 10^10`
+/// for window=8) and the final `sqrt` is computed once for report
+/// display. Reports-only at M3.0; not a gating metric.
+///
+/// Panics on `window == 0` or insufficient buffer length around
+/// either end of the loop region.
+pub fn loop_window_rms_delta(
+    decoded: &[i16],
+    loop_start: usize,
+    loop_end: usize,
+    window: usize,
+) -> f64 {
+    assert!(window > 0);
+    assert!(loop_end > 0 && loop_end <= decoded.len());
+    assert!(
+        loop_end >= window,
+        "window {window} exceeds loop_end {loop_end}"
+    );
+    assert!(
+        loop_start + window <= decoded.len(),
+        "post-window {window} starting at {loop_start} overruns decoded buffer of length {}",
+        decoded.len()
+    );
+    let mut sum_sq: i64 = 0;
+    for i in 0..window {
+        let pre = decoded[loop_end - window + i] as i32;
+        let post = decoded[loop_start + i] as i32;
+        let d = (pre - post) as i64;
+        sum_sq += d * d;
+    }
+    (sum_sq as f64).sqrt()
 }
 
 fn write_pcm16_mono_wav(
