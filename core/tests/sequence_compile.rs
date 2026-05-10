@@ -163,6 +163,30 @@ fn end_to_end_compile_sequence_canonical_byte_pinned() {
         out.bytecode[SEQUENCE_HEADER_LEN + out.bytecode_payload_len as usize - 1],
         0x00
     );
+
+    // M2.8.2 (consultant M2.8.1 follow-up audit): pin against
+    // baselines/m2.json so drift catches at the SHA layer alongside
+    // the byte-shape assertions. Mirrors the M2.8.1
+    // `m1_driver_code_sha_matches_locked_baseline` pattern.
+    const BASELINES_JSON: &str = include_str!("../../baselines/m2.json");
+    let baselines: serde_json::Value =
+        serde_json::from_str(BASELINES_JSON).expect("baselines/m2.json must parse");
+    let identity_gated = baselines["identity_gated"]
+        .as_array()
+        .expect("baselines.identity_gated must be an array");
+    let entry = identity_gated
+        .iter()
+        .find(|e| e["name"].as_str() == Some("M2_CANONICAL_SEQUENCE_BYTECODE_SHA256"))
+        .expect("baselines/m2.json must have M2_CANONICAL_SEQUENCE_BYTECODE_SHA256");
+    let locked_sha = entry["value"]
+        .as_str()
+        .expect("M2_CANONICAL_SEQUENCE_BYTECODE_SHA256 value must be a string");
+
+    assert_eq!(
+        out.bytecode_sha256, locked_sha,
+        "SEQ2 bytecode SHA drift vs baselines/m2.json — investigate before \
+         updating the baseline (locked at M2.4)."
+    );
 }
 
 #[test]
