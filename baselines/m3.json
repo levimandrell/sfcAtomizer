@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "report_type": "release_baselines",
+  "release": "v0.3-pre",
+  "milestone": "M3.0",
+  "_doc": "Machine-readable release baselines for M3 BRR encoder quality milestone. Currently scaffolded with prelude contracts; M3.1+ populates with metric and encoder-quality baselines. Inherits M2 baselines from baselines/m2.json by reference (M3 acceptance re-runs M2 acceptance gates per SPEC §21 M3 baseline classification). Three current classifications: identity_gated (any drift = regression), behavior_gated (numeric thresholds documenting policy), documentary_snapshot (informational; expected to shift on declared milestones).",
+  "inherits_m2": true,
+  "identity_gated": [],
+  "behavior_gated": [
+    {
+      "name": "M3_LOOP_CLICK_METRIC_GATING",
+      "value": "loop_click_abs",
+      "kind": "metric_name",
+      "locked_at": "M3.0",
+      "rule": "M3 sub-passes gate on loop_click_abs only (SPEC §10.6); loop_window_rms_delta is diagnostic-only (reports-only) and may promote to a gate at M4+ after the metric has stabilized"
+    },
+    {
+      "name": "M3_PHASE_ROTATION_OBJECTIVE",
+      "value": "lexicographic(loop_click_abs, peak_abs_error, rms_error, rotation_offset)",
+      "kind": "objective_function",
+      "locked_at": "M3.0",
+      "rule": "phase rotation candidate selection uses lexicographic ordering per SPEC §10.7, not a weighted score; smaller rotation_offset wins on full ties (defaulting to no-rotation)"
+    },
+    {
+      "name": "M3_PHASE_ROTATION_CANDIDATE_SET",
+      "value": "block_aligned_only",
+      "kind": "candidate_set",
+      "locked_at": "M3.0",
+      "rule": "candidate offsets are multiples of 16 only: 0, 16, 32, ..., cycle_len_samples - 16 (4 candidates for cycle 64, 8 for cycle 128, 16 for cycle 256); non-block-aligned reserved for M4+ per SPEC §10.7"
+    }
+  ],
+  "documentary_snapshot": [],
+  "retired": []
+}
