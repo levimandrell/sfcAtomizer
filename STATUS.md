@@ -2,34 +2,130 @@
 
 ## Current milestone
 
-**M3.0 — M3 contracts freeze.** Same shape as M2.0: lock the
-contracts that subsequent sub-passes will build against. No
-implementation work beyond a single fixture-pinned metric (the
-loop-click formula, gated before encoder optimization per
-consultant M2 close-out #25). Six new SPEC subsections, one
-amendment to §16.9, a new `baselines/m3.json` scaffold with the
-M3.0 behavior-gated entries, and five fixture tests pinning the
-loop-click metric formula independent of the encoder.
+**M3.1 — Loop-click metric implementation against M2 atoms +
+atom PCM SHA reclassification.** Applied the M3.0 SPEC §10.6
+metric to the existing M2 atom encode path, captured the
+pre-M3 baseline scores for the canonical sine_128 / sine_64
+fixtures, and reclassified the atom PCM SHAs from
+`documentary_snapshot` (M2.8.1-era `baselines/m2.json`) to
+`identity_gated` (new `baselines/m3.json`) per the SPEC §16.9
+atom PCM stability amendment locked at M3.0. No encoder
+changes; no phase rotation.
 
-527 tests workspace-wide (was 522 at M2.8.2; +5 from the new
-`core/tests/loop_click_metric.rs` formula fixtures). All 7
-identity_gated baselines in `baselines/m2.json` carry forward
-unchanged.
+**Reconciliation findings (both predictions confirmed):**
 
-**M3 sub-pass plan.** M3.1 metric implementation against the
-existing M2 atoms (records pre-M3 baseline); M3.2 atom edge cases;
-M3.3 phase rotation; M3.4 predictor optimization (conditional per
-SPEC §10.8); M3.5 Gaussian characterization; M3.6 pre-emphasis
-presets (conditional per SPEC §10.9); M3.7 GUI polish; M3.8
-acceptance + release.
+- M3.1 `loop_click_abs` values match the M2.2 internal
+  `loop_click_score` exactly: 128-sample atom = 1197, 64-sample
+  atom = 2407. Same formula
+  (`|decoded[loop_start] - decoded[loop_end - 1]|`); M3.1 promotes
+  it from an encoder-internal `f64` field to a SPEC-defined `i32`
+  metric on the decoded BRR PCM (§10.6).
+- Atom PCM SHAs at M3.1 match the M2.2-recorded values exactly:
+  128 = `7f9b274e...f9789a`, 64 = `0638ddfe...3e6565`. Atom render
+  formula has not shifted since M2.0 — the §16.9 amendment now
+  enforces this with two new `include_str!`-based identity tests
+  reading `baselines/m3.json`.
 
-Release tag policy: v0.3-rc1 only after M3.8 close + integrity
-audit (M2 lessons — M2.8.1 / M2.8.2).
+529 tests workspace-wide (was 527 at M3.0; +2 from
+`core/tests/atom_render.rs`'s two new
+`atom_pcm_sha_matches_locked_baseline_m3_*` tests). One new
+`#[ignore]` test (`m3_atom_print_baselines`) prints the M3.1
+captured values for baseline collection (2 ignored total
+workspace-wide).
 
-**M3.1 next.** Loop-click metric implementation against existing
-M2 atoms (record pre-M3 baseline). PM to brief at M3.1 entry.
+**M3.2 next.** Atom edge case fixture coverage (consultant M3
+plan #19, #26). PM to brief at M3.2 entry.
 
 ## Last pass
+
+**Pass M3.1 — Loop-click metric implementation + atom PCM
+reclassification.**
+
+Five phases, all metric-wiring / baseline reclassification.
+
+- **Phase A:** wired `loop_click_abs` (i32, gated) +
+  `loop_window_rms_delta` (f64, diagnostic) +
+  `decoded_brr_pcm_sha256` (String) into `AtomBrrOutput` and
+  `AtomRenderReport`. `render_to_brr` decodes the freshly
+  encoded BRR bytes back to PCM via
+  `crate::brr::decode_blocks` and computes the two SPEC §10.6
+  metrics on the result. Atoms loop sample 0 .. cycle_len, so
+  both metrics use the full decoded buffer with
+  `loop_start = 0`. `AtomRenderReport`'s three new fields use
+  `#[serde(default)]` for back-compat with pre-M3.1 serialized
+  reports.
+- **Phase B:** ran the canonical sine_128 / sine_64 fixtures
+  through `render_to_brr` and captured M3.1 baseline values:
+  - `loop_click_abs`: 128 = 1197, 64 = 2407 (i32).
+  - `loop_window_rms_delta`: 128 ≈ 26745.84, 64 ≈ 51285.13 (f64).
+  - `decoded_brr_pcm_sha256`: 128 = `de7c89ad...11880bb1`,
+    64 = `9c4a231d...cc9b0ec4`.
+- **Phase C:** moved `M2_ATOM_128_SINE_PCM_SHA256` and
+  `M2_ATOM_64_SINE_PCM_SHA256` from
+  `baselines/m2.json::documentary_snapshot` to
+  `baselines/m3.json::identity_gated`. `baselines/m2.json` gains
+  a `_migrated_to_m3` field documenting the move and the
+  `_doc` field is updated. Two new integration tests in
+  `core/tests/atom_render.rs`
+  (`atom_pcm_sha_matches_locked_baseline_m3_canonical_128_sine`
+  and `_64_sine`) read the locked SHA from `baselines/m3.json`
+  via `include_str!` + `serde_json` and assert
+  `render_to_brr` produces the same value — mirrors the M2.8.1
+  `m1_driver_code_sha_matches_locked_baseline` pattern.
+- **Phase D:** locked the Phase B values as
+  `documentary_snapshot` entries in `baselines/m3.json`. Six
+  entries: `M3_ATOM_{128,64}_SINE_LOOP_CLICK_ABS_PRE_M3`,
+  `M3_ATOM_{128,64}_SINE_LOOP_WINDOW_RMS_DELTA_PRE_M3`,
+  `M3_ATOM_{128,64}_SINE_DECODED_BRR_PCM_SHA256_PRE_M3`. M3.3
+  phase rotation will compare against these — the
+  `loop_click_abs` entries are the "must improve" target; the
+  RMS deltas are diagnostic; the decoded-BRR-PCM SHAs are the
+  surface phase rotation will shift intentionally.
+- **Phase E (this entry).**
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **529 tests
+  workspace-wide** (was 527 at M3.0; +2 from the two new
+  atom PCM SHA identity tests).
+
+### Decisions log additions (M3.1)
+
+- M3.1 metric wiring: `loop_click_abs` (i32, gated per SPEC
+  §10.6) + `loop_window_rms_delta` (f64, diagnostic) +
+  `decoded_brr_pcm_sha256` (String) added to `AtomBrrOutput`
+  and `AtomRenderReport`. Three new fields on
+  `AtomRenderReport` use `#[serde(default)]` for back-compat.
+- Pre-M3 baseline scores recorded for canonical sine_128 and
+  sine_64 atoms in `baselines/m3.json::documentary_snapshot`.
+  These are the "before phase rotation" measurements; M3.3
+  phase rotation MUST produce `loop_click_abs <=` the pre-M3
+  values for lexicographic improvement per SPEC §10.7.
+- Atom PCM SHAs reclassified from `documentary_snapshot`
+  (`baselines/m2.json`) to `identity_gated`
+  (`baselines/m3.json`) per the SPEC §16.9 M3.0 amendment.
+  Two `include_str!`-based identity tests added at
+  integration-test scope (`core/tests/atom_render.rs`).
+  `baselines/m2.json` gains a `_migrated_to_m3` field; the
+  M2.2 in-module `m2_atom_render_baselines_locked` test
+  (literal-string SHA assertion) is retained as defense in
+  depth.
+- M3.1 reconciliation report:
+  - `loop_click_abs` values (1197, 2407) **match** the M2.2
+    `loop_click_score` values exactly. Same formula; M3.1
+    promotes it from encoder-internal to a SPEC-defined
+    metric on the decoded BRR PCM. The M2.2 baselines remain
+    in `baselines/m2.json::documentary_snapshot` (now
+    redundant — same number, different name); they don't get
+    retired this pass since the M2.2 entry covers the encoder
+    internal field and the M3.1 entry covers the SPEC §10.6
+    metric, and the brief forbids relaxing any M2 baseline.
+  - Atom PCM SHAs **match** the M2.2-recorded values exactly.
+    No render formula drift since M2.0. The §16.9 amendment
+    is now enforced by include_str! tests.
+- No encoder changes (phase rotation, predictor, pre-emphasis
+  all defer to later sub-passes per SPEC §10.7-§10.9).
+
+## Previous passes
 
 **Pass M3.0 — M3 contracts freeze.**
 
