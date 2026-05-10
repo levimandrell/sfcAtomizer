@@ -413,4 +413,28 @@ fn voice_setup_table_byte_pinned_abi() {
         &expected[..],
         "voice setup table ABI drift: expected {expected:?}, got {actual:?}"
     );
+
+    // M2.8.2 (consultant M2.8.1 follow-up audit): standardize the
+    // identity-pin pattern on baselines/m2.json. The byte-vector
+    // assertion above documents the ABI directly; the SHA assertion
+    // catches future drift via the baseline file (single source of
+    // truth alongside the M1 driver / SEQ2 bytecode pins).
+    let actual_sha = sfc_atomizer_core::asm::sha256_hex(actual);
+    const BASELINES_JSON: &str = include_str!("../../baselines/m2.json");
+    let baselines: serde_json::Value =
+        serde_json::from_str(BASELINES_JSON).expect("baselines/m2.json must parse");
+    let entry = baselines["identity_gated"]
+        .as_array()
+        .expect("baselines.identity_gated must be an array")
+        .iter()
+        .find(|e| e["name"].as_str() == Some("M2_CANONICAL_VOICE_SETUP_TABLE_SHA256"))
+        .expect("M2_CANONICAL_VOICE_SETUP_TABLE_SHA256 missing from baselines");
+    let locked_sha = entry["value"]
+        .as_str()
+        .expect("M2_CANONICAL_VOICE_SETUP_TABLE_SHA256 value must be a string");
+    assert_eq!(
+        actual_sha, locked_sha,
+        "voice setup table SHA drift vs baselines/m2.json — investigate before \
+         updating the baseline (locked at M2.4)."
+    );
 }

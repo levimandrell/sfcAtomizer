@@ -664,6 +664,23 @@ mod tests {
         Driver, Envelope, MasterEcho, Project, SampleFormat, SampleLoop, SamplePlayback,
         SampleSlot, SampleSource,
     };
+    /// M2.8.2: parse an identity-gated scalar from baselines/m2.json
+    /// by name. Returns the raw `serde_json::Value` so callers can
+    /// cast to whichever numeric type their test expects.
+    fn baseline_scalar(name: &str) -> serde_json::Value {
+        const BASELINES_JSON: &str = include_str!("../../baselines/m2.json");
+        let baselines: serde_json::Value =
+            serde_json::from_str(BASELINES_JSON).expect("baselines/m2.json must parse");
+        baselines["identity_gated"]
+            .as_array()
+            .expect("baselines.identity_gated must be an array")
+            .iter()
+            .find(|e| e["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("baselines/m2.json missing identity_gated entry {name}"))
+            ["value"]
+            .clone()
+    }
+
     use crate::project_v2::{
         AtomSequenceStep, AtomTransition, M2Block, ProjectV2, Track, TrackKind,
     };
@@ -933,7 +950,14 @@ mod tests {
         // sum-of-WAIT-operands across all five WAITs in the canonical
         // 2-step sequence — step 0 sustain 120; step 1 fade-out 4 +
         // gap 1 + fade-in 4 + sustain 120 = 129.
-        assert_eq!(out.total_ticks, 120 + 4 + 1 + 4 + 120);
+        // M2.8.2: read from baselines/m2.json instead of hardcoding,
+        // so the baseline file is the single source of truth.
+        let locked = baseline_scalar("M2_CANONICAL_SEQUENCE_TOTAL_TICKS")
+            .as_u64()
+            .expect("M2_CANONICAL_SEQUENCE_TOTAL_TICKS must be an integer")
+            as u32;
+        assert_eq!(out.total_ticks, locked);
+        assert_eq!(locked, 120 + 4 + 1 + 4 + 120);
     }
 
     /// M2.8 (consultant #1): wall-elapsed tick count under SPEC §14.3
@@ -944,9 +968,20 @@ mod tests {
     #[test]
     fn total_elapsed_ticks_includes_resume_tick_per_wait() {
         let out = compile_canonical();
-        assert_eq!(out.total_ticks, 249);
+        // M2.8.2: read both scalars from baselines/m2.json so the
+        // baseline file is the single source of truth for the locked
+        // tick counts.
+        let locked_total = baseline_scalar("M2_CANONICAL_SEQUENCE_TOTAL_TICKS")
+            .as_u64()
+            .expect("M2_CANONICAL_SEQUENCE_TOTAL_TICKS must be an integer")
+            as u32;
+        let locked_elapsed = baseline_scalar("M2_CANONICAL_SEQUENCE_ELAPSED_TICKS")
+            .as_u64()
+            .expect("M2_CANONICAL_SEQUENCE_ELAPSED_TICKS must be an integer")
+            as u32;
+        assert_eq!(out.total_ticks, locked_total);
         assert_eq!(
-            out.total_elapsed_ticks, 254,
+            out.total_elapsed_ticks, locked_elapsed,
             "elapsed = sum-of-waits + n_waits = 249 + 5"
         );
     }
