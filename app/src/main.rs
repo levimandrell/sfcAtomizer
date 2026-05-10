@@ -2606,6 +2606,9 @@ fn atom_render_report(atom: &AtomSlot, render: &AtomBrrOutput) -> AtomRenderRepo
         brr_sha256: render.brr_sha256.clone(),
         brr_bytes: render.brr_bytes.len() as u32,
         encode_summary: render.encode_summary,
+        decoded_brr_pcm_sha256: render.decoded_brr_pcm_sha256.clone(),
+        loop_click_abs: render.loop_click_abs,
+        loop_window_rms_delta: render.loop_window_rms_delta,
     }
 }
 

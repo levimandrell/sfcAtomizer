@@ -101,6 +101,21 @@ pub struct AtomBrrOutput {
     pub encode_blocks: Vec<EncodedBlockReport>,
     pub pcm_sha256: String,
     pub brr_sha256: String,
+    /// M3.1: SHA-256 of the decoded-from-BRR PCM (little-endian i16
+    /// bytes). This is the surface SPEC §10.7 phase rotation will
+    /// shift in M3.3; tracked from M3.1 onward so the pre-rotation
+    /// value is locked in `baselines/m3.json::documentary_snapshot`.
+    pub decoded_brr_pcm_sha256: String,
+    /// M3.1: gated loop-click metric per SPEC §10.6 on the
+    /// decoded-from-BRR PCM. Atoms loop sample 0 .. cycle_len, so
+    /// this is `|decoded[0] - decoded[cycle_len - 1]|` widened to
+    /// `i32`. Smaller is better; M3.3 phase rotation MUST produce
+    /// ≤ this value.
+    pub loop_click_abs: i32,
+    /// M3.1: diagnostic windowed loop-click metric per SPEC §10.6
+    /// with `window = 8`. Reports-only at M3 (may promote to a
+    /// gate at M4+ after the metric has stabilized).
+    pub loop_window_rms_delta: f64,
 }
 
 /// Render an atom's PCM cycle per SPEC §16.9 (single-cycle additive
@@ -175,6 +190,27 @@ pub fn render_to_brr(atom: &AtomSlot) -> Result<AtomBrrOutput, AtomRenderError> 
         .expect("encode_looped is infallible at loop_start=0 for valid atoms");
 
     let brr_sha256 = crate::asm::sha256_hex(&result.bytes);
+
+    // M3.1: decode the BRR bytes back to PCM and compute the
+    // SPEC §10.6 loop-click metrics on the decoded waveform. Atoms
+    // loop sample 0 .. cycle_len_samples (single-cycle, looped
+    // from block 0); both metrics use the full decoded buffer.
+    let blocks: Vec<[u8; 9]> = result
+        .bytes
+        .chunks_exact(9)
+        .map(|c| {
+            let mut b = [0u8; 9];
+            b.copy_from_slice(c);
+            b
+        })
+        .collect();
+    let mut decode_state = crate::brr::BrrDecoderState::default();
+    let decoded = crate::brr::decode_blocks(&blocks, &mut decode_state);
+    let decoded_brr_pcm_sha256 = sha256_hex_i16(&decoded);
+    let loop_click_abs = crate::audition::loop_click_abs(&decoded, 0, decoded.len());
+    let loop_window_rms_delta =
+        crate::audition::loop_window_rms_delta(&decoded, 0, decoded.len(), 8);
+
     Ok(AtomBrrOutput {
         pcm,
         brr_bytes: result.bytes,
@@ -182,6 +218,9 @@ pub fn render_to_brr(atom: &AtomSlot) -> Result<AtomBrrOutput, AtomRenderError> 
         encode_blocks: result.blocks,
         pcm_sha256,
         brr_sha256,
+        decoded_brr_pcm_sha256,
+        loop_click_abs,
+        loop_window_rms_delta,
     })
 }
 
@@ -621,6 +660,41 @@ mod tests {
         eprintln!(
             "M2_ATOM_64_SINE_LOOP_CLICK_SCORE  = {}",
             out_64.encode_summary.loop_click_score.unwrap()
+        );
+    }
+
+    /// M3.1 sentinel that prints the canonical atoms' new
+    /// SPEC §10.6 loop-click metrics and the decoded-from-BRR PCM
+    /// SHA. Run with `cargo test -p sfc-atomizer-core --lib
+    /// m3_atom_print -- --nocapture --ignored`.
+    #[test]
+    #[ignore]
+    fn m3_atom_print_baselines() {
+        let out_128 = render_to_brr(&canonical_sine_atom(128)).expect("render");
+        let out_64 = render_to_brr(&canonical_sine_atom(64)).expect("render");
+        eprintln!(
+            "M3_ATOM_128_SINE_LOOP_CLICK_ABS_PRE_M3 = {}",
+            out_128.loop_click_abs
+        );
+        eprintln!(
+            "M3_ATOM_64_SINE_LOOP_CLICK_ABS_PRE_M3  = {}",
+            out_64.loop_click_abs
+        );
+        eprintln!(
+            "M3_ATOM_128_SINE_LOOP_WINDOW_RMS_DELTA_PRE_M3 = {}",
+            out_128.loop_window_rms_delta
+        );
+        eprintln!(
+            "M3_ATOM_64_SINE_LOOP_WINDOW_RMS_DELTA_PRE_M3  = {}",
+            out_64.loop_window_rms_delta
+        );
+        eprintln!(
+            "M3_ATOM_128_SINE_DECODED_BRR_PCM_SHA256_PRE_M3 = {}",
+            out_128.decoded_brr_pcm_sha256
+        );
+        eprintln!(
+            "M3_ATOM_64_SINE_DECODED_BRR_PCM_SHA256_PRE_M3  = {}",
+            out_64.decoded_brr_pcm_sha256
         );
     }
 

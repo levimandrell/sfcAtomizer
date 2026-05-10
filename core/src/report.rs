@@ -759,6 +759,21 @@ pub struct AtomRenderReport {
     pub brr_sha256: String,
     pub brr_bytes: u32,
     pub encode_summary: crate::brr_encoder::EncodeSummary,
+    /// M3.1: SHA-256 of the decoded-from-BRR PCM (little-endian i16
+    /// bytes). The surface phase rotation (SPEC §10.7) will shift
+    /// at M3.3; tracked from M3.1 onward. Defaulted on deserialize
+    /// for back-compat with pre-M3.1 reports.
+    #[serde(default)]
+    pub decoded_brr_pcm_sha256: String,
+    /// M3.1: gated loop-click metric per SPEC §10.6, computed on
+    /// the decoded-from-BRR PCM. M3.3 phase rotation MUST produce
+    /// ≤ this value.
+    #[serde(default)]
+    pub loop_click_abs: i32,
+    /// M3.1: diagnostic windowed loop-click metric per SPEC §10.6
+    /// with `window = 8`. Reports-only at M3.
+    #[serde(default)]
+    pub loop_window_rms_delta: f64,
 }
 
 impl AtomRenderReport {
@@ -1995,6 +2010,9 @@ mod tests {
                 filter_distribution: [3, 2, 2, 1],
                 loop_click_score: Some(1197.0),
             },
+            decoded_brr_pcm_sha256: "c".repeat(64),
+            loop_click_abs: 1197,
+            loop_window_rms_delta: 2262.74,
         };
         round_trip(&r);
     }
@@ -2024,6 +2042,9 @@ mod tests {
                 filter_distribution: [4, 0, 0, 0],
                 loop_click_score: None,
             },
+            decoded_brr_pcm_sha256: String::new(),
+            loop_click_abs: 0,
+            loop_window_rms_delta: 0.0,
         };
         round_trip(&r);
     }
