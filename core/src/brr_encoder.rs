@@ -382,6 +382,234 @@ fn best_nibble_for(target_shifted: i32, shift: u8) -> i8 {
     best_n
 }
 
+// =====================================================================
+// M4.4 — Encoder improvement spike (research-spike per SPEC §24.1)
+// =====================================================================
+//
+// Feature-flagged beam-search encoder. Not wired into production
+// `render_to_brr` at the spike's measurement phase. Tests invoke it
+// directly to evaluate against the SPEC §24.1 exit criterion.
+
+/// M4.4 spike configuration. Strategy not locked at M4.0 contract;
+/// engineer's choice per consultant M4 plan #10.
+#[derive(Debug, Clone, Copy)]
+pub struct M44SpikeConfig {
+    pub strategy: M44Strategy,
+}
+
+/// M4.4 spike strategies. M4.4 adds the beam-search variant; future
+/// passes may add more.
+#[derive(Debug, Clone, Copy)]
+pub enum M44Strategy {
+    /// Cross-block beam search (the M3.4-deferred predictor
+    /// optimization per consultant M3.3 audit #21). `beam_width`
+    /// candidates carried block-to-block; pruning by
+    /// `(cumulative_sum_sq, cumulative_peak)` lex order. Score
+    /// targets RMS primary, peak secondary — matches the SPEC §24.1
+    /// exit criterion (`≥10% rms_raw_vs_source` OR
+    /// `peak_abs_raw_vs_source`).
+    BeamSearch { beam_width: u32 },
+}
+
+/// M4.4 spike entry. Mirrors `encode_looped` interface; same
+/// `loop_start_sample` validation; emits the same `EncodeResult`
+/// shape so downstream code (decoder, noise-floor metric helpers)
+/// is unchanged.
+pub fn encode_looped_m4_4_spike(
+    samples: &[i16],
+    loop_start_sample: u32,
+    options: &EncodeOptions,
+    spike_config: &M44SpikeConfig,
+) -> Result<EncodeResult, EncodeError> {
+    if !loop_start_sample.is_multiple_of(16) {
+        return Err(EncodeError::LoopStartNotAligned(loop_start_sample));
+    }
+    if (loop_start_sample as usize) >= samples.len() {
+        return Err(EncodeError::LoopStartOutOfRange {
+            start: loop_start_sample,
+            len: samples.len() as u32,
+        });
+    }
+    let mut opts = *options;
+    opts.loop_entry_block_index = Some(loop_start_sample / 16);
+
+    match spike_config.strategy {
+        M44Strategy::BeamSearch { beam_width } => {
+            beam_search_encode(samples, Some(loop_start_sample), &opts, beam_width.max(1))
+        }
+    }
+}
+
+/// One beam-search candidate. Each carries the bytes + per-block
+/// reports + decoder state + accumulated scoring info needed to
+/// extend it through the next block.
+#[derive(Clone)]
+struct BeamCandidate {
+    bytes: Vec<u8>,
+    blocks: Vec<EncodedBlockReport>,
+    state: BrrDecoderState,
+    sum_sq: u128,
+    peak: u32,
+    clamps: u32,
+    filter_dist: [u32; 4],
+    /// Decoded sample at the start of the loop-entry block (the
+    /// sample the S-DSP returns to on KOFF). Tracked across the
+    /// whole encode; set when the loop-entry block is processed.
+    loop_entry_first_decoded: Option<i16>,
+    /// Last decoded sample in the most recently encoded block (the
+    /// sample whose continuity with `loop_entry_first_decoded`
+    /// determines the loop-click).
+    last_decoded: Option<i16>,
+}
+
+fn beam_search_encode(
+    samples: &[i16],
+    loop_start: Option<u32>,
+    options: &EncodeOptions,
+    beam_width: u32,
+) -> Result<EncodeResult, EncodeError> {
+    if samples.is_empty() {
+        return Ok(EncodeResult {
+            bytes: Vec::new(),
+            blocks: Vec::new(),
+            summary: EncodeSummary {
+                total_blocks: 0,
+                encoded_bytes: 0,
+                overall_rms_error: 0.0,
+                overall_peak_error: 0,
+                total_clamp_count: 0,
+                filter_distribution: [0; 4],
+                loop_click_score: None,
+            },
+        });
+    }
+
+    let total_blocks = samples.len().div_ceil(16) as u32;
+    let beam_width = beam_width as usize;
+
+    // Initial beam: one empty candidate.
+    let mut beam: Vec<BeamCandidate> = vec![BeamCandidate {
+        bytes: Vec::with_capacity(total_blocks as usize * 9),
+        blocks: Vec::with_capacity(total_blocks as usize),
+        state: BrrDecoderState::default(),
+        sum_sq: 0,
+        peak: 0,
+        clamps: 0,
+        filter_dist: [0; 4],
+        loop_entry_first_decoded: None,
+        last_decoded: None,
+    }];
+
+    for block_idx in 0..total_blocks {
+        let mut source_block = [0i16; 16];
+        let start = block_idx as usize * 16;
+        let end = (start + 16).min(samples.len());
+        source_block[..end - start].copy_from_slice(&samples[start..end]);
+
+        let is_first_block = block_idx == 0;
+        let is_loop_entry = options.loop_entry_block_index == Some(block_idx);
+        let force_filter0 = (is_first_block && options.force_filter_0_first_block) || is_loop_entry;
+
+        let is_last_block = block_idx == total_blocks - 1;
+        let end_flag = is_last_block;
+        let loop_flag = is_last_block && loop_start.is_some();
+
+        // Expand each beam candidate to every (filter, shift) pair.
+        let filter_range: &[u8] = if force_filter0 { &[0] } else { &[0, 1, 2, 3] };
+        let mut next_beam: Vec<BeamCandidate> =
+            Vec::with_capacity(beam.len() * filter_range.len() * 13);
+        for parent in &beam {
+            for &filter in filter_range {
+                for shift in 0u8..=12 {
+                    let trial = encode_one_filter_shift(
+                        &source_block,
+                        parent.state,
+                        filter,
+                        shift,
+                        end_flag,
+                        loop_flag,
+                    );
+                    let mut child = parent.clone();
+                    child.bytes.extend_from_slice(&trial.block);
+                    child.blocks.push(EncodedBlockReport {
+                        index: block_idx,
+                        filter: trial.filter,
+                        shift: trial.shift,
+                        end_flag,
+                        loop_flag,
+                        block_rms_error: trial.rms,
+                        block_peak_error: trial.peak,
+                        block_clamp_count: trial.clamps,
+                    });
+                    child.state = trial.new_state;
+                    child.sum_sq += trial.sum_sq;
+                    if trial.peak > child.peak {
+                        child.peak = trial.peak;
+                    }
+                    child.clamps += trial.clamps;
+                    child.filter_dist[trial.filter as usize] += 1;
+                    if is_loop_entry {
+                        child.loop_entry_first_decoded = Some(trial.first_decoded);
+                    }
+                    child.last_decoded = Some(trial.last_decoded);
+                    next_beam.push(child);
+                }
+            }
+        }
+
+        // Prune: keep the `beam_width` lowest-`sum_sq` candidates;
+        // tie-break by lowest peak; final tie-break by the
+        // accumulated bytes (deterministic across runs).
+        next_beam.sort_by(|a, b| {
+            a.sum_sq
+                .cmp(&b.sum_sq)
+                .then(a.peak.cmp(&b.peak))
+                .then(a.bytes.cmp(&b.bytes))
+        });
+        next_beam.truncate(beam_width);
+        beam = next_beam;
+    }
+
+    // Pick the best survivor.
+    let best = beam
+        .into_iter()
+        .min_by(|a, b| {
+            a.sum_sq
+                .cmp(&b.sum_sq)
+                .then(a.peak.cmp(&b.peak))
+                .then(a.bytes.cmp(&b.bytes))
+        })
+        .expect("beam never empty");
+
+    let total_samples = (total_blocks as u128) * 16;
+    let overall_rms = if total_samples > 0 {
+        ((best.sum_sq as f64) / (total_samples as f64)).sqrt()
+    } else {
+        0.0
+    };
+    let loop_click_score = match (loop_start, best.loop_entry_first_decoded, best.last_decoded) {
+        (Some(_), Some(first), Some(last)) => {
+            let diff = first as i32 - last as i32;
+            Some(diff.abs() as f64)
+        }
+        _ => None,
+    };
+    let summary = EncodeSummary {
+        total_blocks,
+        encoded_bytes: total_blocks * 9,
+        overall_rms_error: overall_rms,
+        overall_peak_error: best.peak,
+        total_clamp_count: best.clamps,
+        filter_distribution: best.filter_dist,
+        loop_click_score,
+    };
+    Ok(EncodeResult {
+        bytes: best.bytes,
+        blocks: best.blocks,
+        summary,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
