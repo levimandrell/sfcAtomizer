@@ -108,6 +108,28 @@ struct SfcwcApp {
 
     // One-shot status message (e.g. "loaded /tmp/x.json").
     status_message: Option<String>,
+
+    /// M3.7: snapshot of the M3.1 + M3.3 metric fields from the last
+    /// successful atom preview render. The atom-edit panel reads
+    /// this back to surface `loop_click_abs`, `rotation_offset`,
+    /// `peak_abs_error_post_rotation`, and `rms_error_post_rotation`
+    /// alongside the existing preview button. Cleared on project
+    /// switch (load / new / close).
+    last_atom_preview: Option<AtomPreviewSnapshot>,
+}
+
+/// M3.7: cached metric readout from the last atom preview render
+/// (`core::atom::render_to_brr`). The atom-edit panel matches on
+/// `atom_id` so switching the selected atom hides the readout
+/// until the user previews the new atom.
+#[derive(Debug, Clone)]
+struct AtomPreviewSnapshot {
+    atom_id: String,
+    cycle_len_samples: u16,
+    loop_click_abs: i32,
+    rotation_offset: u32,
+    peak_abs_error_post_rotation: i32,
+    rms_error_post_rotation: f64,
 }
 
 #[derive(Default)]
@@ -666,6 +688,7 @@ impl SfcwcApp {
         let last_sfc_verify_summary = self.last_sfc_verify_summary.clone();
         let last_sfc_verify_ok = self.last_sfc_verify_ok;
         let has_compiled_sfc = self.last_compiled_sfc.is_some();
+        let last_atom_preview = self.last_atom_preview.clone();
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(project) = self.project.as_mut() {
                 match selected.as_deref() {
@@ -721,6 +744,7 @@ impl SfcwcApp {
                                 last_sfc_verify_summary: last_sfc_verify_summary.as_deref(),
                                 last_sfc_verify_ok,
                                 has_compiled_sfc,
+                                last_atom_preview: last_atom_preview.as_ref(),
                             },
                         );
                     }
@@ -855,6 +879,16 @@ impl SfcwcApp {
                     self.status_message = Some("preview: empty atom PCM".to_string());
                     return;
                 }
+                // M3.7: cache the M3.1 + M3.3 metric fields so the
+                // atom-edit panel can surface them next frame.
+                self.last_atom_preview = Some(AtomPreviewSnapshot {
+                    atom_id: atom.id.clone(),
+                    cycle_len_samples: atom.cycle_len_samples,
+                    loop_click_abs: out.loop_click_abs,
+                    rotation_offset: out.rotation_offset,
+                    peak_abs_error_post_rotation: out.peak_abs_error_post_rotation,
+                    rms_error_post_rotation: out.rms_error_post_rotation,
+                });
                 let mut looped: Vec<i16> = Vec::with_capacity(target_frames);
                 while looped.len() < target_frames {
                     looped.extend_from_slice(&out.pcm);
@@ -1783,6 +1817,12 @@ struct V2ProjectDetailState<'a> {
     last_sfc_verify_summary: Option<&'a str>,
     last_sfc_verify_ok: Option<bool>,
     has_compiled_sfc: bool,
+    /// M3.7: most recent atom preview render's M3.1 / M3.3 metric
+    /// snapshot. Plumbed from `SfcwcApp::last_atom_preview` so the
+    /// atom-edit panel can surface `loop_click_abs`,
+    /// `rotation_offset`, and the post-rotation peak / rms errors
+    /// alongside the existing Preview button.
+    last_atom_preview: Option<&'a AtomPreviewSnapshot>,
 }
 
 fn draw_v2_project_detail(
@@ -1801,6 +1841,7 @@ fn draw_v2_project_detail(
         last_sfc_verify_summary,
         last_sfc_verify_ok,
         has_compiled_sfc,
+        last_atom_preview,
     } = s;
     let mut resp = ProjectDetailResponse::default();
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1907,7 +1948,9 @@ fn draw_v2_project_detail(
         ui.add_space(8.0);
         ui.separator();
         let preview_idx = ui
-            .collapsing("Atom Pool", |ui| draw_atom_pool_editor(ui, model))
+            .collapsing("Atom Pool", |ui| {
+                draw_atom_pool_editor(ui, model, last_atom_preview)
+            })
             .body_returned
             .flatten();
         if let Some(idx) = preview_idx {
@@ -2019,7 +2062,11 @@ fn draw_v2_project_detail(
 // M2.7 — atom / sequence / track editors
 // =============================================================================
 
-fn draw_atom_pool_editor(ui: &mut egui::Ui, model: &mut v2_editor::V2EditorModel) -> Option<usize> {
+fn draw_atom_pool_editor(
+    ui: &mut egui::Ui,
+    model: &mut v2_editor::V2EditorModel,
+    last_atom_preview: Option<&AtomPreviewSnapshot>,
+) -> Option<usize> {
     let mut preview_clicked: Option<usize> = None;
     ui.horizontal(|ui| {
         if ui.button("Add atom").clicked() {
@@ -2077,13 +2124,18 @@ fn draw_atom_pool_editor(ui: &mut egui::Ui, model: &mut v2_editor::V2EditorModel
     if let Some(idx) = model.selected_atom {
         if idx < model.project.atom_pool.len() {
             ui.separator();
-            draw_atom_edit_panel(ui, model, idx);
+            draw_atom_edit_panel(ui, model, idx, last_atom_preview);
         }
     }
     preview_clicked
 }
 
-fn draw_atom_edit_panel(ui: &mut egui::Ui, model: &mut v2_editor::V2EditorModel, idx: usize) {
+fn draw_atom_edit_panel(
+    ui: &mut egui::Ui,
+    model: &mut v2_editor::V2EditorModel,
+    idx: usize,
+    last_atom_preview: Option<&AtomPreviewSnapshot>,
+) {
     let mut changed = false;
     egui::Grid::new(format!("atom_edit_{idx}"))
         .num_columns(2)
@@ -2239,6 +2291,62 @@ fn draw_atom_edit_panel(ui: &mut egui::Ui, model: &mut v2_editor::V2EditorModel,
     }
     if changed {
         model.mark_dirty();
+    }
+
+    // ---- M3.7: last-preview metric readout ----
+    //
+    // Show the M3.1 + M3.3 metrics captured by the most recent
+    // Preview render, if and only if the cached snapshot is for
+    // *this* atom. Switching the selected atom hides the readout
+    // until the user previews the new atom.
+    //
+    // Per consultant M3.5 audit #6: `loop_window_rms_delta` stays
+    // diagnostic-only and is NOT surfaced here.
+    let current_id = &model.project.atom_pool[idx].id;
+    let snapshot_for_this_atom = last_atom_preview.filter(|s| &s.atom_id == current_id);
+    if let Some(snap) = snapshot_for_this_atom {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(egui::RichText::new("Last preview metrics").strong());
+        egui::Grid::new(format!("atom_preview_metrics_{idx}"))
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Loop click:");
+                let color = loop_click_color(snap.loop_click_abs);
+                ui.colored_label(color, snap.loop_click_abs.to_string());
+                ui.end_row();
+
+                ui.label("Rotation offset:");
+                ui.label(format!(
+                    "{} / {}",
+                    snap.rotation_offset, snap.cycle_len_samples
+                ));
+                ui.end_row();
+
+                ui.label("Peak err:");
+                ui.label(snap.peak_abs_error_post_rotation.to_string());
+                ui.end_row();
+
+                ui.label("RMS err:");
+                ui.label(format!("{:.2}", snap.rms_error_post_rotation));
+                ui.end_row();
+            });
+    }
+}
+
+/// M3.7: color-grade `loop_click_abs` per the consultant M3.5
+/// audit #15 readout proposal.
+///
+/// - green for `0`
+/// - yellow for `1..=1000`
+/// - orange for `1001..=5000`
+/// - red for `> 5000`
+fn loop_click_color(loop_click_abs: i32) -> egui::Color32 {
+    match loop_click_abs.max(0) {
+        0 => egui::Color32::from_rgb(0x4c, 0xaf, 0x50),
+        1..=1000 => egui::Color32::from_rgb(0xff, 0xc1, 0x07),
+        1001..=5000 => egui::Color32::from_rgb(0xff, 0x98, 0x00),
+        _ => egui::Color32::from_rgb(0xf4, 0x43, 0x36),
     }
 }
 
