@@ -498,6 +498,32 @@ pub struct CharacterizationReport {
     pub tool: ToolInfo,
     pub test_signals: Vec<TestSignalSummary>,
     pub measurements: Vec<Measurement>,
+    /// M4.0 schema v4: max_offset used by `align_oracle_to_raw`
+    /// across this run. Surfaces the actual searched range so
+    /// future readers know the upper bound the search could have
+    /// resolved. For `m3_5_canonical` this is `256` post-M4.1
+    /// (was effectively `32` at M3.5.1).
+    #[serde(default)]
+    pub alignment_search_limit: u32,
+    /// M4.0 schema v4: `true` if ANY monotonicity-anchor signal's
+    /// `alignment_best_offset` sits at or within 4 samples of
+    /// `alignment_search_limit`. Indicates the true offset may
+    /// lie beyond the searched range and the search range
+    /// should be expanded further.
+    #[serde(default)]
+    pub alignment_boundary_hit: bool,
+    /// M4.0 schema v4: AND of all four reliable-alignment criteria
+    /// across monotonicity-anchor signals (SPEC §10.9 amendment).
+    /// `false` means at least one anchor signal failed at least
+    /// one criterion; consult per-measurement
+    /// `alignment_validity` to see which.
+    #[serde(default)]
+    pub alignment_valid: bool,
+    /// M4.0 schema v4: M3.5.1 decision rule precondition #0
+    /// result surfaced explicitly (was previously inferrable from
+    /// `summary.recommended_next == "methodology_review"`).
+    #[serde(default)]
+    pub methodology_precondition_passed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subjective_audition: Option<SubjectiveAudition>,
     /// M3.5.1 (consultant M3.5 audit #4): when the M3.5.1 re-run
@@ -533,6 +559,31 @@ pub struct TestSignalSummary {
     pub name: String,
     pub kind: String,
     pub cycle_len_samples: u16,
+}
+
+/// M4.0 schema v4 / M4.1 implementation: per-signal breakdown of
+/// the four SPEC §10.9 reliable-alignment criteria. Exposed in the
+/// report so future readers can see WHICH criterion failed when
+/// `all_pass` is `false` (debuggability).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct AlignmentValidity {
+    /// Criterion 1: `zcr_ratio ∈ [0.9, 1.1]`.
+    #[serde(default)]
+    pub zcr_in_band: bool,
+    /// Criterion 2: `normalized_correlation ≥ 0.90`.
+    #[serde(default)]
+    pub correlation_above_threshold: bool,
+    /// Criterion 3: `alignment_best_offset < alignment_search_limit`.
+    #[serde(default)]
+    pub offset_in_range: bool,
+    /// Criterion 4: `peak_abs_error_after_gain_normalization ≤ 80%`
+    /// of `peak_abs_error_oracle_vs_raw`. Raw peak of `0` (silent
+    /// signal) trivially accepts.
+    #[serde(default)]
+    pub gain_separator_ok: bool,
+    /// AND of the four criteria.
+    #[serde(default)]
+    pub all_pass: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -600,6 +651,12 @@ pub struct Measurement {
     /// if it stays high, the difference is in shape.
     #[serde(default)]
     pub peak_abs_error_after_gain_normalization: i32,
+    /// M4.1: per-signal breakdown of the four SPEC §10.9
+    /// reliable-alignment criteria. `all_pass` is the AND of the
+    /// four; the individual booleans are surfaced so debuggers can
+    /// see WHICH criterion failed.
+    #[serde(default)]
+    pub alignment_validity: AlignmentValidity,
     #[serde(
         rename = "_phase_or_delay_note",
         skip_serializing_if = "Option::is_none"
@@ -783,6 +840,31 @@ pub fn finalize_measurement(
 
     let _ = raw_rms_one_cycle; // reported via raw_rms below
 
+    // M4.1: compute the per-signal alignment-validity breakdown.
+    // We have to build a transient Measurement-ish struct to feed
+    // is_alignment_reliable_for_signal; do the computation inline
+    // since we have all the inputs in scope.
+    let validity_zcr_in_band =
+        (PRECONDITION_ZCR_RATIO_LOW..=PRECONDITION_ZCR_RATIO_HIGH).contains(&zcr_ratio);
+    let validity_corr_ok = normalized_correlation >= RELIABLE_ALIGNMENT_CORRELATION_THRESHOLD;
+    let validity_offset_in_range = (align.oracle_offset as u32) < (max_offset as u32);
+    let validity_gain_ok = if peak_abs_err == 0 {
+        true
+    } else {
+        let ratio = (peak_abs_error_after_gain_norm as f64) / (peak_abs_err as f64);
+        ratio <= RELIABLE_ALIGNMENT_GAIN_SEPARATOR_THRESHOLD
+    };
+    let alignment_validity = AlignmentValidity {
+        zcr_in_band: validity_zcr_in_band,
+        correlation_above_threshold: validity_corr_ok,
+        offset_in_range: validity_offset_in_range,
+        gain_separator_ok: validity_gain_ok,
+        all_pass: validity_zcr_in_band
+            && validity_corr_ok
+            && validity_offset_in_range
+            && validity_gain_ok,
+    };
+
     Measurement {
         name: signal.name.to_string(),
         frequency_hz: signal.frequency_hz,
@@ -806,6 +888,7 @@ pub fn finalize_measurement(
         first_8_zero_crossings_raw,
         first_8_zero_crossings_oracle,
         peak_abs_error_after_gain_normalization: peak_abs_error_after_gain_norm,
+        alignment_validity,
         phase_or_delay_note: note,
     }
 }
@@ -837,6 +920,107 @@ pub const PRECONDITION_ANCHOR_SIGNALS: &[&str] = &[
 /// `zcr_ratio` sanity band for precondition #0 (M3.5.1).
 pub const PRECONDITION_ZCR_RATIO_LOW: f64 = 0.9;
 pub const PRECONDITION_ZCR_RATIO_HIGH: f64 = 1.1;
+
+/// M4.0 (SPEC §10.9 amendment): minimum
+/// `normalized_correlation` for criterion 2 of the reliable-
+/// alignment predicate. Locked at 0.90; loosening requires PM
+/// review.
+pub const RELIABLE_ALIGNMENT_CORRELATION_THRESHOLD: f64 = 0.90;
+
+/// M4.0 (SPEC §10.9 amendment): the gain-vs-shape separator —
+/// `peak_abs_error_after_gain_normalization` must be `<=` this
+/// fraction of `peak_abs_error_oracle_vs_raw` for criterion 4
+/// to pass. 0.80 means gain normalization must reduce peak
+/// error by at least 20%; smaller residuals indicate the
+/// raw/oracle difference is mostly amplitude (good
+/// alignment); larger residuals indicate waveform-shape
+/// divergence (alignment artefact or DSP shape change).
+pub const RELIABLE_ALIGNMENT_GAIN_SEPARATOR_THRESHOLD: f64 = 0.80;
+
+/// M4.0 (SPEC §10.9 amendment): "boundary hit" tolerance for
+/// criterion 3 + the top-level `alignment_boundary_hit` flag.
+/// An offset within this many samples of `alignment_search_limit`
+/// counts as boundary-adjacent. 4 samples chosen so a true offset
+/// that happens to land near (but inside) the boundary doesn't
+/// trip the flag while a search that actually saturates does.
+pub const RELIABLE_ALIGNMENT_BOUNDARY_TOLERANCE: u32 = 4;
+
+/// M4.1: evaluate the four SPEC §10.9 reliable-alignment criteria
+/// for a single measurement. Returns the four per-criterion
+/// booleans plus the AND `all_pass`. Caller is responsible for
+/// supplying `alignment_search_limit` — the same value used by
+/// `align_oracle_to_raw` for this run.
+pub fn is_alignment_reliable_for_signal(
+    measurement: &Measurement,
+    alignment_search_limit: u32,
+) -> AlignmentValidity {
+    let zcr_in_band =
+        (PRECONDITION_ZCR_RATIO_LOW..=PRECONDITION_ZCR_RATIO_HIGH).contains(&measurement.zcr_ratio);
+    let correlation_above_threshold =
+        measurement.normalized_correlation >= RELIABLE_ALIGNMENT_CORRELATION_THRESHOLD;
+    let offset_in_range = measurement.alignment_best_offset < alignment_search_limit;
+    // Criterion 4: silent signal (raw peak == 0) trivially
+    // accepts; otherwise gain-normalized peak must be ≤ 80% of
+    // the raw peak.
+    let gain_separator_ok = if measurement.peak_abs_error_oracle_vs_raw == 0 {
+        true
+    } else {
+        let ratio = (measurement.peak_abs_error_after_gain_normalization as f64)
+            / (measurement.peak_abs_error_oracle_vs_raw as f64);
+        ratio <= RELIABLE_ALIGNMENT_GAIN_SEPARATOR_THRESHOLD
+    };
+    let all_pass =
+        zcr_in_band && correlation_above_threshold && offset_in_range && gain_separator_ok;
+    AlignmentValidity {
+        zcr_in_band,
+        correlation_above_threshold,
+        offset_in_range,
+        gain_separator_ok,
+        all_pass,
+    }
+}
+
+/// M4.1: AND of the per-signal validity predicate across every
+/// monotonicity-anchor signal in `measurements`. Missing anchor
+/// signals count as failures (caller should ensure the
+/// characterization run covered all anchors).
+pub fn compute_alignment_valid_for_report(
+    measurements: &[Measurement],
+    alignment_search_limit: u32,
+) -> bool {
+    for anchor in PRECONDITION_ANCHOR_SIGNALS {
+        match measurements.iter().find(|m| m.name == *anchor) {
+            Some(m) => {
+                if !is_alignment_reliable_for_signal(m, alignment_search_limit).all_pass {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+    }
+    true
+}
+
+/// M4.1: any monotonicity-anchor signal's `alignment_best_offset`
+/// at or near `alignment_search_limit`. "Near" means within
+/// `RELIABLE_ALIGNMENT_BOUNDARY_TOLERANCE` samples of the limit.
+pub fn compute_alignment_boundary_hit(
+    measurements: &[Measurement],
+    alignment_search_limit: u32,
+) -> bool {
+    if alignment_search_limit == 0 {
+        return false;
+    }
+    let threshold = alignment_search_limit.saturating_sub(RELIABLE_ALIGNMENT_BOUNDARY_TOLERANCE);
+    for anchor in PRECONDITION_ANCHOR_SIGNALS {
+        if let Some(m) = measurements.iter().find(|m| m.name == *anchor) {
+            if m.alignment_best_offset >= threshold {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// Apply the SPEC §10.9 decision rule.
 ///
@@ -1129,6 +1313,13 @@ mod tests {
             first_8_zero_crossings_raw: Vec::new(),
             first_8_zero_crossings_oracle: Vec::new(),
             peak_abs_error_after_gain_normalization: 0,
+            alignment_validity: AlignmentValidity {
+                zcr_in_band: true,
+                correlation_above_threshold: true,
+                offset_in_range: true,
+                gain_separator_ok: true,
+                all_pass: true,
+            },
             phase_or_delay_note: None,
         }
     }
