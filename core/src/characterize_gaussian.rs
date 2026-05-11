@@ -524,7 +524,20 @@ pub struct Measurement {
     pub oracle_pcm_sha256: String,
     pub raw_rms: f64,
     pub oracle_rms: f64,
+    /// `20 * log10(oracle_rms / raw_rms)`. M3.5 "raw window" form:
+    /// `raw_rms` is over the tiled raw buffer at full oracle length,
+    /// `oracle_rms` is over the aligned oracle window only. Kept
+    /// alongside the M3.5.1 `gain_delta_db_aligned` (which uses the
+    /// aligned-window raw RMS) as documentary so the difference
+    /// between the two forms is itself methodology information.
     pub gain_delta_db: f64,
+    /// M3.5.1 (consultant M3.5 audit #3): `20 * log10(aligned_oracle_rms
+    /// / aligned_raw_rms)`. Both RMSes are computed over the same
+    /// aligned window, removing the window-length bias the original
+    /// `gain_delta_db` introduces. Use this form when designing or
+    /// reasoning about pre-emphasis presets.
+    #[serde(default)]
+    pub gain_delta_db_aligned: f64,
     pub peak_abs_error_oracle_vs_raw: i32,
     pub peak_abs_raw_vs_source: i32,
     pub zcr_raw: f64,
@@ -713,6 +726,12 @@ pub fn finalize_measurement(
     // M3.5.1 methodology diagnostics (consultant M3.5 audit #4).
     let aligned_raw_rms = pcm_rms(&raw_aligned);
     let aligned_oracle_rms = pcm_rms(&oracle_aligned);
+    // M3.5.1 (consultant M3.5 audit #3): aligned-window gain form.
+    let gain_delta_db_aligned = if aligned_oracle_rms > 0.0 && aligned_raw_rms > 0.0 {
+        20.0 * (aligned_oracle_rms / aligned_raw_rms).log10()
+    } else {
+        0.0
+    };
     let normalized_correlation = pearson_correlation(&raw_aligned, &oracle_aligned);
     let zcr_ratio = if zcr_raw > 0.0 {
         zcr_oracle / zcr_raw
@@ -747,6 +766,7 @@ pub fn finalize_measurement(
         raw_rms: raw_rms_window,
         oracle_rms,
         gain_delta_db,
+        gain_delta_db_aligned,
         peak_abs_error_oracle_vs_raw: peak_abs_err,
         peak_abs_raw_vs_source: raw.peak_abs_raw_vs_source,
         zcr_raw,
@@ -1004,6 +1024,7 @@ mod tests {
             raw_rms: 0.0,
             oracle_rms: 0.0,
             gain_delta_db: gain,
+            gain_delta_db_aligned: gain,
             peak_abs_error_oracle_vs_raw: 0,
             peak_abs_raw_vs_source: 0,
             zcr_raw: 0.0,
