@@ -536,6 +536,23 @@ enum Command {
         #[arg(long)]
         oracle: Option<PathBuf>,
     },
+    /// M3.5: run the §10.9 Gaussian characterization pass against
+    /// the `m3_5_canonical` test signal set. Builds one single-atom
+    /// SPC per signal, runs the oracle, and emits a
+    /// `gaussian_characterization` JSON report.
+    CharacterizeGaussian {
+        #[arg(long, default_value = "build/m3/characterize_gaussian.json")]
+        out_report: PathBuf,
+        #[arg(long, default_value = "build/m3/characterize_gaussian")]
+        out_dir: PathBuf,
+        /// Frames of oracle render per signal (32 kHz). Default 16000
+        /// = 0.5 s; provides ~125 cycles of cycle_256 and ~500 of
+        /// cycle_64 for stable RMS.
+        #[arg(long, default_value_t = 16_000u32)]
+        frames: u32,
+        #[arg(long)]
+        oracle: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -811,6 +828,12 @@ fn run(cli: Cli) -> Result<(), CliError> {
             frames,
             oracle.as_deref(),
         ),
+        Command::CharacterizeGaussian {
+            out_report,
+            out_dir,
+            frames,
+            oracle,
+        } => cmd_characterize_gaussian(&out_report, &out_dir, frames, oracle.as_deref()),
     }
 }
 
@@ -6623,4 +6646,275 @@ fn print_validate_summary(report: &ValidationReport) {
             }
         }
     }
+}
+
+// ============================================================
+// M3.5 — Gaussian characterization (SPEC §10.9)
+// ============================================================
+
+/// Build a minimal single-atom V2 project JSON for one test signal.
+fn build_characterization_project_json(
+    signal: &sfc_atomizer_core::characterize_gaussian::TestSignal,
+) -> serde_json::Value {
+    let AtomKind::AdditiveSingleCycleV0 { partials } = &signal.atom.kind;
+    let partials_json: Vec<serde_json::Value> = partials
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "harmonic": p.harmonic,
+                "amplitude": p.amplitude,
+                "phase_cycles": p.phase_cycles,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "schema_version": 2,
+        "project": { "name": signal.name, "tick_rate_hz": 60 },
+        "driver": { "profile": "multi_voice_atom", "bytecode_version": 2 },
+        "master_echo": {
+            "enabled": false, "edl": 0, "efb": 0, "evol_l": 0, "evol_r": 0,
+            "fir": [127, 0, 0, 0, 0, 0, 0, 0]
+        },
+        "sample_pool": [],
+        "atom_pool": [
+            {
+                "id": signal.name,
+                "name": signal.name,
+                "kind": "additive_single_cycle_v0",
+                "root_midi_note": signal.atom.root_midi_note,
+                "cycle_len_samples": signal.atom.cycle_len_samples,
+                "amplitude": signal.atom.amplitude,
+                "partials": partials_json,
+                "render": {
+                    "normalize": signal.atom.render.normalize,
+                    "force_filter_0_first_block": signal.atom.render.force_filter_0_first_block,
+                    "force_filter_0_loop_entry": signal.atom.render.force_filter_0_loop_entry,
+                },
+                "playback": {
+                    "volume": 1.0,
+                    "pan": 0.0,
+                    "echo": false,
+                    "envelope": { "type": "gain_raw", "gain_byte": 127 }
+                }
+            }
+        ],
+        "atom_sequences": [
+            {
+                "id": "atomseq_0001",
+                "name": format!("{}_demo", signal.name),
+                "voice": 0,
+                "steps": [
+                    {
+                        "atom_id": signal.name,
+                        "duration_ticks": 600,
+                        "target_volume": 1.0,
+                        "transition": { "type": "initial_kon" }
+                    }
+                ],
+                "loop": false
+            }
+        ],
+        "tracks": [
+            {
+                "id": "track_atom_0",
+                "voice": 0,
+                "kind": "atom_sequence",
+                "atom_sequence_id": "atomseq_0001"
+            }
+        ],
+        "m2": { "active_sequence_id": "atomseq_0001" }
+    })
+}
+
+fn cmd_characterize_gaussian(
+    out_report: &Path,
+    out_dir: &Path,
+    frames: u32,
+    explicit_oracle: Option<&Path>,
+) -> Result<(), CliError> {
+    use sfc_atomizer_core::characterize_gaussian::{
+        apply_m3_5_decision_rule, compute_raw_side, finalize_measurement, m3_5_canonical_signals,
+        oracle_stereo_to_mono_left, CharacterizationReport, Measurement, Summary, TestSignal,
+        TestSignalSummary, ToolInfo,
+    };
+
+    create_dir(out_dir)?;
+    if let Some(parent) = out_report.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir(parent)?;
+        }
+    }
+
+    let workspace_root = std::env::current_dir().map_err(CliError::Cwd)?;
+    let oracle_path = resolve_oracle(explicit_oracle, &workspace_root).ok_or_else(|| CliError::Io {
+        path: PathBuf::from("snes_spc_oracle"),
+        source: std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "oracle wrapper not resolved (set SFCWC_SNES_SPC_ORACLE or build tools/snes_spc_oracle)",
+        ),
+    })?;
+    let oracle_sha = sha256_hex_file(&oracle_path).unwrap_or_else(|_| "unknown".to_string());
+
+    let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sfcwc"));
+    let signals: Vec<TestSignal> = m3_5_canonical_signals();
+
+    let test_signals_summary: Vec<TestSignalSummary> = signals
+        .iter()
+        .map(|s| TestSignalSummary {
+            name: s.name.to_string(),
+            kind: "atom_fixture".to_string(),
+            cycle_len_samples: s.atom.cycle_len_samples,
+        })
+        .collect();
+
+    let mut measurements: Vec<Measurement> = Vec::with_capacity(signals.len());
+
+    for signal in &signals {
+        eprintln!("characterize-gaussian: processing {}...", signal.name);
+
+        // ----- (a) Write the V2 project JSON.
+        let project_path = out_dir.join(format!("{}.sfcproj.json", signal.name));
+        let project_json = build_characterization_project_json(signal);
+        let project_bytes = serde_json::to_vec_pretty(&project_json)?;
+        std::fs::write(&project_path, &project_bytes).map_err(|source| CliError::Io {
+            path: project_path.clone(),
+            source,
+        })?;
+
+        // ----- (b) Spawn `sfcwc compile-spc`.
+        let spc_path = out_dir.join(format!("{}.spc", signal.name));
+        let aram_path = out_dir.join(format!("{}.aram.bin", signal.name));
+        let map_path = out_dir.join(format!("{}.map.json", signal.name));
+        let compile_report_path = out_dir.join(format!("{}.compile-spc.json", signal.name));
+        let compile_out = std::process::Command::new(&bin)
+            .args([
+                "compile-spc",
+                "--project",
+                project_path.to_str().unwrap(),
+                "--out-spc",
+                spc_path.to_str().unwrap(),
+                "--out-image",
+                aram_path.to_str().unwrap(),
+                "--out-map",
+                map_path.to_str().unwrap(),
+                "--out-report",
+                compile_report_path.to_str().unwrap(),
+            ])
+            .output();
+        match compile_out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                eprintln!(
+                    "characterize-gaussian: compile-spc {} exit={:?}: {}",
+                    signal.name,
+                    o.status.code(),
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+                return Err(CliError::Io {
+                    path: spc_path,
+                    source: std::io::Error::other("compile-spc failed"),
+                });
+            }
+            Err(e) => {
+                return Err(CliError::Io {
+                    path: spc_path,
+                    source: e,
+                });
+            }
+        }
+
+        // ----- (c) Spawn oracle.
+        let oracle_pcm_path = out_dir.join(format!("{}.pcm", signal.name));
+        let oracle_report_path = out_dir.join(format!("{}.oracle-side.json", signal.name));
+        let oracle_out = std::process::Command::new(&oracle_path)
+            .arg("render")
+            .arg("--input-spc")
+            .arg(&spc_path)
+            .arg("--frames")
+            .arg(frames.to_string())
+            .arg("--output-pcm")
+            .arg(&oracle_pcm_path)
+            .arg("--report")
+            .arg(&oracle_report_path)
+            .output();
+        match oracle_out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                eprintln!(
+                    "characterize-gaussian: oracle {} exit={:?}: {}",
+                    signal.name,
+                    o.status.code(),
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+                return Err(CliError::Io {
+                    path: oracle_pcm_path,
+                    source: std::io::Error::other("oracle failed"),
+                });
+            }
+            Err(e) => {
+                return Err(CliError::Io {
+                    path: oracle_pcm_path,
+                    source: e,
+                });
+            }
+        }
+
+        // ----- (d) Read oracle PCM → mono.
+        let oracle_bytes = std::fs::read(&oracle_pcm_path).map_err(|source| CliError::Io {
+            path: oracle_pcm_path.clone(),
+            source,
+        })?;
+        let oracle_mono = oracle_stereo_to_mono_left(&oracle_bytes);
+
+        // ----- (e) Compute raw + finalize.
+        let raw = compute_raw_side(signal);
+        let m = finalize_measurement(signal, &raw, &oracle_mono, 32_000);
+        measurements.push(m);
+    }
+
+    // ----- Apply decision rule.
+    let outcome = apply_m3_5_decision_rule(&measurements);
+    let summary = Summary {
+        clear_target_for_pre_emphasis: outcome.clear_target_for_pre_emphasis,
+        recommended_next: outcome.recommended_next.clone(),
+        decision_rule_reasons: outcome.reasons.clone(),
+    };
+
+    let report = CharacterizationReport {
+        schema_version: 2,
+        report_type: "gaussian_characterization".to_string(),
+        fixture_set: "m3_5_canonical".to_string(),
+        sample_rate_hz: 32_000,
+        tool: ToolInfo {
+            snes_spc_oracle_sha256: oracle_sha,
+            rust_version: option_env!("CARGO_PKG_RUST_VERSION")
+                .unwrap_or("stable")
+                .to_string(),
+        },
+        test_signals: test_signals_summary,
+        measurements: measurements.clone(),
+        subjective_audition: None,
+        summary,
+    };
+
+    write_json(out_report, &report)?;
+
+    // Friendly stdout summary.
+    eprintln!(
+        "characterize-gaussian: {} signals processed; recommended_next={}",
+        measurements.len(),
+        outcome.recommended_next
+    );
+    for m in &measurements {
+        eprintln!(
+            "  {:38} f={:>7.1} Hz  gain_delta={:>+7.3} dB  raw_rms={:>8.1}  oracle_rms={:>8.1}  peak_err={:>5}  zcr_raw={:>7.1}  zcr_oracle={:>7.1}  clip_raw={:>4} clip_oracle={:>4}",
+            m.name, m.frequency_hz, m.gain_delta_db, m.raw_rms, m.oracle_rms,
+            m.peak_abs_error_oracle_vs_raw, m.zcr_raw, m.zcr_oracle,
+            m.clipping_count_raw, m.clipping_count_oracle
+        );
+    }
+    eprintln!("characterize-gaussian: report -> {}", out_report.display());
+
+    Ok(())
 }

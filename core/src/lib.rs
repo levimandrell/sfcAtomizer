@@ -14,6 +14,7 @@ pub mod brr_encoder;
 pub mod brr_fixtures;
 pub mod bytecode;
 pub mod capability_manifest;
+pub mod characterize_gaussian;
 pub mod driver_build;
 pub mod driver_proto;
 pub mod echo_validation;
