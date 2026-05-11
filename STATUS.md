@@ -2,9 +2,90 @@
 
 ## Current milestone
 
-**M3.3 — Phase rotation implementation.** First encoder-shifting
-pass of M3. SPEC §10.7 phase rotation lands: block-aligned
-candidate offsets, lexicographic objective
+**M3.5 — Gaussian characterization (SPEC §10.9).** Reports-only
+pass: no encoder change, no atom PCM change, no driver change.
+Measures S-DSP gaussian interpolation behavior against the
+`m3_5_canonical` test signal set so PM can decide whether M3.6
+ships pre-emphasis presets or defers to M4+. Replaces the
+deferred M3.4 predictor pass (consultant M3.3 audit #21).
+
+**Decision rule outcome: `recommended_next = "pending_preset_eval"`.**
+The two M3.5-evaluable conditions of the four-condition §10.9
+decision rule (locked at Phase 2.5A) both hold:
+
+- **Condition #1 — monotonicity OK.** `gain_delta_db` across the
+  cycle_64 harmonic series (`harmonic_2 → harmonic_4 → harmonic_8 →
+  harmonic_16`) measures `+2.580 / +2.334 / +1.593 / -1.231 dB`
+  — strictly non-increasing across rising frequency. Confirms
+  the gaussian-dulling hypothesis.
+- **Condition #2 (M3.5 raw form) — `harmonic_16` responds.**
+  `gain_delta_db = -1.231 dB` at 8 kHz (near-Nyquist), well below
+  the -0.5 dB threshold required to consider a pre-emphasis
+  preset worth designing.
+
+Conditions #3 (anti-worsening on canonical sines) and #4 (no
+new clipping) require evaluation against a proposed preset's
+outputs; M3.5 does not implement a preset, so these stay
+unevaluated. The "go signal" semantics are: M3.6 may design a
+gentle pre-emphasis preset, re-run the characterization under
+that preset, and only ship the preset if all four conditions
+hold under the M3.6 follow-up.
+
+**Pass shape.** Six commits across Phase 2.5A/B/C (audition-driven
+SPEC + baseline amendments) and Phase 3-6 (implementation +
+run + populate + STATUS). One workspace-tested `characterize-gaussian`
+CLI subcommand. 9 V2 single-atom characterization projects
+emitted to `build/m3/characterize_gaussian/` (gitignored). 112
+new `documentary_snapshot` entries in `baselines/m3.json`
+(`M3_5_*` namespace).
+
+**Earlier in pass (Phase 0-2 committed under prior summary):**
+SPEC §10.9 prelude lock, M3.3 close hygiene
+(`decoded_brr_pcm_sha_distinct_for_zero_seam_nonsilent_fixtures`,
+pair 4/5 fixture `_note` annotations, audition CLI), and 10
+A/B prelude audition WAVs at `build/audition/m3.5-prelude/`
+(commits `f917381`, `6e284f3`, `468f979`). PM auditioned the
+five A/B pairs and returned audit findings that drove the
+Phase 2.5 amendments.
+
+**Phase 2.5 amendments (audition-driven, locked before Phase 3).**
+
+- **2.5A.** SPEC §10.9 — expanded `m3_5_canonical` from 6 to 9
+  signals (added `harmonic_2/4/8_cycle_64` for a four-point
+  cycle_64 gain curve, replaced the standalone clipping
+  reference with a labeled stress entry); rewrote the M3.6
+  decision rule to four conditions (monotonicity,
+  harmonic_16-responds, anti-worsening on canonical sines, no
+  new clipping); expanded the characterization report schema
+  to `schema_version: 2` with `raw_decoded_pcm_sha256`,
+  `oracle_pcm_sha256`, `peak_abs_raw_vs_source`, `zcr_raw`,
+  `zcr_oracle`, `clipping_count_raw`, `clipping_count_oracle`,
+  `_phase_or_delay_note`.
+- **2.5B.** Added `_audition_note` to all seven `_PHASE_ROTATION`
+  entries on `NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY` and
+  `ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8` — pairs 4/5 from
+  audition where loop_click reduction was real but
+  perceptually masked (clipping / dense harmonics
+  respectively).
+- **2.5C.** Optional top-level `subjective_audition` field in
+  the characterization report (`perceived_change_axis` enum:
+  `seam_click | harmonic_content | harshness | none`;
+  `masked_by_signal_content` bool).
+
+**Phase 3-6 (this pass, summarized below).**
+
+**M3.6 next.** Conditional ship of pre-emphasis presets. PM
+designs a `gentle` preset (filter coefficients TBD), then this
+codebase re-runs `sfcwc characterize-gaussian` under the preset
+and applies all four conditions of the §10.9 decision rule
+against the new measurements. If the gentle preset closes ≥ 75%
+of the harmonic_16 loss without anti-worsening on canonical
+sines, `strong` also ships. If any condition fails, M3.6 defers
+to M4+.
+
+**Previous milestone (M3.3) — Phase rotation implementation.**
+First encoder-shifting pass of M3. SPEC §10.7 phase rotation
+lands: block-aligned candidate offsets, lexicographic objective
 `(loop_click_abs, peak_abs_error, rms_error, rotation_offset)`,
 `f64::total_cmp` for the floating-point lex level, smallest-offset
 tie-break. Rotation operates on a *transient* encoder input — the
@@ -79,6 +160,149 @@ where rotation either didn't help or only got partway there).
 PM go/defer decision at M3.4 entry brief.
 
 ## Last pass
+
+**Pass M3.5 — Gaussian characterization (Phases 2.5A/B/C + 3-6).**
+
+Reports-only pass per consultant M3.3 audit #21 (M3.4 predictor
+optimization deferred to M4+). Three audition-driven SPEC /
+baseline amendments + new `characterize_gaussian` module + new
+CLI subcommand + 9-signal characterization run + 112 new
+`documentary_snapshot` entries + STATUS. No encoder change; no
+atom PCM change; no driver change.
+
+- **Phase 2.5A (commit `180a457`)** — SPEC §10.9 amendment.
+  Expanded `m3_5_canonical` test signal set from 6 to 9 signals
+  with a four-point cycle_64 harmonic gain curve
+  (`harmonic_2/4/8/16_cycle_64`). Rewrote the M3.6 decision rule
+  to four conditions: monotonic `gain_delta_db`, `harmonic_16`
+  responds (≥25% reduction under proposed preset), anti-worsening
+  on canonical sines (≤10% peak/rms error increase), no new
+  clipping. Characterization report schema bumped to
+  `schema_version: 2` with separated raw/oracle SHAs,
+  `peak_abs_raw_vs_source` (BRR encoder error), ZCR and
+  clipping counts.
+- **Phase 2.5B (commit `388fc52`)** — `_audition_note` on all
+  fourteen `_PHASE_ROTATION` entries for pairs 4/5
+  (`NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY`,
+  `ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8`). Pre-rotation
+  metric improvements (87% / 100% loop_click reduction
+  respectively) were real but perceptually masked at audition;
+  notes distinguish these from pairs 1/2 where metric and
+  perception aligned.
+- **Phase 2.5C (commit `9cc23be`)** — optional top-level
+  `subjective_audition` field in the characterization report
+  schema. `perceived_change_axis` enum
+  (`seam_click | harmonic_content | harshness | none`) +
+  `masked_by_signal_content` bool. Lets future audition runs
+  document metric-vs-perception mapping without contaminating
+  the deterministic `measurements` array.
+- **Phase 3 (commit `72fd005`)** — new `core/src/characterize_gaussian.rs`
+  module: 9-signal `m3_5_canonical_signals()` builder
+  matching the SPEC; raw-side metric helpers (`pcm_rms`,
+  `pcm_zcr_per_sec`, `pcm_clipping_count`, `pcm_sha256_hex`,
+  `decode_brr_flat`, `oracle_stereo_to_mono_left`,
+  `tile_cycle_to_length`, `align_oracle_to_raw`);
+  `compute_raw_side` + `finalize_measurement` combinators;
+  `apply_m3_5_decision_rule` implementing conditions #1 (monotonicity)
+  and #2 (raw form of `harmonic_16` responds); `CharacterizationReport`
+  + `Measurement` + `SubjectiveAudition` + `Summary` types
+  matching the SPEC §10.9 `schema_version: 2` shape. 14 new unit
+  tests. Plus new `app/src/main.rs` `sfcwc characterize-gaussian`
+  subcommand orchestrating: build single-atom V2 project per
+  signal → spawn `compile-spc` → spawn oracle → host BRR decode
+  → finalize measurement → write report.
+- **Phase 3 fix-up (commit `90b05b6`)** — duration_ticks tuned
+  from 600 to 240 to fit SPEC §16.6 u8 bound (caught running
+  the command locally).
+- **Phase 4 (commit `d0d0eee`)** — `sfcwc characterize-gaussian`
+  invoked against the M2 driver + snes_spc oracle: 9 SPCs
+  built, 9 oracle renders, 9 measurements computed.
+  `baselines/m3.json` gains 112 `documentary_snapshot` entries
+  in the `M3_5_*` namespace: 12 per signal (`FREQUENCY_HZ`,
+  `RAW_DECODED_PCM_SHA256`, `ORACLE_PCM_SHA256`, `RAW_RMS`,
+  `ORACLE_RMS`, `GAIN_DELTA_DB`, `PEAK_ABS_ERROR_ORACLE_VS_RAW`,
+  `PEAK_ABS_RAW_VS_SOURCE`, `ZCR_RAW`, `ZCR_ORACLE`,
+  `CLIPPING_COUNT_RAW`, `CLIPPING_COUNT_ORACLE`) plus four
+  summary entries (`RECOMMENDED_NEXT`,
+  `MONOTONICITY_HOLDS_ACROSS_CYCLE_64_HARMONIC_SERIES`,
+  `HARMONIC_16_GAUSSIAN_ATTENUATION_DB`,
+  `DOCUMENTARY_CLASS_NOTE`).
+- **Phase 5 — decision rule outcome.** Recorded in the
+  `M3_5_RECOMMENDED_NEXT` baseline entry. Outcome:
+  `pending_preset_eval`. Conditions #1 (monotonicity) and #2
+  (raw `harmonic_16` responds) both pass; conditions #3
+  (anti-worsening) and #4 (no new clipping) require a proposed
+  preset's outputs and stay unevaluated at M3.5 — the
+  characterization-only pass does not design a preset.
+  `M3.6` may now design a gentle preset and re-run
+  `characterize-gaussian` against the preset's outputs.
+- **Phase 6 (this entry).**
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **560 tests
+  workspace-wide** (was 546 at M3.5 Phase 1-2 close; +14 from
+  the new `core::characterize_gaussian` unit tests).
+  4 ignored (unchanged from Phase 2: `m3_5_emit_audition_wavs`
+  + the `m3_2_print` + 2 other pre-existing).
+
+### Per-signal M3.5 characterization table
+
+| Signal | f (Hz) | gain_delta_db | raw_rms | oracle_rms | peak_err | peak_raw_vs_src | zcr_raw | zcr_oracle | clip_raw / oracle |
+|---|---|---|---|---|---|---|---|---|---|
+| `sine_cycle_64` | 500 | +2.645 | 13774 | 18678 | 36237 | 18431 | 1000 | 1930 | 0 / 0 |
+| `sine_cycle_128` | 250 | +2.663 | 13732 | 18659 | 36788 | 18431 | 500 | 965 | 0 / 0 |
+| `sine_cycle_256` | 125 | +2.673 | 13807 | 18782 | 39053 | 18431 | 250 | 485 | 0 / 0 |
+| `harmonic_2_cycle_64` | 1000 | +2.580 | 13687 | 18420 | 39053 | 18431 | 1500 | 3862 | 0 / 0 |
+| `harmonic_4_cycle_64` | 2000 | +2.334 | 13633 | 17837 | 39053 | 18431 | 3500 | 7717 | 0 / 0 |
+| `harmonic_8_cycle_64` | 4000 | +1.593 | 13332 | 16016 | 39053 | 18431 | 7500 | 15437 | 0 / 0 |
+| `harmonic_16_cycle_64` | 8000 | **-1.231** | 10885 | 9446 | 16384 | 16384 | 15500 | 15460 | 0 / 0 |
+| `all_8_partials_max_amp_harmonics_1_to_8` | 250 | +2.530 | 6970 | 9326 | 29349 | 18431 | 4000 | 3864 | 0 / 0 |
+| `normalize_false_multi_partial_clamp_safety` | 250 | +2.452 | 12543 | 16634 | 39053 | 18431 | 3750 | 5791 | 0 / 0 |
+
+Frame count: 16000 (0.5 s @ 32 kHz) per signal. `peak_abs_error_oracle_vs_raw`
+values are large for the low-frequency signals because the gaussian's
+~+2.6 dB boost on steady-state low-frequency content is a multiplicative
+gain difference, not an alignment artifact — the aligned RMS of the
+delta is still bounded.
+
+### Decisions log additions (M3.5 Phase 2.5 + 3-6)
+
+- SPEC §10.9 expanded `m3_5_canonical` to 9 signals + four-point
+  cycle_64 harmonic gain curve (consultant audition audit #9).
+- M3.6 decision rule rewritten to four conditions (consultant
+  audit #10, #12). `harmonic_16` is the primary perceptual
+  stress fixture and gets its own condition.
+- Characterization report schema bumped to `schema_version: 2`
+  with separated raw / oracle SHAs, BRR encoder error
+  (`peak_abs_raw_vs_source`), ZCR, clipping count (consultant
+  audit #13).
+- Optional `subjective_audition` top-level field with
+  `perceived_change_axis` enum + `masked_by_signal_content`
+  (consultant audit #7). Tracks the pair-4/5 audition finding
+  in a future-proof shape.
+- `_audition_note` on 14 `_PHASE_ROTATION` baseline entries for
+  pairs 4/5: real metric improvement, no audible difference
+  (consultant audit #4, #5).
+- M3.5 raw-form decision rule passes: monotonic, `harmonic_16`
+  attenuates -1.231 dB. `recommended_next=pending_preset_eval`
+  is the "go signal" for M3.6 preset design — but M3.6 ship
+  still requires the full four-condition rule against a
+  proposed preset's outputs.
+- `characterize_gaussian` host-side raw decoder reuses
+  `core::brr::decode_blocks` against the encoded BRR; oracle
+  alignment is brute-force ≤ 32 sample skip with
+  `f64`-precision aligned RMS. Documented in the
+  `_phase_or_delay_note` per-measurement field when alignment
+  was non-zero.
+- Gaussian behavior at native pitch (default voice setup with
+  root_midi_note = 60): low-frequency boost of ~+2.6 dB
+  steady-state across all `sine_cycle_*` fixtures, falling to
+  -1.231 dB at `harmonic_16_cycle_64`. ~3.9 dB total span
+  across the cycle_64 harmonic series.
+- No M2 acceptance pre-check: pass is reports-only, no encoder
+  or driver bytes changed.
+
+## Previous passes
 
 **Pass M3.3 — Phase rotation implementation.**
 
@@ -247,8 +471,6 @@ no GUI (M3.7); atom PCM stays locked per SPEC §16.9.
   `normalize_false_multi_partial_clamp_safety` (2048, ~87%
   already there). PM at M3.4 entry decides whether the residual
   is worth the SPEC §10.8 conditional ship.
-
-## Previous passes
 
 **Pass M3.2 — Atom edge case fixture coverage.** Synthesized
 fixture additions only; no encoder changes; no phase rotation
