@@ -688,18 +688,56 @@ PCM" for those passes. The atom PCM stability rule (§16.9) gates on
 the rendered PCM before pre-emphasis — pre-emphasized PCM is a
 transient encoder input, not stored, and its SHAs are not pinned.
 
+**Pre-emphasis pipeline order (locked at M4.0 per consultant M4
+plan #12).** When pre-emphasis presets exist (M4.5+
+conditional), the encoder pipeline runs in this exact order:
+
+```
+atom PCM render (SPEC §16.9; identity-gated, unchanged)
+  ↓
+optional pre-emphasis filter applied to transient encoder input
+(SPEC §10.9 preset; produces filtered_pcm)
+  ↓
+phase rotation (SPEC §10.7; operates on filtered_pcm)
+  ↓
+BRR encode (4-bit ADPCM)
+```
+
+The atom PCM SHA (§16.9) refers to the pre-filter render
+output and remains identity-gated. Pre-emphasis is an
+encoder-side transformation that operates on a transient
+buffer; it MUST NOT shift atom PCM SHAs.
+
+Phase rotation candidate offsets remain block-aligned
+(SPEC §10.7) and operate on the **filtered** PCM. The lex
+objective compares decoded BRR PCM against the
+**rotated-filtered** source, NOT the rotated unfiltered
+source. SPEC §10.10 noise-floor metrics likewise compare
+decoded BRR against the rotated-filtered source when pre-
+emphasis is active; against the rotated unfiltered source
+when pre_emphasis = "off".
+
+When pre-emphasis ships, `AtomBrrOutput` gains these fields
+(documentation here at M4.0; populated at M4.5):
+
+- `pre_emphasis_applied`: `"off" | "gentle" | "strong"`
+- `rotation_offset_after_pre_emphasis`: `u32`
+- `loop_click_abs_after_pre_emphasis_rotation`: `i32`
+
 **Pre-emphasis preset is per-atom**, declared in the
 `atom_pool[].pre_emphasis` field (default `"off"`). Schema rule
 finalized at M3.6 land.
 
 **Characterization report format (locked at M3.5 prelude per
 consultant M3.3 audit #12; expanded at M3.5 per audition audit
-#13; expanded again at M3.5.1 per consultant M3.5 audit #3, #4).**
-The characterization pass emits a JSON report with this shape:
+#13; expanded again at M3.5.1 per consultant M3.5 audit #3, #4;
+schema bumped to v4 at M4.0 for the alignment-validity fields
+per consultant M4 plan #5, #6).** The characterization pass
+emits a JSON report with this shape:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "report_type": "gaussian_characterization",
   "fixture_set": "m3_5_canonical",
   "sample_rate_hz": 32000,
