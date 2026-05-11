@@ -562,6 +562,50 @@ rms_error      = sqrt(mean_i(((decoded[i] as i32) - (rotated[i] as i32))^2))
 Final tie-breaker: smaller `rotation_offset` wins (so the encoder
 defaults to no-rotation when all candidates score identically).
 
+**Error comparison sources (locked at M3.3 prelude).** For
+candidate offset `r`, the secondary and tertiary lex levels
+compare the decoded BRR PCM against the **rotated** source PCM,
+NOT the unrotated original:
+
+```
+rotated_source[n] = source_pcm[(n + r) mod cycle_len_samples]
+peak_abs_error    = max_i(|rotated_source[i] - decoded[i]|)        // i32 in widened arithmetic
+rms_error         = sqrt(mean_i((rotated_source[i] - decoded[i])^2)) // f64 from i64 sum-of-squares
+```
+
+Comparing decoded against the unrotated source would penalize
+phase displacement (which is the literal definition of rotation),
+making rotation appear artificially worse. The decoded signal IS
+the candidate signal; the rotated source IS the candidate's input;
+their difference IS the encoder error for that candidate.
+
+**Numeric types (locked at M3.3 prelude).**
+
+```
+loop_click_abs   : i32  (per §10.6, widened arithmetic)
+peak_abs_error   : i32  (widened arithmetic on i16-range deltas)
+rms_error        : f64  (computed from i64 sum-of-squares; sqrt at end)
+rotation_offset  : u32
+```
+
+The lex tuple compares smaller-wins at each level. `f64` comparison
+uses `f64::total_cmp` (stable since Rust 1.62) to avoid NaN
+ordering ambiguity. The formula guarantees finite non-negative
+`rms_error` (sum-of-squares ≥ 0; sqrt of finite non-negative is
+finite non-negative), so `total_cmp` behaves identically to
+`PartialOrd` here, but the explicit choice documents the intent
+and removes any latent NaN-ordering footgun.
+
+**Tie-break to offset 0.** When all candidates produce
+bit-identical lex tuples (e.g. the `amplitude_zero` atom: all-zero
+PCM across all rotations → identical scores), the smallest offset
+wins. Iteration order MUST NOT affect the chosen offset; the
+canonical `(loop_click, peak_err, rms_err, offset) < ...`
+comparison handles this naturally because `offset` is the final
+tie-break. A dedicated regression test
+(`amplitude_zero_atom_phase_rotation_picks_offset_zero` in
+`core/tests/atom_edge_cases.rs`) pins this behavior.
+
 **Reporting.** Encode reports include `rotation_offset` (u32) and
 `rotation_objective` (a struct of the four lexicographic components
 for diagnostics).
