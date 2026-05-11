@@ -853,6 +853,63 @@ report's `recommended_next` records the outcome:
   preset closes ≥ 75% of the measured HF loss; M3.6 also
   implements `strong`.
 
+**Optional subjective audition field (added at M3.5 per audition
+audit #7).** The characterization report MAY include a top-level
+`subjective_audition` field recording a perceptual A/B audition
+performed against a separate set of reference renders. Subjective
+audition data is kept structurally separate from the deterministic
+`measurements` array: an audition documents which metrics
+correspond to audible change and which are perceptually masked,
+without altering measurement values.
+
+Shape:
+
+```json
+"subjective_audition": {
+  "audition_ref": "build/audition/m3.5-prelude/",
+  "auditioned_at": "2026-MM-DD",
+  "auditioned_by": "PM",
+  "fixtures": [
+    {
+      "name": "sine_128",
+      "perceived_change_axis": "harmonic_content",
+      "masked_by_signal_content": false,
+      "note": "Post-rotation reduces high harmonics; no audible click in either"
+    },
+    {
+      "name": "normalize_false_clamp",
+      "perceived_change_axis": "none",
+      "masked_by_signal_content": true,
+      "note": "87% metric improvement perceptually masked by clipping"
+    }
+  ]
+}
+```
+
+Field semantics:
+
+- `audition_ref` (`String`): repository-relative path or URI to
+  the audition asset directory the audition was performed
+  against.
+- `auditioned_at` (`String`): ISO-8601 date.
+- `auditioned_by` (`String`): identity of the auditioner (typically
+  `"PM"`).
+- `fixtures[].perceived_change_axis` enum:
+  - `"seam_click"` — audible loop-point discontinuity.
+  - `"harmonic_content"` — audible change in high-frequency
+    content / brightness.
+  - `"harshness"` — audible piercing / aliasing character.
+  - `"none"` — no audible difference.
+- `fixtures[].masked_by_signal_content` (`bool`): `true` when a
+  measured metric improvement did NOT produce perceptible
+  change (e.g. clipping or dense harmonics dominate).
+- `fixtures[].note` (`String`): free-form auditioner note.
+
+Omit the field entirely (or set to `null`) when no audition has
+been performed. Do not populate stubs; absence means
+"perceptual data not collected", not "audition produced empty
+result".
+
 ---
 
 ## 11. Voice allocation and SFX
