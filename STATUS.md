@@ -2,13 +2,156 @@
 
 ## Current milestone
 
-**M4.7 — M4 release prep + acceptance + tag `v0.4-rc1`.** Final
-M4 sub-pass. Mirrors M3.8 structure with the same baselines-
-inheritance + literal-pin patterns. No encoder change; no SPEC
-contract change; no M2 / M3 / M4 numeric baseline change.
-Release notes are the load-bearing piece — M4.2 outcome 3,
-M4.4 SKIP, and M4.5 permanently skipped are all explicit, not
-obscured.
+**M5.0 — M5 Contracts Freeze.** No implementation. Contracts
+only. Same shape as M2.0 / M3.0 / M4.0: lock the contracts
+that M5.1+ sub-passes build against. Per consultant M5 plan
+#36. No encoder change; no atom render formula change (SPEC
+§16.9 stability held by default per §16.9.1 forward-visibility
+amendment); no v2 schema change (per consultant #5 — schema
+changes are too permanent for a methodology experiment); no
+M2 / M3 / M4 numeric baseline change.
+
+**Outcomes:**
+
+- **SPEC §10.11 — native-rate characterization contract**
+  (commit `f5e7a96`). Locks the M5 harness contract that
+  M5.1 implements: each characterization SPC MUST configure
+  the DSP pitch register at exactly `0x1000` (4096); new
+  top-level report field `harness_meta` records pitch
+  register + rate strategy + per-signal native rates. M5.1
+  implementation is Option α — scoped to the harness only;
+  the v2 schema's `atom_pool[]` does NOT gain a permanent
+  `native_sample_rate_hz` field at M5 per consultant #5.
+  Three M5.2 outcomes locked: `reliable_preset_eval` (M5.3
+  unlocked), `reliable_no_preset_needed` (M5.3 skipped,
+  proceed to M5.4), `methodology_unresolved` (pre-emphasis
+  defers permanently to M6+, proceed to M5.4 without
+  preset).
+- **SPEC §10.9 — M4.0 thresholds reaffirmed** (commit
+  `44d3c27`). The four-criterion reliable-alignment
+  predicate carries forward unchanged through M5
+  (`zcr_ratio ∈ [0.9, 1.1]`, `normalized_correlation ≥ 0.90`,
+  `alignment_best_offset < alignment_search_limit`,
+  `peak_abs_error_after_gain_normalization ≤ 80%` of
+  unnormalized peak). No relaxation in M5.0; relaxation at
+  M5.2 requires explicit PM review per consultant #7.
+- **SPEC §10.9 — pre-emphasis preset report fields**
+  (commit `0db148d`). M5.3 conditional preset evaluation
+  gains optional report fields (`pre_emphasis_applied`,
+  `pre_emphasis_preset_id`, `pre_emphasis_filter_form`,
+  `rotation_offset_with_pre_emphasis`,
+  `loop_click_abs_with_pre_emphasis`,
+  `noise_floor_metrics_with_pre_emphasis`). Filter form
+  must be hand-derivable (FIR up to 3 taps OR one-pole IIR
+  shelf); **no filter-design crate dependency** unless
+  explicit PM approval at M5.3 brief time per consultant
+  #13.
+- **SPEC §24.1.1 — M5 methodology repair budget tightening**
+  (commit `66edab5`). M5 inherits M4.0's research-spike
+  pattern but tightens to **1+1 loops**: M5.1 native-rate
+  harness + M5.2 characterization re-run + at most one
+  M5.2.1 correction. Stricter than M4's 2-loop budget per
+  consultant #4 — M4 surfaced that methodology investigation
+  can iterate indefinitely without converging; M5 commits to
+  a decision (positive or negative) within tighter bounds.
+- **SPEC §16.9.1 — atom PCM stability amendment procedure**
+  (commit `2980cab`). Forward-visibility documentation only;
+  NOT activated in M5.0. Six-step procedure for IF M5 ever
+  chooses source-domain attenuation work: authorization gate,
+  old SHA retirement, new SHA pinning, acceptance regression,
+  release-note warning, close-out audit. M5 default position
+  per consultant #10 / #19: hold the §16.9 line.
+- **`baselines/m5.json` scaffolded** (commit `2950305`).
+  Six behavior_gated contract entries:
+  `M5_NATIVE_RATE_CHARACTERIZATION_PITCH_REGISTER` (4096
+  with `test:` field), `M5_METHODOLOGY_REPAIR_BUDGET`
+  (1+1 loops), `M5_RELIABLE_ALIGNMENT_THRESHOLD_INHERITED`
+  (M4.0 thresholds carry forward), `M5_PRE_EMPHASIS_FILTER_FORM_CONSTRAINT`
+  (hand-derivable forms only), `M5_ATOM_PCM_STABILITY_HELD`
+  (no §16.9 amendment unless authorized),
+  `M5_RUNTIME_BUDGET` (target 5 s / warning 10 s for the
+  9-signal characterization). `identity_gated` empty by
+  design (M5 default holds §16.9). `inherits_m4: true`.
+- **Pitch-register fixture pin test** (commit `ef87359`).
+  Mirrors the M4.0 Phase G pattern: pin the baseline value
+  4096 (= 0x1000) at compile time via the M2.8.1
+  `include_str!` pattern. M5.0 fixture-pin is a structural
+  drift-guard; M5.1 will add the runtime-behavior test
+  `pitch_register_equals_4096_for_native_rate_signals`.
+
+### M5.0 phase log
+
+- **Phase A (commit `f5e7a96`)** — SPEC §10.11 native-rate
+  characterization contract (Option α, harness-scoped; no v2
+  schema change; three M5.2 outcomes locked).
+- **Phase B (commit `44d3c27`)** — SPEC §10.9 reaffirms M4.0
+  thresholds; no relaxation.
+- **Phase C (commit `0db148d`)** — SPEC §10.9 pre-emphasis
+  preset report fields; hand-derivable filter form
+  constraint.
+- **Phase D (commit `66edab5`)** — SPEC §24.1.1 M5 repair
+  budget tightening (1+1 vs M4's 2 loops).
+- **Phase E (commit `2980cab`)** — SPEC §16.9.1 amendment
+  procedure forward-visibility documentation.
+- **Phase F (commit `2950305`)** — `baselines/m5.json`
+  scaffold; six behavior_gated contracts; inherits_m4.
+- **Phase G (commit `ef87359`)** — pitch register fixture
+  pin (`m5_pitch_register_constant_pinned_at_4096`).
+- **Phase H (this entry)** — STATUS rewrite.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **616 tests
+  workspace-wide** (was 615 at M4.7 close; +1 from the
+  fixture-pin test).
+
+### Decisions log additions (M5.0)
+
+- M5 entry approved per consultant M5 plan #35; no M4 surface
+  blocks entry.
+- M5.0 contracts frozen per consultant M5 plan #4, #5, #6, #7,
+  #10, #11, #12, #13, #16, #19, #22:
+  - Native-rate characterization harness contract
+    (SPEC §10.11); Option α scoped to harness, NO v2 schema
+    change.
+  - M4.0 reliable-alignment thresholds reaffirmed without
+    relaxation.
+  - Pre-emphasis preset report fields locked (coefficients
+    TBD at M5.3).
+  - Methodology repair budget tightened to 1+1 loops; stricter
+    than M4's 2-loop budget.
+  - SPEC §16.9 amendment procedure (§16.9.1) documented for
+    forward visibility; NOT activated.
+  - `baselines/m5.json` scaffolded; inherits M4 by reference.
+  - Pitch-register fixture pin at 4096 (`0x1000`).
+  - Runtime budget locked at target < 5 s / warning > 10 s.
+- Research-spike vs implementation-pass split carries forward
+  (per consultant #2–#4): **M5.1 / M5.2 / M5.4 are
+  research-spikes** with exit criteria; **M5.0 / M5.3 / M5.5
+  / M5.6 are contracted implementation** (M5.3 conditional on
+  M5.2 outcome).
+- M5 sub-pass plan: M5.0 contracts (this pass), M5.1
+  native-rate harness implementation, M5.2 characterization
+  re-run + decision, M5.2.1 conditional correction (at most
+  one), M5.3 conditional pre-emphasis evaluation, M5.4 BRR
+  noise-floor strategy spike, M5.5 GUI / schema polish, M5.6
+  acceptance + release.
+- Release tag policy: `v0.5-rc1` only after final M5.6 close
+  + integrity audit per M2 / M3 / M4 lessons.
+- **M5 default position: hold the §16.9 line.** Source-domain
+  preprocessing defers to M6+ unless M5 data demands it AND
+  PM authorizes amendment per the §16.9.1 procedure.
+
+**Next pass: M5.1 — Native-rate characterization harness
+implementation.** Research-spike per SPEC §24.1.1 with M5's
+tightened 1+1 budget. PM to brief.
+
+**Previous milestone (M4.7) — M4 release prep + acceptance
++ tag `v0.4-rc1`.** Final M4 sub-pass. Mirrors M3.8 structure
+with the same baselines-inheritance + literal-pin patterns.
+No encoder change; no SPEC contract change; no M2 / M3 / M4
+numeric baseline change. Release notes are the load-bearing
+piece — M4.2 outcome 3, M4.4 SKIP, and M4.5 permanently
+skipped are all explicit, not obscured.
 
 **Outcomes:**
 
@@ -1653,17 +1796,28 @@ PM go/defer decision at M3.4 entry brief.
 
 ## Last pass
 
+**Pass M5.0 — M5 Contracts Freeze (Phases A–H).** Eight commits
+covering SPEC §10.11 native-rate characterization (Option α,
+no v2 schema change), §10.9 M5 threshold reaffirmation, §10.9
+pre-emphasis preset report fields, §24.1.1 M5 methodology
+repair budget (1+1 loops), §16.9.1 atom PCM stability
+amendment procedure (forward visibility), `baselines/m5.json`
+scaffold with 6 behavior_gated entries, pitch-register
+fixture-pin test, STATUS rewrite. No encoder change; no
+render formula change; no v2 schema change; no M2/M3/M4
+baseline change. Workspace test count 615 → 616.
+
+---
+
 **Pass M4.7 — M4 release prep + acceptance + tag `v0.4-rc1`
 (Phases 1–6).** Final M4 sub-pass. Six commits: `m4-acceptance`
 5-stage bundle CLI, reproducer doc update, release notes with
 M4.2 / M4.4 / M4.5 deferral documentation, baseline
 classification audit, SPEC §25 M5 prelude scope, STATUS
-rewrite. Workspace test count unchanged at 615 (release prep
-is implementation + docs). `m4-acceptance` bundle.status =
-`warn` end-to-end on both canonical M2 + M3.3 edge-case
-fixtures — only stage 2's `alignment_valid: false`
-(documented M4.2 outcome 3) is non-clean; stages 1/3/4/5 ok.
-M4 closed; PM consults before M5 entry.
+rewrite. Workspace test count unchanged at 615. `m4-acceptance`
+bundle.status = `warn` end-to-end on both fixtures; only
+stage 2's `alignment_valid: false` (documented M4.2 outcome 3)
+is non-clean. M4 closed at `v0.4-rc1`.
 
 ---
 
