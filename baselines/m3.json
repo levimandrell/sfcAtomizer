@@ -122,6 +122,7 @@
       "value": "post <= pre",
       "kind": "improvement_invariant",
       "locked_at": "M3.3",
+      "test": "core/tests/atom_edge_cases.rs::phase_rotation_loop_click_never_regresses_against_pre_m3",
       "rule": "For every atom fixture, M3_ATOM_<NAME>_LOOP_CLICK_ABS_PHASE_ROTATION MUST be <= M3_ATOM_<NAME>_LOOP_CLICK_ABS_PRE_M3. Equal is acceptable (rotation chose offset=0); strictly greater is a regression. Enforced by core/tests/atom_edge_cases.rs::phase_rotation_loop_click_never_regresses_against_pre_m3 (iterates all 11 fixtures)."
     }
   ],
