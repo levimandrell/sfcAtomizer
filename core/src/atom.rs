@@ -116,6 +116,18 @@ pub struct AtomBrrOutput {
     /// with `window = 8`. Reports-only at M3 (may promote to a
     /// gate at M4+ after the metric has stabilized).
     pub loop_window_rms_delta: f64,
+    /// M3.3: chosen rotation offset per SPEC §10.7. `0` when no
+    /// rotation was applied (e.g. all-tied candidates → smallest
+    /// offset wins). Block-aligned: 0, 16, 32, ..., cycle_len - 16.
+    pub rotation_offset: u32,
+    /// M3.3: `peak_abs_error` lex-level for the chosen rotation
+    /// candidate (max `|rotated_source[i] - decoded[i]|` widened to
+    /// `i32`). Reports-only; M3 gates only on `loop_click_abs`.
+    pub peak_abs_error_post_rotation: i32,
+    /// M3.3: `rms_error` lex-level for the chosen rotation
+    /// candidate (sqrt of mean squared `rotated_source - decoded`).
+    /// Reports-only.
+    pub rms_error_post_rotation: f64,
 }
 
 /// Render an atom's PCM cycle per SPEC §16.9 (single-cycle additive
@@ -166,6 +178,114 @@ pub fn render_to_pcm(atom: &AtomSlot) -> Vec<i16> {
         .collect()
 }
 
+// ============================================================
+// SPEC §10.7 — Phase rotation (M3.3)
+// ============================================================
+
+/// Block-aligned rotation candidate offsets per SPEC §10.7.
+///
+/// Returns `[0, 16, 32, ..., cycle_len - 16]` — 4 candidates for
+/// `cycle_len = 64`, 8 for 128, 16 for 256. Non-block-aligned
+/// offsets are reserved for future encoder refinement (M4+).
+pub fn rotation_candidate_offsets(cycle_len: usize) -> Vec<usize> {
+    (0..cycle_len).step_by(16).collect()
+}
+
+/// Rotate a source PCM cycle by `offset` samples per SPEC §10.7:
+///
+/// ```text
+/// rotated[n] = source[(n + offset) mod source.len()]
+/// ```
+///
+/// Pure function; allocates a new `Vec` so callers get clean
+/// ownership semantics. `offset` is taken mod `source.len()` so any
+/// non-negative integer is valid.
+pub fn rotate_pcm(source: &[i16], offset: usize) -> Vec<i16> {
+    let n = source.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let off = offset % n;
+    let mut out = Vec::with_capacity(n);
+    out.extend_from_slice(&source[off..]);
+    out.extend_from_slice(&source[..off]);
+    out
+}
+
+/// `peak_abs_error` per SPEC §10.7 — max absolute per-sample
+/// difference between `rotated_source` and `decoded`, computed in
+/// widened `i32` arithmetic so i16-range deltas can't overflow.
+///
+/// Panics if the slices differ in length (the encoder loop always
+/// pairs same-length buffers; mismatched lengths would indicate a
+/// caller bug).
+pub fn peak_abs_error(rotated_source: &[i16], decoded: &[i16]) -> i32 {
+    assert_eq!(rotated_source.len(), decoded.len());
+    rotated_source
+        .iter()
+        .zip(decoded.iter())
+        .map(|(s, d)| (*s as i32 - *d as i32).abs())
+        .max()
+        .unwrap_or(0)
+}
+
+/// `rms_error` per SPEC §10.7 — root-mean-square of per-sample
+/// `(rotated_source - decoded)` differences. Sum-of-squares is
+/// widened to `i64` (max `(2 * 32767)^2 * 256 ≈ 1.1 × 10^12` for
+/// cycle_len = 256) and the final `sqrt` is the only `f64` op.
+///
+/// Panics if the slices differ in length.
+pub fn rms_error(rotated_source: &[i16], decoded: &[i16]) -> f64 {
+    assert_eq!(rotated_source.len(), decoded.len());
+    let n = rotated_source.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let mut sum_sq: i64 = 0;
+    for (s, d) in rotated_source.iter().zip(decoded.iter()) {
+        let diff = (*s as i32 - *d as i32) as i64;
+        sum_sq += diff * diff;
+    }
+    ((sum_sq as f64) / (n as f64)).sqrt()
+}
+
+/// One rotation candidate's scored output. Internal to the
+/// `render_to_brr` pipeline; exposed `pub` so tests can construct
+/// fixtures without going through the full encode path.
+#[derive(Debug, Clone)]
+pub struct RotationCandidate {
+    pub offset: u32,
+    pub rotated_source: Vec<i16>,
+    pub brr_bytes: Vec<u8>,
+    pub encode_summary: EncodeSummary,
+    pub encode_blocks: Vec<EncodedBlockReport>,
+    pub decoded: Vec<i16>,
+    pub loop_click_abs: i32,
+    pub peak_abs_error: i32,
+    pub rms_error: f64,
+}
+
+/// Lex-minimum candidate selector per SPEC §10.7.
+///
+/// Tuple order: `(loop_click_abs, peak_abs_error, rms_error, offset)`.
+/// `f64::total_cmp` is used for `rms_error` to avoid NaN ambiguity
+/// (the formula guarantees finite non-negative values, so this is
+/// belt-and-suspenders). The final `offset` comparison provides the
+/// "smallest rotation wins on ties" tie-breaker that pins
+/// `amplitude_zero` (and any future all-tied fixture) to `offset = 0`.
+pub fn pick_best_rotation(candidates: Vec<RotationCandidate>) -> RotationCandidate {
+    candidates
+        .into_iter()
+        .min_by(|a, b| {
+            a.loop_click_abs
+                .cmp(&b.loop_click_abs)
+                .then(a.peak_abs_error.cmp(&b.peak_abs_error))
+                .then(a.rms_error.total_cmp(&b.rms_error))
+                .then(a.offset.cmp(&b.offset))
+        })
+        .expect("at least one rotation candidate must exist")
+}
+
 /// Render the PCM cycle, then encode through the M1 BRR encoder.
 ///
 /// Single-cycle atoms have block 0 = first block = loop entry block,
@@ -175,52 +295,78 @@ pub fn render_to_pcm(atom: &AtomSlot) -> Vec<i16> {
 /// both the PCM bytes and the BRR bytes for downstream determinism
 /// gates (`render-atom`'s output, M2 acceptance baselines).
 pub fn render_to_brr(atom: &AtomSlot) -> Result<AtomBrrOutput, AtomRenderError> {
-    let pcm = render_to_pcm(atom);
-    let pcm_sha256 = sha256_hex_i16(&pcm);
+    // SPEC §16.9: atom PCM is rendered exactly once and is the
+    // identity-gated artifact. Rotation operates on a *transient*
+    // encoder input — `AtomBrrOutput.pcm` and `pcm_sha256` always
+    // reflect the original unrotated source.
+    let source_pcm = render_to_pcm(atom);
+    let pcm_sha256 = sha256_hex_i16(&source_pcm);
 
     let opts = EncodeOptions {
         force_filter_0_first_block: atom.render.force_filter_0_first_block,
         loop_entry_block_index: Some(0),
     };
-    // loop_start = 0 is always 16-aligned and (for valid atoms) <
-    // pcm.len() (cycle_len 64/128/256 ≥ 64), so encode_looped won't
-    // surface its `LoopStartNotAligned` / `LoopStartOutOfRange`
-    // error variants here. The expect() documents that contract.
-    let result = encode_looped(&pcm, 0, &opts)
-        .expect("encode_looped is infallible at loop_start=0 for valid atoms");
 
-    let brr_sha256 = crate::asm::sha256_hex(&result.bytes);
+    // SPEC §10.7: score every block-aligned rotation candidate,
+    // pick the lex-minimum.
+    let offsets = rotation_candidate_offsets(source_pcm.len());
+    let mut candidates: Vec<RotationCandidate> = Vec::with_capacity(offsets.len());
+    for offset in offsets {
+        let rotated = rotate_pcm(&source_pcm, offset);
+        // loop_start = 0 is 16-aligned and < rotated.len() (valid
+        // atoms have cycle_len ∈ {64, 128, 256}); encode_looped is
+        // infallible here, mirroring the M2.2 contract.
+        let result = encode_looped(&rotated, 0, &opts)
+            .expect("encode_looped is infallible at loop_start=0 for valid atoms");
+        let blocks: Vec<[u8; 9]> = result
+            .bytes
+            .chunks_exact(9)
+            .map(|c| {
+                let mut b = [0u8; 9];
+                b.copy_from_slice(c);
+                b
+            })
+            .collect();
+        let mut decode_state = crate::brr::BrrDecoderState::default();
+        let decoded = crate::brr::decode_blocks(&blocks, &mut decode_state);
 
-    // M3.1: decode the BRR bytes back to PCM and compute the
-    // SPEC §10.6 loop-click metrics on the decoded waveform. Atoms
-    // loop sample 0 .. cycle_len_samples (single-cycle, looped
-    // from block 0); both metrics use the full decoded buffer.
-    let blocks: Vec<[u8; 9]> = result
-        .bytes
-        .chunks_exact(9)
-        .map(|c| {
-            let mut b = [0u8; 9];
-            b.copy_from_slice(c);
-            b
-        })
-        .collect();
-    let mut decode_state = crate::brr::BrrDecoderState::default();
-    let decoded = crate::brr::decode_blocks(&blocks, &mut decode_state);
-    let decoded_brr_pcm_sha256 = sha256_hex_i16(&decoded);
-    let loop_click_abs = crate::audition::loop_click_abs(&decoded, 0, decoded.len());
+        let lc = crate::audition::loop_click_abs(&decoded, 0, decoded.len());
+        let pae = peak_abs_error(&rotated, &decoded);
+        let rmse = rms_error(&rotated, &decoded);
+
+        candidates.push(RotationCandidate {
+            offset: offset as u32,
+            rotated_source: rotated,
+            brr_bytes: result.bytes,
+            encode_summary: result.summary,
+            encode_blocks: result.blocks,
+            decoded,
+            loop_click_abs: lc,
+            peak_abs_error: pae,
+            rms_error: rmse,
+        });
+    }
+
+    let best = pick_best_rotation(candidates);
+
+    let brr_sha256 = crate::asm::sha256_hex(&best.brr_bytes);
+    let decoded_brr_pcm_sha256 = sha256_hex_i16(&best.decoded);
     let loop_window_rms_delta =
-        crate::audition::loop_window_rms_delta(&decoded, 0, decoded.len(), 8);
+        crate::audition::loop_window_rms_delta(&best.decoded, 0, best.decoded.len(), 8);
 
     Ok(AtomBrrOutput {
-        pcm,
-        brr_bytes: result.bytes,
-        encode_summary: result.summary,
-        encode_blocks: result.blocks,
+        pcm: source_pcm,
+        brr_bytes: best.brr_bytes,
+        encode_summary: best.encode_summary,
+        encode_blocks: best.encode_blocks,
         pcm_sha256,
         brr_sha256,
         decoded_brr_pcm_sha256,
-        loop_click_abs,
+        loop_click_abs: best.loop_click_abs,
         loop_window_rms_delta,
+        rotation_offset: best.offset,
+        peak_abs_error_post_rotation: best.peak_abs_error,
+        rms_error_post_rotation: best.rms_error,
     })
 }
 
@@ -523,10 +669,16 @@ mod tests {
         // §16.9 canonical 0.75-amplitude atom is around 10 KLSBs,
         // well past this gate but a property of the encoder's
         // shift quantisation, not a render-side bug.
+        //
+        // Post-M3.3 (phase rotation): the encoder's input is the
+        // ROTATED source, not the unrotated `out.pcm`. Round-trip
+        // fidelity is meaningful only against the rotated source
+        // (the signal the encoder actually saw). Reconstruct it
+        // via `rotate_pcm(out.pcm, out.rotation_offset)` — that
+        // mirrors the §10.7 contract.
         let mut atom = canonical_sine_atom(128);
         atom.amplitude = 8000.0 / 32767.0;
         let out = render_to_brr(&atom).expect("render");
-        // Decode the BRR back to PCM and compare to the source.
         let blocks: Vec<[u8; 9]> = out
             .brr_bytes
             .chunks_exact(9)
@@ -538,16 +690,19 @@ mod tests {
             .collect();
         let mut state = crate::brr::BrrDecoderState::default();
         let decoded = crate::brr::decode_blocks(&blocks, &mut state);
-        assert_eq!(decoded.len(), out.pcm.len());
+        let rotated_source = rotate_pcm(&out.pcm, out.rotation_offset as usize);
+        assert_eq!(decoded.len(), rotated_source.len());
         let max_err = decoded
             .iter()
-            .zip(out.pcm.iter())
+            .zip(rotated_source.iter())
             .map(|(d, s)| (*d as i32 - *s as i32).unsigned_abs())
             .max()
             .unwrap();
         assert!(
             max_err < 512,
-            "BRR round-trip peak error {max_err} >= 512 LSBs (M2 atom-render envelope, filter-0-forced)"
+            "BRR round-trip peak error {max_err} >= 512 LSBs vs rotated source \
+             (rotation_offset={}; M2 atom-render envelope, filter-0-forced)",
+            out.rotation_offset
         );
     }
 
@@ -572,40 +727,37 @@ mod tests {
         }
     }
 
-    /// **M2 atom-loop-click baseline** for the canonical 128-sample
-    /// sine atom (`amplitude=0.75`, `partial.amplitude=1.0`,
-    /// `phase_cycles=0`). The score is `|first_decoded -
-    /// last_decoded|` — for a discrete sine `sin(2πk/N)` sampled
-    /// at integer indices, sample N-1 is `sin(2π·(N-1)/N)` ≠ 0,
-    /// so the wrap from sample N-1 back to sample 0 (= 0) creates
-    /// a non-zero discontinuity that's a property of the cycle's
-    /// shape, not a defect. This locked value is the
-    /// M2_ATOM_128_SINE_LOOP_CLICK_SCORE baseline.
+    /// **M2 atom-loop-click baseline** (M2.2-era, kept for
+    /// documentation). For the canonical 128-sample sine atom
+    /// (`amplitude=0.75`, `partial.amplitude=1.0`,
+    /// `phase_cycles=0`) BEFORE phase rotation, the encoder's
+    /// internal score was 1197 — `|first_decoded - last_decoded|`
+    /// for a discrete sine sampled at integer indices. M3.3 phase
+    /// rotation drops this to 0 by selecting `rotation_offset=96`.
+    /// Documentary; cross-referenced in `baselines/m2.json` as
+    /// `_same_numeric_value_as M3_ATOM_128_SINE_LOOP_CLICK_ABS_PRE_M3`.
     pub(crate) const M2_ATOM_128_SINE_LOOP_CLICK_SCORE: f64 = 1197.0;
 
-    /// Same baseline for the canonical 64-sample sine atom.
-    /// Higher than the 128-sample value because the larger angular
-    /// step per sample (2π/64 vs 2π/128) means the last sample lands
-    /// further from zero on the way back to the loop entry.
+    /// Same baseline for the canonical 64-sample sine atom. M3.3
+    /// phase rotation drops this to 0 by selecting
+    /// `rotation_offset=48`.
     pub(crate) const M2_ATOM_64_SINE_LOOP_CLICK_SCORE: f64 = 2407.0;
 
+    /// Post-M3.3 (phase rotation) the encoder-internal loop_click_score
+    /// equals the SPEC §10.6 `loop_click_abs` (same formula). Rotation
+    /// finds offsets that drive the seam discontinuity to zero for the
+    /// canonical sine atoms.
     #[test]
-    fn brr_loop_click_score_for_pure_sine_matches_baseline() {
-        // For a discrete sine over one cycle the wrap discontinuity
-        // is bounded by the source signal's last-sample magnitude,
-        // not the encoder's quantisation. The exact value depends on
-        // the encoder's chosen (filter, shift) for the final block
-        // and is locked here as the M2 atom-loop-click baseline.
+    fn brr_loop_click_score_for_pure_sine_post_rotation_is_zero() {
         let atom = canonical_sine_atom(128);
         let out = render_to_brr(&atom).expect("render");
         let score = out
             .encode_summary
             .loop_click_score
             .expect("looped encode must populate loop_click_score");
-        assert_eq!(
-            score, M2_ATOM_128_SINE_LOOP_CLICK_SCORE,
-            "M2_ATOM_128_SINE_LOOP_CLICK_SCORE drift: got {score}, expected {M2_ATOM_128_SINE_LOOP_CLICK_SCORE}"
-        );
+        assert_eq!(score, 0.0, "post-rotation sine_128 loop_click_score");
+        assert_eq!(out.loop_click_abs, 0);
+        assert_eq!(out.rotation_offset, 96);
 
         let atom_64 = canonical_sine_atom(64);
         let out_64 = render_to_brr(&atom_64).expect("render");
@@ -613,10 +765,14 @@ mod tests {
             .encode_summary
             .loop_click_score
             .expect("looped encode must populate loop_click_score");
-        assert_eq!(
-            score_64, M2_ATOM_64_SINE_LOOP_CLICK_SCORE,
-            "M2_ATOM_64_SINE_LOOP_CLICK_SCORE drift: got {score_64}, expected {M2_ATOM_64_SINE_LOOP_CLICK_SCORE}"
-        );
+        assert_eq!(score_64, 0.0, "post-rotation sine_64 loop_click_score");
+        assert_eq!(out_64.loop_click_abs, 0);
+        assert_eq!(out_64.rotation_offset, 48);
+
+        // M2.2-era values kept as documentary constants — confirm
+        // they're still referenced somewhere to silence dead-code.
+        let _ = M2_ATOM_128_SINE_LOOP_CLICK_SCORE;
+        let _ = M2_ATOM_64_SINE_LOOP_CLICK_SCORE;
     }
 
     #[test]
@@ -666,36 +822,44 @@ mod tests {
     /// M3.1 sentinel that prints the canonical atoms' new
     /// SPEC §10.6 loop-click metrics and the decoded-from-BRR PCM
     /// SHA. Run with `cargo test -p sfc-atomizer-core --lib
-    /// m3_atom_print -- --nocapture --ignored`.
+    /// m3_atom_print -- --nocapture --ignored`. Extended at M3.3
+    /// to also print SPEC §10.7 rotation outputs.
     #[test]
     #[ignore]
     fn m3_atom_print_baselines() {
-        let out_128 = render_to_brr(&canonical_sine_atom(128)).expect("render");
-        let out_64 = render_to_brr(&canonical_sine_atom(64)).expect("render");
-        eprintln!(
-            "M3_ATOM_128_SINE_LOOP_CLICK_ABS_PRE_M3 = {}",
-            out_128.loop_click_abs
-        );
-        eprintln!(
-            "M3_ATOM_64_SINE_LOOP_CLICK_ABS_PRE_M3  = {}",
-            out_64.loop_click_abs
-        );
-        eprintln!(
-            "M3_ATOM_128_SINE_LOOP_WINDOW_RMS_DELTA_PRE_M3 = {}",
-            out_128.loop_window_rms_delta
-        );
-        eprintln!(
-            "M3_ATOM_64_SINE_LOOP_WINDOW_RMS_DELTA_PRE_M3  = {}",
-            out_64.loop_window_rms_delta
-        );
-        eprintln!(
-            "M3_ATOM_128_SINE_DECODED_BRR_PCM_SHA256_PRE_M3 = {}",
-            out_128.decoded_brr_pcm_sha256
-        );
-        eprintln!(
-            "M3_ATOM_64_SINE_DECODED_BRR_PCM_SHA256_PRE_M3  = {}",
-            out_64.decoded_brr_pcm_sha256
-        );
+        for (label, atom) in [
+            ("128", canonical_sine_atom(128)),
+            ("64", canonical_sine_atom(64)),
+        ] {
+            let out = render_to_brr(&atom).expect("render");
+            eprintln!("--- canonical sine_{label} ---");
+            eprintln!("  PCM_SHA256                       = {}", out.pcm_sha256);
+            eprintln!("  BRR_SHA256                       = {}", out.brr_sha256);
+            eprintln!(
+                "  DECODED_BRR_PCM_SHA256           = {}",
+                out.decoded_brr_pcm_sha256
+            );
+            eprintln!(
+                "  LOOP_CLICK_ABS                   = {}",
+                out.loop_click_abs
+            );
+            eprintln!(
+                "  LOOP_WINDOW_RMS_DELTA            = {}",
+                out.loop_window_rms_delta
+            );
+            eprintln!(
+                "  ROTATION_OFFSET                  = {}",
+                out.rotation_offset
+            );
+            eprintln!(
+                "  PEAK_ABS_ERROR_POST_ROTATION     = {}",
+                out.peak_abs_error_post_rotation
+            );
+            eprintln!(
+                "  RMS_ERROR_POST_ROTATION          = {}",
+                out.rms_error_post_rotation
+            );
+        }
     }
 
     // ============================================================
@@ -797,33 +961,39 @@ mod tests {
         assert_eq!(out.brr_sha256, out2.brr_sha256);
     }
 
-    /// **M2 atom-render baselines** — locked SHAs for the canonical
-    /// 64- and 128-sample sine atoms (`amplitude=0.75`,
-    /// `partial.amplitude=1.0`, `phase_cycles=0`,
-    /// `force_filter_0_first_block=true`). Drift here means the
-    /// render formula, the M1 BRR encoder, or the rounding mode
-    /// changed; either is a producer-side regression and must be
-    /// flagged. Mirrors the role of M1_DRIVER_CODE_SHA256 / etc. in
-    /// the M1 baselines block.
+    /// **Atom render baselines (post-M3.3 phase rotation).** PCM
+    /// SHAs are identity-gated across milestones per SPEC §16.9
+    /// amendment — drift here is a render-formula regression. BRR
+    /// SHAs shifted at M3.3 from the M2.2-era values; the
+    /// post-rotation values land in
+    /// `baselines/m3.json::documentary_snapshot` as
+    /// `M3_ATOM_<NAME>_BRR_SHA256_PHASE_ROTATION` (will shift
+    /// again at later encoder-changing sub-passes).
     #[test]
-    fn m2_atom_render_baselines_locked() {
+    fn atom_render_baselines_post_rotation_pinned() {
         let out_128 = render_to_brr(&canonical_sine_atom(128)).expect("render");
         assert_eq!(
             out_128.pcm_sha256, "7f9b274e9fa1c7088ba4d125a2899293bae79115bdd20824b2afb54116f9789a",
-            "M2_ATOM_128_SINE_PCM_SHA256 drift"
+            "M2_ATOM_128_SINE_PCM_SHA256 drift (identity-gated per §16.9)"
         );
+        // M3.3 post-rotation BRR SHA (rotation_offset=96 for
+        // canonical sine_128). M2.2 value
+        // (348c7914…ac876) retired here.
         assert_eq!(
-            out_128.brr_sha256, "348c791449916e1f9169d0e229cd79bf97967b19e22db3c4a5be7dc9c69ac876",
-            "M2_ATOM_128_SINE_BRR_SHA256 drift"
+            out_128.brr_sha256, "b97f590f518ada958218d4de8ea8fe7bb294f7af4717cebc3d603ac296d25162",
+            "M3_ATOM_128_SINE_BRR_SHA256_PHASE_ROTATION drift"
         );
         let out_64 = render_to_brr(&canonical_sine_atom(64)).expect("render");
         assert_eq!(
             out_64.pcm_sha256, "0638ddfe8a2a8fb4c98ff6fed37ff3475c42dd257df893eca9e836d09d3e6565",
-            "M2_ATOM_64_SINE_PCM_SHA256 drift"
+            "M2_ATOM_64_SINE_PCM_SHA256 drift (identity-gated per §16.9)"
         );
+        // M3.3 post-rotation BRR SHA (rotation_offset=48 for
+        // canonical sine_64). M2.2 value
+        // (78da253b…22e96) retired here.
         assert_eq!(
-            out_64.brr_sha256, "78da253b65a6a8d067102fe30ed90353c25b6981a71e3cafc6dd4f3041822e96",
-            "M2_ATOM_64_SINE_BRR_SHA256 drift"
+            out_64.brr_sha256, "8fd44c1d56d36175b195f68fc5a5080b17bf9634545918d2d9f776267f49b655",
+            "M3_ATOM_64_SINE_BRR_SHA256_PHASE_ROTATION drift"
         );
     }
 }
