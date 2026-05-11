@@ -2,14 +2,161 @@
 
 ## Current milestone
 
-**M3.8.1 — Release-final test-count reconciliation. M3 closed
-at `v0.3-rc1`.** Documentation-only pass. Consultant M3 close-out
-audit flagged a single block-M3-close item: PM's pre-audit
-summary claimed "595 tests workspace-wide" while every release
-artifact (STATUS, `RELEASE_NOTES_v0.3-rc.md`,
-`docs/reproduce-m2.md`) consistently records 579. The 595
-figure was a PM error in the consultant brief, not a real
-claim from any release artifact.
+**M4.0 — M4 Contracts Freeze.** No implementation beyond the
+SPEC §10.10 noise-floor metric helpers and their fixture-pin
+tests. Same shape as M2.0 / M3.0: lock the contracts that
+M4.1+ sub-passes build against. No encoder change, no atom
+PCM change (SPEC §16.9 reaffirmed at M4 boundary), no M2 / M3
+baseline change.
+
+**Outcomes:**
+
+- **SPEC §10.9 — reliable-alignment criteria + search range**
+  (commit `961ca2f`). Four conditions (`zcr_ratio ∈ [0.9, 1.1]`,
+  `normalized_correlation ≥ 0.90`, `alignment_best_offset <
+  alignment_search_limit`, gain-vs-shape separator) must hold
+  for every monotonicity-anchor signal. Search range set to
+  `max_i(cycle_len_samples_i) = 256` for `m3_5_canonical`;
+  supersedes M3.5.1's `max_offset = 32`. Schema bumped to v4
+  with four new top-level fields (`alignment_search_limit`,
+  `alignment_boundary_hit`, `alignment_valid`,
+  `methodology_precondition_passed`); populated at M4.1 / M4.2.
+- **SPEC §10.10 — BRR encoder noise-floor metrics**
+  (commit `ed989c5`). Four metrics:
+  `peak_abs_raw_vs_source` (i32 widened-abs delta),
+  `rms_raw_vs_source` (f64 from i64 sum-of-squares),
+  `snr_db` (f64; +inf when err_rms < 1e-12; 0.0 when source
+  is silent), `clipping_count_raw` (u32; widened-i32
+  `|x| ≥ 32767`; counts ±32767 AND -32768). Compared against
+  the rotated source (SPEC §10.7), not the pre-rotation
+  original.
+- **SPEC §10.9 — pre-emphasis pipeline ordering contract**
+  (commit `006d3a9`). Locked order:
+  `render → pre_emphasis → rotation → encode`. Atom PCM SHA
+  refers to the pre-filter render output (identity-gated per
+  §16.9). Rotation and noise-floor metrics compare against
+  rotated-filtered source when pre-emphasis is active. Schema
+  example block updated from v3 to v4.
+- **SPEC §24 amendments — M4 research-spike exit criteria +
+  baseline shift rules** (commit `8b30174`). Per-spike
+  contracts: M4.1 + M4.2 + M4.2.1 methodology repair budget
+  (2-loop cap), M4.3 contracted implementation, M4.4 encoder
+  improvement spike (≥10% rms-or-peak gate + no regressions
+  + ≤2× encode-runtime ceiling), M4.5 conditional
+  pre-emphasis (skipped if M4.2 yields unreliable
+  measurements), M4.6 GUI polish (unconditional), M4.7
+  acceptance + release. Baseline shift rules: must-not-shift
+  M1/M2 + atom PCM SHAs + M2 gates; expected-to-shift
+  conditional on M4.4 (BRR/decoded-BRR SHAs, loop_click,
+  rms/peak metrics, gaussian characterization snapshots).
+  M2.8.1 identity-gated rule carried forward.
+- **`baselines/m4.json` scaffolded** (commit `beb1412`).
+  Six behavior_gated contract entries (alignment criteria,
+  search range, noise-floor metric names, encoder spike
+  exit criterion, methodology repair budget, pre-emphasis
+  pipeline order). identity_gated and documentary_snapshot
+  empty until M4.1+ populates. `inherits_m3: true`.
+- **Noise-floor metric helpers + fixture-pin tests**
+  (commits `0848d84`, `5513108`). Four public functions in
+  `core::audition` (same module as the M3.0 loop-click
+  helpers so the encoder-independent measurement surface
+  stays in one place). 14 fixture tests on hand-constructed
+  PCM vectors pin the formulas BEFORE M4.3 applies them to
+  atoms (M3.0 Phase H pattern — prevents the circular-
+  validation trap where M4.4 encoder changes retroactively
+  tweak the metric to look better).
+
+### M4.0 phase log
+
+- **Phase A (commit `961ca2f`)** — SPEC §10.9 reliable-alignment
+  criteria + search range. Schema v3 → v4.
+- **Phase B (commit `ed989c5`)** — SPEC §10.10 BRR noise-floor
+  metrics. Four metric definitions + comparison source +
+  M4.4 exit criterion.
+- **Phase C (commit `006d3a9`)** — SPEC §10.9 pre-emphasis
+  pipeline ordering contract. Render → pre_emphasis →
+  rotation → encode. Atom PCM SHA pinned to pre-filter
+  render.
+- **Phase D + E (commit `8b30174`)** — SPEC §24.1
+  research-spike exit criteria + §24.2 baseline shift rules.
+  Six sub-pass contracts. Must-not-shift / expected-to-shift
+  classification.
+- **Phase F (commit `beb1412`)** — `baselines/m4.json`
+  scaffold. Six behavior_gated contract entries; inherits_m3.
+- **Phase G (commits `0848d84`, `5513108`)** — Four pure
+  metric functions in `core::audition`; 14 fixture tests in
+  `core/tests/brr_noise_floor_metric.rs`.
+- **Phase H (this entry)** — STATUS rewrite.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **593 tests
+  workspace-wide** (was 579 at M3.8.1 close; +14 from the
+  fixture-pin tests).
+
+### Decisions log additions (M4.0)
+
+- M4 entry approved. M3 closed at `v0.3-rc1` (commit
+  `7a2329f`) with `579 tests` verified at M3.8.1 audit; the
+  consultant brief's "595 tests" claim was a PM-side
+  miscount, not a docs drift.
+- M4.0 contracts frozen per consultant M4 plan #5–#21:
+  reliable-alignment criteria (4 conditions), alignment
+  search range (= max_cycle_len), characterization signal
+  set (same 9 as M3.5), BRR noise-floor metrics (peak / rms
+  / snr_db / clipping_count_raw), pre-emphasis ordering
+  (render → pre_emphasis → rotation → encode),
+  research-spike hard-caps (2-loop methodology budget,
+  10% encoder improvement gate), baseline shift rules.
+- `baselines/m4.json` scaffolded; inherits M3 by reference.
+- M4 identity-gated baseline rule carried from M2.8.1: every
+  new `identity_gated` entry ships with an `include_str!` +
+  `serde-parse` + `assert_eq!` test asserting the value.
+  M4.7 `m4-acceptance` stage 5 will enforce at runtime.
+- Research-spike vs implementation-pass split (consultant
+  M4 plan #4): M4.1, M4.4, M4.5 are research-spikes with
+  exit criteria; M4.0, M4.2, M4.3, M4.6, M4.7 are
+  contracted-implementation passes. Spike passes may exit
+  with "no production change" and still close successfully.
+- BRR noise-floor metric formulas fixture-pinned at M4.0
+  (independent of encoder, 14 tests); M4.3 wires them through
+  the atom encode path and the gaussian characterization
+  report.
+- M4 sub-pass plan: M4.1 alignment fix, M4.2 characterization
+  re-run, M4.2.1 conditional correction, M4.3 noise-floor
+  metric wiring, M4.4 encoder improvement spike (conditional
+  production), M4.5 pre-emphasis evaluation (conditional;
+  only if M4.2 valid), M4.6 GUI polish, M4.7 acceptance +
+  release.
+- Release tag policy: `v0.4-rc1` only after final M4.7 close
+  + integrity audit per M2 / M3 lessons.
+
+### Spec ambiguity flagged
+
+The brief's stop-condition resolution for
+`clipping_count_raw` proposed `x == i16::MAX || x ==
+i16::MIN` to dodge the `i16::MIN.abs()` overflow. That
+definition would NOT count `-32767` (since `i16::MIN` is
+`-32768`), conflicting with the brief's own test expectation
+of count = 3 for `[32767, -32767, 32766, 0, 32767]`. SPEC
+§10.10 and the implementation adopt the widened-i32 form
+(`(x as i32).abs() >= 32767`) which matches the test
+contract and counts `±32767` AND `-32768`. Reported in the
+Phase B commit message; PM may want to confirm SPEC §10.10
+matches intent.
+
+**Next pass: M4.1 — Alignment search range expansion +
+reliable-alignment criteria implementation.** Research-spike
+with exit criteria from SPEC §24.1. PM to brief.
+
+**Previous milestone (M3.8.1) — Release-final test-count
+reconciliation. M3 closed at `v0.3-rc1`.** Documentation-only
+pass. Consultant M3 close-out audit flagged a single
+block-M3-close item: PM's pre-audit summary claimed "595
+tests workspace-wide" while every release artifact (STATUS,
+`RELEASE_NOTES_v0.3-rc.md`, `docs/reproduce-m2.md`)
+consistently records 579. The 595 figure was a PM error in
+the consultant brief, not a real claim from any release
+artifact.
 
 **M3.8.1 audit verification (Phase 1):** ran
 `cargo test --workspace` against `main` at the v0.3-rc1
@@ -556,14 +703,25 @@ PM go/defer decision at M3.4 entry brief.
 
 ## Last pass
 
+**Pass M4.0 — M4 Contracts Freeze (Phases A–H).** Detail folded
+into the "Current milestone" section above. Eight commits
+covering: SPEC §10.9 reliable-alignment + search-range
+amendment (schema v3 → v4), SPEC §10.10 BRR noise-floor
+metrics, SPEC §10.9 pre-emphasis ordering, SPEC §24.1
+research-spike exit criteria + §24.2 baseline shift rules,
+`baselines/m4.json` scaffold, four `core::audition` metric
+helpers, 14 fixture-pin tests, STATUS rewrite. No encoder
+change; no atom render change; no M2 / M3 baseline change.
+Workspace test count 579 → 593.
+
+---
+
 **Pass M3.8.1 — Release-final test-count reconciliation.**
 Documentation-only verification per consultant M3 close-out
-audit's single block finding. Detail folded into "Current
-milestone" above. `cargo test --workspace` runner reports
-579 passed / 0 failed / 4 ignored across 15 test binaries,
-matching every release artifact. `v0.3-rc1` (`7a2329f`)
-remains the canonical M3 tag; no rc2 retag. M3 officially
-closed.
+audit's single block finding. `cargo test --workspace` runner
+reports 579 passed / 0 failed / 4 ignored across 15 test
+binaries at the v0.3-rc1 commit. `v0.3-rc1` (`7a2329f`)
+remains the canonical M3 tag.
 
 ---
 
