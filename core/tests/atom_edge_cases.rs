@@ -213,16 +213,31 @@ fn m3_2_print_atom_edge_case_baselines() {
     for (name, atom) in all_fixtures() {
         let out = render_to_brr(&atom).expect("render");
         eprintln!("--- {name} ---");
-        eprintln!("  PCM_SHA256                = {}", out.pcm_sha256);
-        eprintln!("  BRR_SHA256                = {}", out.brr_sha256);
+        eprintln!("  PCM_SHA256                       = {}", out.pcm_sha256);
+        eprintln!("  BRR_SHA256                       = {}", out.brr_sha256);
         eprintln!(
-            "  DECODED_BRR_PCM_SHA256    = {}",
+            "  DECODED_BRR_PCM_SHA256           = {}",
             out.decoded_brr_pcm_sha256
         );
-        eprintln!("  LOOP_CLICK_ABS            = {}", out.loop_click_abs);
         eprintln!(
-            "  LOOP_WINDOW_RMS_DELTA     = {}",
+            "  LOOP_CLICK_ABS                   = {}",
+            out.loop_click_abs
+        );
+        eprintln!(
+            "  LOOP_WINDOW_RMS_DELTA            = {}",
             out.loop_window_rms_delta
+        );
+        eprintln!(
+            "  ROTATION_OFFSET                  = {}",
+            out.rotation_offset
+        );
+        eprintln!(
+            "  PEAK_ABS_ERROR_POST_ROTATION     = {}",
+            out.peak_abs_error_post_rotation
+        );
+        eprintln!(
+            "  RMS_ERROR_POST_ROTATION          = {}",
+            out.rms_error_post_rotation
         );
     }
 }
@@ -454,3 +469,82 @@ fn atom_pcm_sha_matches_locked_baseline_m3_cycle_256_canonical_sine() {
     );
 }
 
+// ---------------------------------------------------------------- M3.3 phase rotation regressions
+
+/// **M3.3 tie-breaker test (Block per consultant M3.2 audit #16).**
+///
+/// amplitude_zero produces all-zero PCM → all-zero BRR → all-zero
+/// decoded → every rotation candidate scores `(0, 0, 0.0, offset)`.
+/// The lex tie-breaker is the final `offset` comparison; smallest
+/// offset wins; rotation_offset must be 0.
+///
+/// If this test fails, the SPEC §10.7 lex objective implementation
+/// has an iteration-order bug — `pick_best_rotation` is not picking
+/// the smallest offset on full-tie inputs.
+#[test]
+fn amplitude_zero_atom_phase_rotation_picks_offset_zero() {
+    let out = render("AMPLITUDE_ZERO");
+    assert_eq!(
+        out.rotation_offset, 0,
+        "amplitude_zero atom: lex tie-break must select offset=0 \
+         (all candidates score identically at zero)"
+    );
+    assert_eq!(out.loop_click_abs, 0);
+    assert_eq!(out.peak_abs_error_post_rotation, 0);
+    assert_eq!(out.rms_error_post_rotation, 0.0);
+}
+
+/// **M3.3 improvement gate — `M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE`.**
+///
+/// For every atom fixture (canonical sine_128 / sine_64 + the nine
+/// M3.2 edge cases), the post-rotation `loop_click_abs` must be
+/// `<=` the pre-M3 value. Equal is fine (rotation chose offset=0 or
+/// found no improvement); strictly greater would mean the lex
+/// objective is selecting a worse candidate, which would be a bug.
+///
+/// Both values are read from `baselines/m3.json::documentary_snapshot`
+/// via `include_str!`, so the baseline file is the single source of
+/// truth. Pre-M3 entries are `M3_ATOM_<NAME>_LOOP_CLICK_ABS_PRE_M3`;
+/// post-rotation entries are `M3_ATOM_<NAME>_LOOP_CLICK_ABS_PHASE_ROTATION`.
+#[test]
+fn phase_rotation_loop_click_never_regresses_against_pre_m3() {
+    const BASELINES_JSON: &str = include_str!("../../baselines/m3.json");
+    let baselines: serde_json::Value =
+        serde_json::from_str(BASELINES_JSON).expect("baselines/m3.json must parse");
+    let ds = baselines["documentary_snapshot"]
+        .as_array()
+        .expect("documentary_snapshot must be an array");
+
+    let fetch = |name: &str| -> i64 {
+        ds.iter()
+            .find(|e| e["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("baselines/m3.json missing entry {name}"))["value"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("{name} value must be an integer"))
+    };
+
+    // The 11 fixtures: 2 canonical (128/64) + 9 M3.2 edge cases.
+    let names: &[&str] = &[
+        "128_SINE",
+        "64_SINE",
+        "AMPLITUDE_ZERO",
+        "ALL_PARTIALS_ZERO_NORMALIZE_TRUE",
+        "TWO_PARTIALS_CANCEL_PARTIALLY",
+        "MAX_AMPLITUDE_NO_NORMALIZE",
+        "NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY",
+        "HARMONIC_16_CYCLE_64",
+        "ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8",
+        "PHASE_CYCLES_0_9999",
+        "CYCLE_256_CANONICAL_SINE",
+    ];
+
+    for name in names {
+        let pre = fetch(&format!("M3_ATOM_{name}_LOOP_CLICK_ABS_PRE_M3"));
+        let post = fetch(&format!("M3_ATOM_{name}_LOOP_CLICK_ABS_PHASE_ROTATION"));
+        assert!(
+            post <= pre,
+            "M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE violated for {name}: \
+             post={post} > pre={pre}"
+        );
+    }
+}
