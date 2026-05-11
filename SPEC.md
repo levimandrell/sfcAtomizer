@@ -2732,3 +2732,67 @@ the generated value matches. No exception. The M3.8
 this at runtime for M3 entries; an analogous check will land
 in the M4.7 `m4-acceptance` bundle.
 
+## 25. M5 prelude scope
+
+Forward visibility on questions identified during M4 that may
+be addressed at M5+. Not a commitment; M5 can pick and choose.
+Recorded here so the M4 release notes and the M4.2 / M4.4
+deferral findings have a stable forward reference.
+
+1. **Characterization methodology redesign.** M4.2 outcome 3
+   identified the root cause of the persistent `zcr_ratio`
+   doubling and shape divergence: the gaussian characterization
+   compares raw BRR decode (1:1 sample-aligned at 32 kHz)
+   against SPC playback (DSP pitch-shifted + gaussian-
+   interpolated). These are physically different processes.
+   A clean methodology would align project sample rate with
+   each atom's native rate
+   (`cycle_len_samples × midi_60_frequency`, e.g.
+   `128 × 261.63 ≈ 33489 Hz` for the canonical sine_128) so
+   the DSP pitch register operates at `0x1000` (no fractional
+   stepping). This requires either a per-atom sample-rate
+   declaration in the v2 schema OR a re-tooled
+   characterization harness that synthesizes test signals at
+   varying project rates.
+
+2. **Conditional pre-emphasis** (depends on item 1). If the
+   redesigned methodology yields trustworthy frequency-response
+   measurements that satisfy SPEC §10.9 reliable-alignment, the
+   four-condition pre-emphasis preset decision rule becomes
+   evaluable. Until then, pre-emphasis stays deferred. The
+   §10.9 pipeline order (`render → pre_emphasis → rotation →
+   encode`) and the §10.6/§10.7 contracts are unchanged at M4;
+   M5 work picks up at the M4.0 contract surface.
+
+3. **BRR encoder noise-floor compensation strategies.** M4.4
+   beam search (`width = 4`) did not find production-shipping
+   cross-block gains; the high-noise cluster's
+   `peak = 18431` plateau is explained by the current-sample
+   term at `shift = 12` in filter-0 / forced-loop-entry cases
+   (M4.6 wording patch per consultant M4.4 audit #2). Per
+   consultant M4.4 audit #13, productive future work operates
+   either **before encoding** (source-domain attenuation;
+   requires SPEC §16.9 amendment to the atom render contract),
+   **via pre-emphasis** (gated on item 2), or **outside
+   current SPEC** (encoding / playback contract change, e.g.
+   extending into BRR shift 13–15 with Mesen2 / `snes_spc`
+   oracle validation). A wider-beam follow-up spike
+   (`beam_width ≥ 16`, alternative scoring) is also a
+   candidate — the filter-1/2/3 predictor surface was not
+   exhausted by the M4.4 width-4 attempt; the runtime exit
+   criterion would need to relax to be feasible.
+
+4. **`rename_track_id_cascade` cross-tree wiring.** Currently
+   defensive (v2 schema doesn't reference `tracks[].id`
+   cross-tree as of M4.6). M5+ schema growth that introduces
+   such references — e.g. project-level routing tables, SFX
+   bindings, cross-track modulation paths — should activate
+   the existing cascade body at the marked
+   future-schema-growth site in
+   `V2EditorModel::rename_track_id_cascade`.
+
+5. **`baselines/m5.json`.** Create the file when M5 lands;
+   inherit M4 by reference (mirror the M4-inherits-M3 pattern).
+   M4 acceptance becomes the M5 stage-1 regression gate the
+   same way M3 acceptance is the M4 stage-1 gate.
+
