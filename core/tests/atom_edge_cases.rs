@@ -746,3 +746,170 @@ fn phase_rotation_loop_click_never_regresses_against_pre_m3() {
         );
     }
 }
+
+// =====================================================================
+// M4.3 — BRR noise-floor metric capture and determinism
+// =====================================================================
+//
+// Per SPEC §10.10 (locked at M4.0): four metrics computed on the
+// decoded BRR PCM compared against the rotated source PCM (the
+// encoder INPUT per SPEC §10.7).
+//
+// Determinism test: each fixture renders twice; all four metric
+// fields must be bit-identical across the two runs (rms /
+// snr_db included, since sum-of-squares uses i64 + a single sqrt
+// — reduction order is deterministic per the §10.10 contract).
+
+/// The 11 atom fixtures for M4.3 noise-floor capture: 2 canonical
+/// sines + the 9 M3.2 edge cases. The canonical sines mirror the
+/// `canonical_sine_atom` helper in `core/tests/atom_render.rs`
+/// (same amplitude / partial / render flags).
+fn all_fixtures_for_noise_floor() -> Vec<(&'static str, AtomSlot)> {
+    let mut out: Vec<(&'static str, AtomSlot)> = Vec::with_capacity(11);
+    out.push(("128_SINE", base(128)));
+    out.push(("64_SINE", base(64)));
+    out.extend(all_fixtures());
+    out
+}
+
+/// **M4.3 capture helper.** Prints the four noise-floor metrics
+/// for all 11 atom fixtures so the baseline-population script
+/// (`build/m4_3_phase_b.py`) can ingest them. Ignored by default
+/// (capture is a one-off; the baseline-pin test enforces drift).
+///
+/// Run with:
+///
+/// ```text
+/// cargo test -p sfc-atomizer-core --test atom_edge_cases \
+///     m4_3_print_atom_fixture_noise_floor -- --nocapture --ignored
+/// ```
+#[test]
+#[ignore]
+fn m4_3_print_atom_fixture_noise_floor() {
+    for (name, atom) in all_fixtures_for_noise_floor() {
+        let r = render_to_brr(&atom).expect("render");
+        eprintln!(
+            "M4_3_FIXTURE\t{name}\tpeak_abs_raw_vs_source={}\trms_raw_vs_source={}\tsnr_db={}\tclipping_count_raw={}",
+            r.peak_abs_raw_vs_source,
+            r.rms_raw_vs_source,
+            r.snr_db,
+            r.clipping_count_raw,
+        );
+    }
+}
+
+#[test]
+fn m4_3_atom_fixture_noise_floor_metrics_deterministic() {
+    for (name, atom) in all_fixtures_for_noise_floor() {
+        let a = render_to_brr(&atom).expect("render");
+        let b = render_to_brr(&atom).expect("render");
+        assert_eq!(
+            a.peak_abs_raw_vs_source, b.peak_abs_raw_vs_source,
+            "peak_abs_raw_vs_source non-deterministic for {name}"
+        );
+        assert_eq!(
+            a.rms_raw_vs_source.to_bits(),
+            b.rms_raw_vs_source.to_bits(),
+            "rms_raw_vs_source non-deterministic for {name}"
+        );
+        assert_eq!(
+            a.snr_db.to_bits(),
+            b.snr_db.to_bits(),
+            "snr_db non-deterministic for {name}"
+        );
+        assert_eq!(
+            a.clipping_count_raw, b.clipping_count_raw,
+            "clipping_count_raw non-deterministic for {name}"
+        );
+    }
+}
+
+#[test]
+fn m4_3_atom_fixture_noise_floor_metrics_finite() {
+    // Sanity: M4.0 §10.10 contract says snr_db returns 0.0 for
+    // silent source, f64::INFINITY for exact-encode, finite
+    // positive otherwise. All other metrics must be non-negative
+    // and finite.
+    for (name, atom) in all_fixtures_for_noise_floor() {
+        let r = render_to_brr(&atom).expect("render");
+        assert!(
+            r.peak_abs_raw_vs_source >= 0,
+            "peak_abs_raw_vs_source negative for {name}"
+        );
+        assert!(
+            r.rms_raw_vs_source.is_finite() && r.rms_raw_vs_source >= 0.0,
+            "rms_raw_vs_source not finite-non-negative for {name}: {}",
+            r.rms_raw_vs_source
+        );
+        assert!(!r.snr_db.is_nan(), "snr_db is NaN for {name}");
+        // snr_db may be +infinity (exact encode) or 0.0 (silent
+        // source) or any positive finite value. Negative finite
+        // is impossible by formula. Negative-infinity is impossible.
+        if r.snr_db.is_finite() {
+            assert!(r.snr_db >= 0.0, "snr_db negative-finite for {name}");
+        } else {
+            assert!(
+                r.snr_db.is_sign_positive(),
+                "snr_db is negative infinity for {name}"
+            );
+        }
+        // clipping_count_raw is u32; non-negativity is type-enforced.
+        // No upper bound assertion — cycle_len_samples bounds it.
+        let _ = r.clipping_count_raw;
+    }
+}
+
+/// M4.3 baseline-pin test: every locked M4_3_ATOM_<NAME>_*
+/// entry in `baselines/m4.json` matches what `render_to_brr`
+/// produces for that fixture. M2.8.1 `include_str!` pattern.
+#[test]
+fn m4_3_atom_fixture_noise_floor_baselines_pinned() {
+    const BASELINES_JSON: &str = include_str!("../../baselines/m4.json");
+    let baselines: serde_json::Value =
+        serde_json::from_str(BASELINES_JSON).expect("baselines/m4.json must parse");
+    let docs = baselines["documentary_snapshot"]
+        .as_array()
+        .expect("documentary_snapshot must be array");
+
+    let lookup = |name: &str| -> &serde_json::Value {
+        docs.iter()
+            .find(|e| e["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("baselines/m4.json missing {name}"))
+    };
+    let lookup_i64 = |name: &str| -> i64 {
+        lookup(name)["value"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("{name} value must be integer"))
+    };
+    let lookup_f64 = |name: &str| -> f64 {
+        lookup(name)["value"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{name} value must be float"))
+    };
+
+    for (name, atom) in all_fixtures_for_noise_floor() {
+        let r = render_to_brr(&atom).expect("render");
+        let prefix = format!("M4_3_ATOM_{name}");
+
+        let want_peak = lookup_i64(&format!("{prefix}_PEAK_ABS_RAW_VS_SOURCE"));
+        assert_eq!(
+            r.peak_abs_raw_vs_source as i64, want_peak,
+            "peak_abs_raw_vs_source drift for {name}"
+        );
+
+        let want_rms = lookup_f64(&format!("{prefix}_RMS_RAW_VS_SOURCE"));
+        assert_eq!(
+            r.rms_raw_vs_source, want_rms,
+            "rms_raw_vs_source drift for {name}"
+        );
+
+        let want_snr = lookup_f64(&format!("{prefix}_SNR_DB"));
+        assert_eq!(r.snr_db, want_snr, "snr_db drift for {name}");
+
+        let want_clip = lookup_i64(&format!("{prefix}_CLIPPING_COUNT_RAW"));
+        assert_eq!(
+            r.clipping_count_raw as i64, want_clip,
+            "clipping_count_raw drift for {name}"
+        );
+    }
+}

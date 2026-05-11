@@ -1297,6 +1297,27 @@ mod tests {
             .collect()
     }
 
+    /// M4.3 capture helper: print SPEC §10.10 noise-floor metrics
+    /// for each `m3_5_canonical` signal so the baseline-population
+    /// script (`build/m4_3_phase_b.py`) can ingest them.
+    /// Ignored — capture is a one-off.
+    #[test]
+    #[ignore]
+    fn m4_3_print_characterization_signal_noise_floor() {
+        use crate::atom::render_to_brr;
+        for signal in m3_5_canonical_signals() {
+            let r = render_to_brr(&signal.atom).expect("render");
+            eprintln!(
+                "M4_3_CHARSIG\t{}\tpeak_abs_raw_vs_source={}\trms_raw_vs_source={}\tsnr_db={}\tclipping_count_raw={}",
+                signal.name,
+                r.peak_abs_raw_vs_source,
+                r.rms_raw_vs_source,
+                r.snr_db,
+                r.clipping_count_raw,
+            );
+        }
+    }
+
     #[test]
     fn m4_1_alignment_zero_offset_for_identical_signals() {
         let s = synth_sine(512, 64.0);
