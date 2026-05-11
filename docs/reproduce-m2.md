@@ -323,7 +323,11 @@ A few M4 outcomes affect what you'll see when running the CLI:
   M4.2 outcome 3 documented the methodology gap (raw BRR
   decode is sample-aligned 1:1 at 32 kHz; oracle render goes
   through DSP pitch-register fractional stepping at atoms'
-  non-native sample rates). M4.5 pre-emphasis preset
+  non-native sample rates). [M5.1 correction: pitch register
+  was verified at 0x1000 in M5.1 preflight; fractional
+  stepping is NOT the cause. See SPEC §10.11 (M5.1 update)
+  for the retracted diagnosis and current candidate-cause
+  hypotheses.] M4.5 pre-emphasis preset
   implementation defers permanently to M5+ pending
   methodology redesign.
 - **The M4.4 encoder spike does NOT swap into production.**

@@ -47,7 +47,11 @@ runs M3 acceptance as its stage 1 regression gate.
   found the cause as intrinsic to SPC playback at non-native
   pitch (atom MIDI-60 = 261.63 Hz; native rate for cycle_len
   128 = 33489 Hz; project rate 32 kHz forces pitch-register
-  fractional stepping). **Outcome 3 per SPEC §24.1:
+  fractional stepping). [M5.1 correction: pitch register was
+  verified at 0x1000 in M5.1 preflight; fractional stepping
+  is NOT the cause. See SPEC §10.11 (M5.1 update) for the
+  retracted diagnosis and current candidate-cause
+  hypotheses.] **Outcome 3 per SPEC §24.1:
   pre-emphasis preset implementation defers permanently to
   M5+.** M4.5 will be SKIPPED at its time. See "M4 measurement
   outcomes" below.
@@ -162,7 +166,11 @@ characterization design: raw BRR decode is sample-aligned 1:1
 at 32 kHz, while oracle render goes through the DSP pitch
 register's fractional stepping (atoms at MIDI 60 have native
 sample rate ~33489 Hz for `cycle_len = 128`, but project
-master rate is 32 kHz). The resulting waveform comparison is
+master rate is 32 kHz). [M5.1 correction: pitch register was
+verified at 0x1000 in M5.1 preflight; fractional stepping is
+NOT the cause. See SPEC §10.11 (M5.1 update) for the
+retracted diagnosis and current candidate-cause hypotheses.]
+The resulting waveform comparison is
 between two physically different processes; the shape
 divergence is real, not artifact.
 
@@ -170,7 +178,11 @@ divergence is real, not artifact.
 to M5+.** A clean characterization methodology requires
 aligning project sample rate with each atom's native rate
 (eliminates pitch-register fractional stepping); this is
-outside M4 scope. See `docs/reproduce-m2.md` and SPEC §25 M5
+outside M4 scope. [M5.1 correction: pitch register was
+verified at 0x1000 in M5.1 preflight; fractional stepping is
+NOT the cause. See SPEC §10.11 (M5.1 update) for the
+retracted diagnosis and current candidate-cause hypotheses.]
+See `docs/reproduce-m2.md` and SPEC §25 M5
 prelude scope for the redesign sketch.
 
 ### BRR encoder noise floor (M4.3, M4.4)
@@ -224,9 +236,13 @@ M5+:
 1. **Characterization methodology redesign.** Align project
    sample rate with each atom's native rate so the DSP pitch
    register operates at `0x1000` (no fractional stepping).
-   Requires either a per-atom sample-rate declaration in the
-   v2 schema OR a re-tooled characterization harness that
-   synthesizes test signals at varying project rates.
+   [M5.1 correction: pitch register was verified at 0x1000 in
+   M5.1 preflight; fractional stepping is NOT the cause. See
+   SPEC §10.11 (M5.1 update) for the retracted diagnosis and
+   current candidate-cause hypotheses.] Requires either a
+   per-atom sample-rate declaration in the v2 schema OR a
+   re-tooled characterization harness that synthesizes test
+   signals at varying project rates.
 2. **Conditional pre-emphasis** (depends on item 1).
 3. **BRR encoder noise-floor compensation strategies.** Per
    consultant M4.4 audit #13, productive work operates before
