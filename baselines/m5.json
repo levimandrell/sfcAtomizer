@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "report_type": "release_baselines",
+  "release": "v0.5-pre",
+  "milestone": "M5.0",
+  "_doc": "Machine-readable release baselines for the M5 milestone (characterization methodology redesign + conditional pre-emphasis + BRR noise-floor strategy spike). Scaffolded at M5.0 with prelude contract entries; M5.1+ populates with measurement and conditional encoder-quality baselines as the research-spike sub-passes land. Inherits M4 baselines from baselines/m4.json (which inherits M3 from baselines/m3.json, which inherits M2 from baselines/m2.json). Three classifications: identity_gated (any drift = regression; ships with include_str! + serde-parse + assert_eq! test per M2.8.1 rule), behavior_gated (numeric or policy contracts), documentary_snapshot (informational; expected to shift on declared milestones). Identity_gated is intentionally empty at M5.0; the M5.0 default per consultant M5 plan #10 is to hold the §16.9 line (no new identity baselines unless the §16.9.1 amendment procedure activates).",
+  "inherits_m4": true,
+  "identity_gated": [],
+  "behavior_gated": [
+    {
+      "name": "M5_NATIVE_RATE_CHARACTERIZATION_PITCH_REGISTER",
+      "value": 4096,
+      "kind": "harness_constant",
+      "locked_at": "M5.0",
+      "test": "core/tests/characterization_pitch_register.rs::m5_pitch_register_constant_pinned_at_4096",
+      "rule": "M5 native-rate characterization MUST configure each characterization SPC such that the DSP pitch register for the test voice equals exactly 0x1000 (4096). This eliminates the M4.2-identified fractional-stepping mismatch. Per SPEC §10.11. The M5.0 fixture-pin test asserts the locked value at compile time via include_str!; M5.1 adds the runtime-behavior test pitch_register_equals_4096_for_native_rate_signals that exercises actual harness output."
+    },
+    {
+      "name": "M5_METHODOLOGY_REPAIR_BUDGET",
+      "value": "1_main_loop_plus_1_correction",
+      "kind": "iteration_cap",
+      "locked_at": "M5.0",
+      "rule": "M5.1 native-rate harness + M5.2 characterization re-run + at most one M5.2.1 correction iteration. Stricter than M4's 2-loop budget per consultant M5 plan #4. If methodology_unresolved persists after one correction, defer pre-emphasis permanently to M6+ and proceed to M5.4 without preset. Per SPEC §24.1.1."
+    },
+    {
+      "name": "M5_RELIABLE_ALIGNMENT_THRESHOLD_INHERITED",
+      "value": "M4.0_thresholds_carry_forward_unchanged",
+      "kind": "predicate_reaffirmation",
+      "locked_at": "M5.0",
+      "rule": "M5 inherits M4.0's four-criterion reliable-alignment predicate unchanged: zcr_ratio in [0.9, 1.1]; normalized_correlation >= 0.90; alignment_best_offset < alignment_search_limit; peak_abs_error_after_gain_normalization <= 80% of unnormalized peak. No relaxation in M5.0; relaxation at M5.2 requires explicit PM review. Per SPEC §10.9 M5 threshold reaffirmation."
+    },
+    {
+      "name": "M5_PRE_EMPHASIS_FILTER_FORM_CONSTRAINT",
+      "value": "hand_derivable_FIR_or_one_pole_shelf",
+      "kind": "implementation_constraint",
+      "locked_at": "M5.0",
+      "rule": "If M5.3 implements pre-emphasis presets (conditional on M5.2 reliable_preset_eval outcome), the filter form must be hand-derivable: FIR up to 3 taps OR one-pole IIR shelf. NO filter-design crate dependency unless explicit PM approval at M5.3 brief time. Coefficients literal-pinned in RELEASE_NOTES_v0.5-rc.md if M5.3 ships production presets. Per consultant M5 plan #13."
+    },
+    {
+      "name": "M5_ATOM_PCM_STABILITY_HELD",
+      "value": "no_section_16_9_amendment_in_M5_unless_authorized",
+      "kind": "stability_contract",
+      "locked_at": "M5.0",
+      "rule": "M5 default position: hold the SPEC §16.9 line. Source-domain preprocessing defers to M6+ unless M5 measured data demands it AND PM authorizes a §16.9 amendment per the procedure in SPEC §16.9.1. Per consultant M5 plan #10, #19. M5.0 forward-visibility documentation only; activation requires dedicated sub-pass authorization."
+    },
+    {
+      "name": "M5_RUNTIME_BUDGET",
+      "value": {
+        "target_seconds": 5,
+        "warning_seconds": 10
+      },
+      "kind": "performance_budget",
+      "locked_at": "M5.0",
+      "rule": "Native-rate characterization runtime budget (release build, 9-signal canonical set): target < 5 s, warning at > 10 s. Per consultant M5 plan #22. Block release only if CI affected — informational budget at M5.0 / M5.1 development time; m5-acceptance bundle (M5.6) may promote to a hard gate after empirical data settles."
+    }
+  ],
+  "documentary_snapshot": [],
+  "retired": []
+}
