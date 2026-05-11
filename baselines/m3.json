@@ -1731,10 +1731,10 @@
     },
     {
       "name": "M3_5_RECOMMENDED_NEXT",
-      "value": "pending_preset_eval",
+      "value": "methodology_review",
       "kind": "string_value",
-      "snapshot_at": "M3.5",
-      "_note": "Outcome of the SPEC 10.9 M3.5 decision rule: defer | pending_preset_eval. The latter is the 'go signal' for M3.6 preset design (conditions #2/#3/#4 still require evaluation against a proposed preset)."
+      "snapshot_at": "M3.5.1",
+      "_note": "Outcome of the SPEC 10.9 decision rule. M3.5.1 re-run with precondition #0 (methodology sanity) returns 'methodology_review' because zcr_ratio exceeds [0.9, 1.1] for all monotonicity-anchor signals except harmonic_16_cycle_64. Conditions #1-#4 NOT evaluated; M3.6 pre-emphasis deferred to M4+."
     },
     {
       "name": "M3_5_MONOTONICITY_HOLDS_ACROSS_CYCLE_64_HARMONIC_SERIES",
@@ -1756,6 +1756,349 @@
       "kind": "string_value",
       "snapshot_at": "M3.5",
       "_note": "All M3_5_* entries are documentary_snapshot at M3.5: raw_decoded_pcm_sha256 will shift if M3.4 predictor optimization ships; gain/rms/peak/zcr/clipping and oracle SHA depend on the BRR encoder, S-DSP gaussian, and snes_spc version. None are identity_gated."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_GAIN_DELTA_DB_ALIGNED",
+      "value": 2.6452593596172553,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1 (consultant M3.5 audit #3): aligned-window form of gain_delta_db for sine_cycle_64. Both RMSes are taken over the same aligned window."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_ZCR_RATIO",
+      "value": 1.9295677738162258,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: zcr_oracle / zcr_raw for sine_cycle_64. Expected ~1.0 for a clean sine through gaussian; precondition #0 sanity band is [0.9, 1.1]."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_NORMALIZED_CORRELATION",
+      "value": 0.055592588306755085,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: Pearson correlation aligned raw vs aligned oracle for sine_cycle_64. Near 1.0 = clean amplitude-only difference; near 0 = shape difference / alignment artefact."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION",
+      "value": 31025,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: max-abs |raw - oracle * (raw_rms/oracle_rms)| for sine_cycle_64. Compare against PEAK_ABS_ERROR_ORACLE_VS_RAW: if it stays high, the difference is shape, not gain."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_ALIGNMENT_BEST_OFFSET",
+      "value": 13,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: sample offset chosen by align_oracle_to_raw for sine_cycle_64. Surfaces the gaussian delay (or the spurious local minimum the brute-force search picks when the cycle is longer than the search range)."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_GAIN_DELTA_DB_ALIGNED",
+      "value": 2.662896187452274,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1 (consultant M3.5 audit #3): aligned-window form of gain_delta_db for sine_cycle_128. Both RMSes are taken over the same aligned window."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_ZCR_RATIO",
+      "value": 1.9293264119081868,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: zcr_oracle / zcr_raw for sine_cycle_128. Expected ~1.0 for a clean sine through gaussian; precondition #0 sanity band is [0.9, 1.1]."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_NORMALIZED_CORRELATION",
+      "value": 0.02425751486047625,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: Pearson correlation aligned raw vs aligned oracle for sine_cycle_128. Near 1.0 = clean amplitude-only difference; near 0 = shape difference / alignment artefact."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION",
+      "value": 30995,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: max-abs |raw - oracle * (raw_rms/oracle_rms)| for sine_cycle_128. Compare against PEAK_ABS_ERROR_ORACLE_VS_RAW: if it stays high, the difference is shape, not gain."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_ALIGNMENT_BEST_OFFSET",
+      "value": 11,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: sample offset chosen by align_oracle_to_raw for sine_cycle_128. Surfaces the gaussian delay (or the spurious local minimum the brute-force search picks when the cycle is longer than the search range)."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_GAIN_DELTA_DB_ALIGNED",
+      "value": 2.6733501096651793,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1 (consultant M3.5 audit #3): aligned-window form of gain_delta_db for sine_cycle_256. Both RMSes are taken over the same aligned window."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_ZCR_RATIO",
+      "value": 1.939879759519038,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: zcr_oracle / zcr_raw for sine_cycle_256. Expected ~1.0 for a clean sine through gaussian; precondition #0 sanity band is [0.9, 1.1]."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_NORMALIZED_CORRELATION",
+      "value": 0.013126187334767656,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: Pearson correlation aligned raw vs aligned oracle for sine_cycle_256. Near 1.0 = clean amplitude-only difference; near 0 = shape difference / alignment artefact."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION",
+      "value": 33047,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: max-abs |raw - oracle * (raw_rms/oracle_rms)| for sine_cycle_256. Compare against PEAK_ABS_ERROR_ORACLE_VS_RAW: if it stays high, the difference is shape, not gain."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_ALIGNMENT_BEST_OFFSET",
+      "value": 32,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: sample offset chosen by align_oracle_to_raw for sine_cycle_256. Surfaces the gaussian delay (or the spurious local minimum the brute-force search picks when the cycle is longer than the search range)."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_GAIN_DELTA_DB_ALIGNED",
+      "value": 2.580860498787641,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1 (consultant M3.5 audit #3): aligned-window form of gain_delta_db for harmonic_2_cycle_64. Both RMSes are taken over the same aligned window."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_ZCR_RATIO",
+      "value": 2.574367319688719,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: zcr_oracle / zcr_raw for harmonic_2_cycle_64. Expected ~1.0 for a clean sine through gaussian; precondition #0 sanity band is [0.9, 1.1]."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_NORMALIZED_CORRELATION",
+      "value": 0.26137504878571943,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: Pearson correlation aligned raw vs aligned oracle for harmonic_2_cycle_64. Near 1.0 = clean amplitude-only difference; near 0 = shape difference / alignment artefact."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION",
+      "value": 33226,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: max-abs |raw - oracle * (raw_rms/oracle_rms)| for harmonic_2_cycle_64. Compare against PEAK_ABS_ERROR_ORACLE_VS_RAW: if it stays high, the difference is shape, not gain."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_ALIGNMENT_BEST_OFFSET",
+      "value": 23,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: sample offset chosen by align_oracle_to_raw for harmonic_2_cycle_64. Surfaces the gaussian delay (or the spurious local minimum the brute-force search picks when the cycle is longer than the search range)."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_GAIN_DELTA_DB_ALIGNED",
+      "value": 2.3348220804657855,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1 (consultant M3.5 audit #3): aligned-window form of gain_delta_db for harmonic_4_cycle_64. Both RMSes are taken over the same aligned window."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_ZCR_RATIO",
+      "value": 2.204964672044019,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: zcr_oracle / zcr_raw for harmonic_4_cycle_64. Expected ~1.0 for a clean sine through gaussian; precondition #0 sanity band is [0.9, 1.1]."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_NORMALIZED_CORRELATION",
+      "value": 0.4918785507426046,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: Pearson correlation aligned raw vs aligned oracle for harmonic_4_cycle_64. Near 1.0 = clean amplitude-only difference; near 0 = shape difference / alignment artefact."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION",
+      "value": 33710,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: max-abs |raw - oracle * (raw_rms/oracle_rms)| for harmonic_4_cycle_64. Compare against PEAK_ABS_ERROR_ORACLE_VS_RAW: if it stays high, the difference is shape, not gain."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_ALIGNMENT_BEST_OFFSET",
+      "value": 7,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: sample offset chosen by align_oracle_to_raw for harmonic_4_cycle_64. Surfaces the gaussian delay (or the spurious local minimum the brute-force search picks when the cycle is longer than the search range)."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_GAIN_DELTA_DB_ALIGNED",
+      "value": 1.59362280608614,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1 (consultant M3.5 audit #3): aligned-window form of gain_delta_db for harmonic_8_cycle_64. Both RMSes are taken over the same aligned window."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_ZCR_RATIO",
+      "value": 2.058233810625482,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: zcr_oracle / zcr_raw for harmonic_8_cycle_64. Expected ~1.0 for a clean sine through gaussian; precondition #0 sanity band is [0.9, 1.1]."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_NORMALIZED_CORRELATION",
+      "value": 0.5984194815785431,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: Pearson correlation aligned raw vs aligned oracle for harmonic_8_cycle_64. Near 1.0 = clean amplitude-only difference; near 0 = shape difference / alignment artefact."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION",
+      "value": 35253,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: max-abs |raw - oracle * (raw_rms/oracle_rms)| for harmonic_8_cycle_64. Compare against PEAK_ABS_ERROR_ORACLE_VS_RAW: if it stays high, the difference is shape, not gain."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_ALIGNMENT_BEST_OFFSET",
+      "value": 7,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: sample offset chosen by align_oracle_to_raw for harmonic_8_cycle_64. Surfaces the gaussian delay (or the spurious local minimum the brute-force search picks when the cycle is longer than the search range)."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_GAIN_DELTA_DB_ALIGNED",
+      "value": -1.2312185066057384,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1 (consultant M3.5 audit #3): aligned-window form of gain_delta_db for harmonic_16_cycle_64. Both RMSes are taken over the same aligned window."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_ZCR_RATIO",
+      "value": 0.997416365175269,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: zcr_oracle / zcr_raw for harmonic_16_cycle_64. Expected ~1.0 for a clean sine through gaussian; precondition #0 sanity band is [0.9, 1.1]."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_NORMALIZED_CORRELATION",
+      "value": 0.982623906585023,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: Pearson correlation aligned raw vs aligned oracle for harmonic_16_cycle_64. Near 1.0 = clean amplitude-only difference; near 0 = shape difference / alignment artefact."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION",
+      "value": 16384,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: max-abs |raw - oracle * (raw_rms/oracle_rms)| for harmonic_16_cycle_64. Compare against PEAK_ABS_ERROR_ORACLE_VS_RAW: if it stays high, the difference is shape, not gain."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_ALIGNMENT_BEST_OFFSET",
+      "value": 31,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: sample offset chosen by align_oracle_to_raw for harmonic_16_cycle_64. Surfaces the gaussian delay (or the spurious local minimum the brute-force search picks when the cycle is longer than the search range)."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_GAIN_DELTA_DB_ALIGNED",
+      "value": 2.5473342147957663,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1 (consultant M3.5 audit #3): aligned-window form of gain_delta_db for all_8_partials_max_amp_harmonics_1_to_8. Both RMSes are taken over the same aligned window."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_ZCR_RATIO",
+      "value": 0.9660093896713615,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: zcr_oracle / zcr_raw for all_8_partials_max_amp_harmonics_1_to_8. Expected ~1.0 for a clean sine through gaussian; precondition #0 sanity band is [0.9, 1.1]."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_NORMALIZED_CORRELATION",
+      "value": 0.1905307060409391,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: Pearson correlation aligned raw vs aligned oracle for all_8_partials_max_amp_harmonics_1_to_8. Near 1.0 = clean amplitude-only difference; near 0 = shape difference / alignment artefact."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION",
+      "value": 24008,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: max-abs |raw - oracle * (raw_rms/oracle_rms)| for all_8_partials_max_amp_harmonics_1_to_8. Compare against PEAK_ABS_ERROR_ORACLE_VS_RAW: if it stays high, the difference is shape, not gain."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_ALIGNMENT_BEST_OFFSET",
+      "value": 25,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: sample offset chosen by align_oracle_to_raw for all_8_partials_max_amp_harmonics_1_to_8. Surfaces the gaussian delay (or the spurious local minimum the brute-force search picks when the cycle is longer than the search range)."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_GAIN_DELTA_DB_ALIGNED",
+      "value": 2.4541551346684045,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1 (consultant M3.5 audit #3): aligned-window form of gain_delta_db for normalize_false_multi_partial_clamp_safety. Both RMSes are taken over the same aligned window."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_ZCR_RATIO",
+      "value": 1.5442796035472093,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: zcr_oracle / zcr_raw for normalize_false_multi_partial_clamp_safety. Expected ~1.0 for a clean sine through gaussian; precondition #0 sanity band is [0.9, 1.1]."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_NORMALIZED_CORRELATION",
+      "value": 0.5681660689811416,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: Pearson correlation aligned raw vs aligned oracle for normalize_false_multi_partial_clamp_safety. Near 1.0 = clean amplitude-only difference; near 0 = shape difference / alignment artefact."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION",
+      "value": 33473,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: max-abs |raw - oracle * (raw_rms/oracle_rms)| for normalize_false_multi_partial_clamp_safety. Compare against PEAK_ABS_ERROR_ORACLE_VS_RAW: if it stays high, the difference is shape, not gain."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_ALIGNMENT_BEST_OFFSET",
+      "value": 25,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: sample offset chosen by align_oracle_to_raw for normalize_false_multi_partial_clamp_safety. Surfaces the gaussian delay (or the spurious local minimum the brute-force search picks when the cycle is longer than the search range)."
+    },
+    {
+      "name": "M3_5_1_PRECONDITION_OUTCOME",
+      "value": "fired_methodology_review",
+      "kind": "string_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1 outcome of SPEC 10.9 decision rule precondition #0. Recorded as 'fired_methodology_review' when the precondition short-circuited the rule (zcr_ratio out of [0.9, 1.1] sanity band for any monotonicity-anchor signal)."
+    },
+    {
+      "name": "M3_5_1_ANOMALIES_OBSERVED_COUNT",
+      "value": 9,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: number of methodology anomaly fingerprints that fired in the re-run (ZCR ratio out of band + shape residual stays high after gain normalization)."
+    },
+    {
+      "name": "M3_5_1_M3_6_DECISION",
+      "value": "deferred_to_m4",
+      "kind": "string_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "M3.5.1: M3.6 pre-emphasis preset implementation is deferred to M4+ pending methodology resolution. Next pass is M3.7 (GUI polish). M3.8 is the M3 release."
+    },
+    {
+      "name": "M3_5_1_DOCUMENTARY_CLASS_NOTE",
+      "value": "documentary_at_m3_5_1",
+      "kind": "string_value",
+      "snapshot_at": "M3.5.1",
+      "_note": "All M3_5_*_* (M3.5.1-snapshotted) and M3_5_1_* entries are documentary_snapshot: the underlying alignment algorithm is unchanged from M3.5 but the diagnostic surface is new."
     }
   ],
   "retired": [],
