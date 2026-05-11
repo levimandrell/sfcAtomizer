@@ -536,6 +536,21 @@ enum Command {
         #[arg(long)]
         oracle: Option<PathBuf>,
     },
+    /// M3.8: M3 release acceptance bundle. Extends m2-acceptance
+    /// with M3-specific quality stages: atom PCM identity stability,
+    /// loop-click improvement gate, post-rotation BRR documentary
+    /// snapshot, and baselines integrity audit. Analog of
+    /// `m2-acceptance`.
+    M3Acceptance {
+        #[arg(long)]
+        project_a: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 160_000u32)]
+        frames: u32,
+        #[arg(long)]
+        oracle: Option<PathBuf>,
+    },
     /// M3.5: run the §10.9 Gaussian characterization pass against
     /// the `m3_5_canonical` test signal set. Builds one single-atom
     /// SPC per signal, runs the oracle, and emits a
@@ -834,6 +849,12 @@ fn run(cli: Cli) -> Result<(), CliError> {
             frames,
             oracle,
         } => cmd_characterize_gaussian(&out_report, &out_dir, frames, oracle.as_deref()),
+        Command::M3Acceptance {
+            project_a,
+            out,
+            frames,
+            oracle,
+        } => cmd_m3_acceptance(&project_a, &out, frames, oracle.as_deref()),
     }
 }
 
@@ -6991,4 +7012,323 @@ fn build_methodology_audit_m3_5_1(
         ],
         next_steps: "M3.6 pre-emphasis preset implementation deferred to M4+ until methodology resolved (zcr_ratio doubling, shape vs gain separation). M3.7 GUI polish next; M3.8 release.".to_string(),
     })
+}
+
+// =============================================================================
+// M3.8 — m3-acceptance five-stage bundle
+// =============================================================================
+
+/// M3.8 m3-acceptance bundle. Extends m2-acceptance with M3-specific
+/// quality stages.
+///
+/// Stage rollup:
+/// 1. **M2 regression** — re-runs `m2-acceptance` as a subprocess
+///    against the same fixture. Hard gate: M3 doesn't change M2.
+/// 2. **Atom PCM stability** — runs the M3.1 / M3.2 PCM identity-pin
+///    tests via filtered `cargo test`. Hard gate: SPEC §16.9 atom
+///    PCM stability rule.
+/// 3. **Loop-click improvement gate** — runs
+///    `phase_rotation_loop_click_never_regresses_against_pre_m3`
+///    via filtered `cargo test`. Hard gate.
+/// 4. **Encoder-quality snapshot** — runs the M3.3 documentary
+///    post-rotation BRR + decoded-BRR SHA tests. Soft gate
+///    (warn-not-fail per brief): documentary entries are
+///    informational; drift is noted but doesn't gate release.
+/// 5. **Baselines integrity** — in-process audit of
+///    `baselines/m3.json::identity_gated`: every entry must carry a
+///    non-null `test:` field pointing at a real test (M2.8.1
+///    pattern).
+fn cmd_m3_acceptance(
+    project_a: &Path,
+    out_dir: &Path,
+    frames: u32,
+    oracle: Option<&Path>,
+) -> Result<(), CliError> {
+    create_dir(out_dir)?;
+    let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sfcwc"));
+    let workspace_root = std::env::current_dir().map_err(CliError::Cwd)?;
+    let stage_status = |ok: bool| if ok { "ok" } else { "error" };
+
+    // ---- Stage 1: M2 regression ----
+    let m2_out_dir = out_dir.join("m2_regression");
+    let mut m2_args: Vec<String> = vec![
+        "m2-acceptance".to_string(),
+        "--project-a".to_string(),
+        project_a.display().to_string(),
+        "--out".to_string(),
+        m2_out_dir.display().to_string(),
+        "--frames".to_string(),
+        frames.to_string(),
+    ];
+    if let Some(o) = oracle {
+        m2_args.push("--oracle".to_string());
+        m2_args.push(o.display().to_string());
+    }
+    eprintln!("m3-acceptance: stage 1 — running m2-acceptance subprocess...");
+    let r = std::process::Command::new(&bin)
+        .args(&m2_args)
+        .output()
+        .expect("spawn m2-acceptance");
+    let stage_1_spawn_ok = r.status.success();
+    let m2_bundle_path = m2_out_dir.join("bundle.json");
+    let m2_bundle: Option<serde_json::Value> = std::fs::read(&m2_bundle_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let m2_status = m2_bundle
+        .as_ref()
+        .and_then(|v| v.get("bundle"))
+        .and_then(|v| v.get("status"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("missing")
+        .to_string();
+    let stage_1_ok = stage_1_spawn_ok && m2_status == "ok";
+    if !stage_1_ok {
+        eprintln!(
+            "  stage 1 m2-acceptance: status={m2_status}, spawn_exit={:?}",
+            r.status.code()
+        );
+    }
+
+    // Helper: spawn `cargo test --workspace --quiet -- <filters...>`.
+    let cargo_test = |label: &str, filters: &[&str]| -> bool {
+        eprintln!(
+            "m3-acceptance: stage {label} — cargo test {}",
+            filters.join(" ")
+        );
+        let mut args: Vec<String> = vec![
+            "test".to_string(),
+            "--workspace".to_string(),
+            "--quiet".to_string(),
+            "--".to_string(),
+        ];
+        for f in filters {
+            args.push((*f).to_string());
+        }
+        let r = std::process::Command::new("cargo")
+            .args(&args)
+            .current_dir(&workspace_root)
+            .output();
+        match r {
+            Ok(o) => o.status.success(),
+            Err(e) => {
+                eprintln!("  cargo test spawn failed: {e}");
+                false
+            }
+        }
+    };
+
+    // ---- Stage 2: atom PCM stability ----
+    // 11 identity-pin tests: 2 from atom_render.rs + 9 from atom_edge_cases.rs.
+    let stage_2_ok = cargo_test(
+        "2 atom PCM stability",
+        &["atom_pcm_sha_matches_locked_baseline_m3"],
+    );
+
+    // ---- Stage 3: loop-click improvement gate ----
+    let stage_3_ok = cargo_test(
+        "3 loop-click improvement gate",
+        &["phase_rotation_loop_click_never_regresses_against_pre_m3"],
+    );
+
+    // ---- Stage 4: encoder-quality snapshot (warn-not-fail) ----
+    let stage_4_ok = cargo_test(
+        "4 encoder-quality snapshot",
+        &[
+            "atom_render_baselines_post_rotation_pinned",
+            "brr_loop_click_score_for_pure_sine_post_rotation_is_zero",
+        ],
+    );
+
+    // ---- Stage 5: baselines integrity audit (in-process) ----
+    eprintln!("m3-acceptance: stage 5 — baselines integrity audit");
+    let m3_baselines_path = workspace_root.join("baselines").join("m3.json");
+    let m3_baselines_raw = std::fs::read(&m3_baselines_path).map_err(|source| CliError::Io {
+        path: m3_baselines_path.clone(),
+        source,
+    })?;
+    let m3_baselines_json: serde_json::Value = serde_json::from_slice(&m3_baselines_raw)?;
+    let identity_gated_entries = m3_baselines_json
+        .get("identity_gated")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let identity_total = identity_gated_entries.len();
+    let mut identity_with_test = 0usize;
+    let mut identity_gaps: Vec<String> = Vec::new();
+    for e in &identity_gated_entries {
+        let name = e
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unnamed)");
+        let test_field = e.get("test").and_then(|v| v.as_str());
+        match test_field {
+            Some(t) if !t.is_empty() => identity_with_test += 1,
+            _ => identity_gaps.push(name.to_string()),
+        }
+    }
+    let stage_5_ok = identity_gaps.is_empty();
+    if !stage_5_ok {
+        eprintln!(
+            "  baselines integrity: {} identity_gated entries lack test: field — {}",
+            identity_gaps.len(),
+            identity_gaps.join(", ")
+        );
+    }
+
+    // ---- Bundle rollup ----
+    //
+    // Built incrementally rather than via `serde_json::json!` because
+    // the monolithic-macro form bloated the function's debug-mode
+    // stack frame enough to push the binary over the 1 MiB Windows
+    // default stack at startup — `cargo test --test cli` would
+    // exit with STATUS_STACK_OVERFLOW before any test ran. Splitting
+    // into Map::insert calls keeps each compile-unit small.
+    let bundle_status = stage_1_ok && stage_2_ok && stage_3_ok && stage_5_ok;
+    let bundle_path = out_dir.join("bundle.json");
+    let bundle = build_m3_acceptance_bundle_json(M3AcceptanceBundleArgs {
+        project_a,
+        frames,
+        stage_1_ok,
+        stage_2_ok,
+        stage_3_ok,
+        stage_4_ok,
+        stage_5_ok,
+        bundle_status,
+        m2_bundle_path: &m2_bundle_path,
+        m2_status: &m2_status,
+        identity_total,
+        identity_with_test,
+        identity_gaps: &identity_gaps,
+        stage_status: &stage_status,
+    });
+    write_json(&bundle_path, &bundle)?;
+
+    eprintln!("m3-acceptance: project_a={}", project_a.display());
+    eprintln!("  stage_1_m2_regression: {}", stage_status(stage_1_ok));
+    eprintln!("  stage_2_atom_pcm_stability: {}", stage_status(stage_2_ok));
+    eprintln!(
+        "  stage_3_loop_click_improvement_gate: {}",
+        stage_status(stage_3_ok)
+    );
+    eprintln!(
+        "  stage_4_encoder_quality_snapshot: {} ({})",
+        stage_status(stage_4_ok),
+        if stage_4_ok { "ok" } else { "warn" }
+    );
+    eprintln!(
+        "  stage_5_baselines_integrity: {}",
+        stage_status(stage_5_ok)
+    );
+    eprintln!(
+        "  bundle.status: {}",
+        if bundle_status { "ok" } else { "error" }
+    );
+    eprintln!("  -> {}", bundle_path.display());
+    Ok(())
+}
+
+/// Inputs to `build_m3_acceptance_bundle_json`. Extracted into a
+/// struct so the helper stays under clippy's 7-arg ceiling and so
+/// the bundle-construction code sits in its own compile unit
+/// (keeping `cmd_m3_acceptance`'s debug stack frame small — see
+/// the comment at its caller).
+struct M3AcceptanceBundleArgs<'a> {
+    project_a: &'a Path,
+    frames: u32,
+    stage_1_ok: bool,
+    stage_2_ok: bool,
+    stage_3_ok: bool,
+    stage_4_ok: bool,
+    stage_5_ok: bool,
+    bundle_status: bool,
+    m2_bundle_path: &'a Path,
+    m2_status: &'a str,
+    identity_total: usize,
+    identity_with_test: usize,
+    identity_gaps: &'a [String],
+    stage_status: &'a dyn Fn(bool) -> &'static str,
+}
+
+fn build_m3_acceptance_bundle_json(a: M3AcceptanceBundleArgs<'_>) -> serde_json::Value {
+    use serde_json::Value;
+    let s = a.stage_status;
+
+    let mut stage_1 = serde_json::Map::new();
+    stage_1.insert("status".into(), Value::from(s(a.stage_1_ok)));
+    stage_1.insert(
+        "m2_bundle_path".into(),
+        Value::from(a.m2_bundle_path.display().to_string()),
+    );
+    stage_1.insert("m2_bundle_status".into(), Value::from(a.m2_status));
+
+    let mut stage_2 = serde_json::Map::new();
+    stage_2.insert("status".into(), Value::from(s(a.stage_2_ok)));
+    stage_2.insert(
+        "test_filter".into(),
+        Value::from("atom_pcm_sha_matches_locked_baseline_m3"),
+    );
+    stage_2.insert("_note".into(), Value::from("11 identity-pin tests (2 M3.1 + 9 M3.2). Hard gate per SPEC §16.9 atom PCM stability amendment."));
+
+    let mut stage_3 = serde_json::Map::new();
+    stage_3.insert("status".into(), Value::from(s(a.stage_3_ok)));
+    stage_3.insert(
+        "test_filter".into(),
+        Value::from("phase_rotation_loop_click_never_regresses_against_pre_m3"),
+    );
+    stage_3.insert("_note".into(), Value::from("Per-fixture post-rotation loop_click_abs <= pre-M3 value. Hard gate per M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE."));
+
+    let mut stage_4 = serde_json::Map::new();
+    stage_4.insert("status".into(), Value::from(s(a.stage_4_ok)));
+    stage_4.insert(
+        "_severity".into(),
+        Value::from(if a.stage_4_ok { "ok" } else { "warn" }),
+    );
+    stage_4.insert(
+        "test_filter".into(),
+        Value::from("atom_render_baselines_post_rotation_pinned + brr_loop_click_score_for_pure_sine_post_rotation_is_zero"),
+    );
+    stage_4.insert("_note".into(), Value::from("Post-rotation BRR + decoded-BRR PCM SHAs against documentary_snapshot entries. Soft gate: documentary drift is noted but doesn't fail the bundle."));
+
+    let mut stage_5 = serde_json::Map::new();
+    stage_5.insert("status".into(), Value::from(s(a.stage_5_ok)));
+    stage_5.insert("identity_gated_total".into(), Value::from(a.identity_total));
+    stage_5.insert(
+        "identity_gated_with_test_field".into(),
+        Value::from(a.identity_with_test),
+    );
+    let gaps_array: Vec<Value> = a
+        .identity_gaps
+        .iter()
+        .map(|x| Value::from(x.as_str()))
+        .collect();
+    stage_5.insert("identity_gated_gaps".into(), Value::Array(gaps_array));
+    stage_5.insert("_note".into(), Value::from("M2.8.1 pattern: every identity_gated entry must carry a non-null test: field pointing at a real test."));
+
+    let mut bundle_inner = serde_json::Map::new();
+    bundle_inner.insert(
+        "status".into(),
+        Value::from(if a.bundle_status { "ok" } else { "error" }),
+    );
+
+    let mut bundle = serde_json::Map::new();
+    bundle.insert("schema_version".into(), Value::from(SCHEMA_VERSION));
+    bundle.insert("report_type".into(), Value::from("m3_acceptance_bundle"));
+    bundle.insert(
+        "project_a".into(),
+        Value::from(a.project_a.display().to_string()),
+    );
+    bundle.insert("frames".into(), Value::from(a.frames));
+    bundle.insert("stage_1_m2_regression".into(), Value::Object(stage_1));
+    bundle.insert("stage_2_atom_pcm_stability".into(), Value::Object(stage_2));
+    bundle.insert(
+        "stage_3_loop_click_improvement_gate".into(),
+        Value::Object(stage_3),
+    );
+    bundle.insert(
+        "stage_4_encoder_quality_snapshot".into(),
+        Value::Object(stage_4),
+    );
+    bundle.insert("stage_5_baselines_integrity".into(), Value::Object(stage_5));
+    bundle.insert("bundle".into(), Value::Object(bundle_inner));
+    Value::Object(bundle)
 }

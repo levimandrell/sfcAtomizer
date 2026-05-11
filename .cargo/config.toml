@@ -1,0 +1,12 @@
+# M3.8: the `sfcwc` debug binary on x86_64-pc-windows-msvc needs more
+# than the default 1 MiB main-thread stack. The 33-variant `Command`
+# enum + `cmd_m3_acceptance` orchestration push debug-mode stack
+# usage past the PE-header default; the release build is fine
+# because the optimizer inlines and elides. 8 MiB matches the
+# default Linux soft limit and gives plenty of headroom.
+#
+# Scope: Windows MSVC only. Linux / macOS keep their toolchain
+# defaults.
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]
