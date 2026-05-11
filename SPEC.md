@@ -1074,6 +1074,22 @@ precondition #0) are NOT evaluated.
 The correlation threshold of `0.90` is locked at M4.0.
 Loosening requires explicit PM review.
 
+**M5 threshold reaffirmation (locked at M5.0 per consultant
+M5 plan #7).** The four-criterion predicate locked at M4.0
+carries forward unchanged through M5. Specifically:
+
+- `zcr_ratio ∈ [0.9, 1.1]` (M4.0)
+- `normalized_correlation ≥ 0.90` (M4.0)
+- `alignment_best_offset < alignment_search_limit` (M4.0)
+- `peak_abs_error_after_gain_normalization ≤ 80%` of
+  `peak_abs_error_oracle_vs_raw` (M4.0)
+
+A redesigned M5 native-rate methodology (SPEC §10.11) should
+clear the existing 0.90 correlation threshold on clean sine
+anchors; if it doesn't, the methodology is still suspect. M5.0
+does NOT relax the threshold preemptively. Relaxation, if
+needed, requires explicit PM review at M5.2.
+
 **Alignment search range (locked at M4.0 per consultant M4
 plan #7).** The search range used by
 `align_oracle_to_raw` is:
