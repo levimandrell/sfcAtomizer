@@ -1437,6 +1437,74 @@ mod tests {
         assert_eq!(model.project.atom_sequences[0].id, "atomseq_0001");
     }
 
+    // ---- M4.6 Layer A: rename_track_id_cascade ----
+    //
+    // The v2 schema does not currently reference `tracks[].id`
+    // cross-tree; cascade is defensive only. Tests cover the same
+    // five-case shape as M3.7's sequence-rename tests:
+    // updates_track_id, rejects collision, rejects invalid regex,
+    // out-of-range no-op, same-id no-op success.
+
+    #[test]
+    fn rename_track_id_cascade_updates_track_id() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        // Canonical: tracks[0].id = "t_sample_0".
+        let ok = model.rename_track_id_cascade(0, "renamed_track".to_string());
+        assert!(ok);
+        assert_eq!(model.project.tracks[0].id, "renamed_track");
+        // Tracks[1] is unchanged; SampleSustain kind is unchanged
+        // (kind doesn't reference the id either).
+        assert_eq!(model.project.tracks[1].id, "t_atom_1");
+        match &model.project.tracks[0].kind {
+            TrackKind::SampleSustain { sample_id } => {
+                assert_eq!(sample_id, "lead", "kind payload unchanged by id rename");
+            }
+            other => panic!("expected tracks[0] to be SampleSustain, got {other:?}"),
+        }
+        assert!(model.is_valid(), "cascade must keep validation green");
+    }
+
+    #[test]
+    fn rename_track_id_cascade_rejects_collision_with_other_track() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        // Canonical: tracks[0].id = "t_sample_0", tracks[1].id = "t_atom_1".
+        let ok = model.rename_track_id_cascade(0, "t_atom_1".to_string());
+        assert!(!ok, "collision must reject");
+        assert_eq!(
+            model.project.tracks[0].id, "t_sample_0",
+            "no mutation on reject"
+        );
+        assert_eq!(model.project.tracks[1].id, "t_atom_1");
+    }
+
+    #[test]
+    fn rename_track_id_cascade_rejects_invalid_regex() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        // SPEC §16.6 rule 49 pattern: ^[a-z0-9_]+$.
+        assert!(!model.rename_track_id_cascade(0, "BAD ID".to_string()));
+        assert!(!model.rename_track_id_cascade(0, "upper-case".to_string()));
+        assert!(!model.rename_track_id_cascade(0, "UPPER".to_string()));
+        assert!(!model.rename_track_id_cascade(0, "".to_string()));
+        assert_eq!(model.project.tracks[0].id, "t_sample_0");
+    }
+
+    #[test]
+    fn rename_track_id_cascade_unchanged_when_idx_out_of_range() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        let ok = model.rename_track_id_cascade(99, "anything".to_string());
+        assert!(!ok);
+        assert_eq!(model.project.tracks[0].id, "t_sample_0");
+        assert_eq!(model.project.tracks[1].id, "t_atom_1");
+    }
+
+    #[test]
+    fn rename_track_id_cascade_to_same_id_is_noop_success() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        let ok = model.rename_track_id_cascade(0, "t_sample_0".to_string());
+        assert!(ok, "same-id rename must succeed as no-op");
+        assert_eq!(model.project.tracks[0].id, "t_sample_0");
+    }
+
     // ---- M3.7 Layer B: atom preview metric flow ----
 
     /// The GUI surfaces the M3.1 + M3.3 fields from `AtomBrrOutput`
