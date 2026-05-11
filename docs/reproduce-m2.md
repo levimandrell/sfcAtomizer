@@ -1,13 +1,16 @@
-# Reproducing the M2 / M3 acceptance pipeline
+# Reproducing the M2 / M3 / M4 acceptance pipeline
 
-This guide takes a fresh clone of the repository to a passing
-`m2-acceptance` and `m3-acceptance` bundle. It exercises the
-full M2 pipeline (sample encoding, atom rendering, sequence
-compilation, M2 driver assembly, `.spc` / `.sfc` generation,
-per-channel oracle gates, `m2-acceptance` aggregator) plus the
-M3 release surface (atom PCM stability, loop-click improvement
-gate, post-rotation documentary snapshots, baselines integrity
-audit, gaussian characterization).
+This guide takes a fresh clone of the repository to passing
+`m2-acceptance`, `m3-acceptance`, and `m4-acceptance` bundles.
+It exercises the full M2 pipeline (sample encoding, atom
+rendering, sequence compilation, M2 driver assembly,
+`.spc` / `.sfc` generation, per-channel oracle gates,
+`m2-acceptance` aggregator), the M3 release surface (atom PCM
+stability, loop-click improvement gate, post-rotation
+documentary snapshots, baselines integrity audit, gaussian
+characterization), and the M4 release surface (alignment
+plumbing, BRR noise-floor measurement, M4.4 encoder-spike
+state, M4 baselines integrity).
 
 Tested on Windows 11 / msys2 bash; the same commands work on
 Linux and macOS with the obvious path-separator adjustments.
@@ -68,6 +71,11 @@ Expected counts:
   rotation + characterize_gaussian module + methodology
   diagnostics + rename_sequence_id_cascade + atom preview
   metric flow).
+- v0.4-rc: **615 tests across the workspace, all green** (+36
+  from M4.0–M4.6: BRR noise-floor metric helpers + alignment
+  validity predicate + M4.1 alignment search-range tests +
+  M4.3 atom noise-floor fixture-pin + M4.4 spike measurement +
+  rename_track_id_cascade).
 
 All four cargo gates must pass before any release tag:
 
@@ -236,6 +244,121 @@ Filenames: `sine_64_{pre,post}_rotation.wav`,
 `normalize_false_clamp_{pre,post}_rotation.wav`,
 `all_8_partials_{pre,post}_rotation.wav`.
 
+## Run `m4-acceptance` against the canonical fixture
+
+M4 acceptance extends M3 acceptance with M4-specific quality
+gates: alignment validity (M4.1 plumbing), BRR noise-floor
+baseline (M4.3 SPEC §10.10 fixture-pins), M4.4 encoder-spike
+state (feature-flag preservation + decode + determinism +
+loop_click invariants), and M4 baselines integrity (identity-
+gated entries, empty by design at M4).
+
+```bash
+cargo run --release --bin sfcwc -- m4-acceptance \
+    --project-a fixtures/projects/canonical_m2/canonical_m2.sfcproj.json \
+    --out build/m4/acceptance/canonical \
+    --frames 160000
+```
+
+Expected stderr summary:
+
+```
+m4-acceptance: project_a=canonical_m2.sfcproj.json
+  stage_1_m3_regression: ok
+  stage_2_alignment_validity: warn (alignment_valid=false expected; M4.2 outcome 3)
+  stage_3_brr_noise_floor_baseline: ok
+  stage_4_m4_4_spike_state: ok
+  stage_5_baselines_integrity: ok
+  bundle.status: warn
+  -> build/m4/acceptance/canonical/bundle.json
+```
+
+The five stages and what each gates:
+
+- **stage 1** — spawns `sfcwc m3-acceptance` and reads its
+  `bundle.json::bundle.status`. M4 doesn't change M3; this is
+  the regression guard.
+- **stage 2** — runs the M4.1 reliable-alignment plumbing
+  tests (`m4_1_*` filter). The tests cover the SPEC §10.9
+  validity predicate contract; the M4.2-locked
+  `alignment_valid: false` outcome is documented and intentional
+  per consultant M4.2 outcome 3 (pre-emphasis permanently
+  deferred). Reported as `warn`, not `fail`.
+- **stage 3** — runs the M4.3 noise-floor fixture-pin
+  (`m4_3_atom_fixture_noise_floor`). Confirms the 11 atom
+  fixtures' four SPEC §10.10 metrics
+  (`peak_abs_raw_vs_source`, `rms_raw_vs_source`, `snr_db`,
+  `clipping_count_raw`) match the locked
+  `baselines/m4.json::M4_3_ATOM_*` documentary values
+  byte-exactly.
+- **stage 4** — runs the M4.4 spike state tests (`m4_4_spike_*`).
+  Confirms `encode_looped_m4_4_spike` is feature-flagged and
+  not wired into production `render_to_brr`, deterministic
+  across runs, and never worsens `loop_click_abs` vs M3.3
+  production for any of the 11 atom fixtures.
+- **stage 5** — in-process audit of
+  `baselines/m4.json::identity_gated`. The M2.8.1 / M3.8
+  pattern: every identity-gated entry must carry a non-null
+  `test:` field. M4 identity_gated is **empty by design**
+  (M4's surfaces were measurement + research; no new identity
+  baselines); this stage confirms no accidental promotion.
+
+Also runs against the M3.3 committed edge-case fixture:
+
+```bash
+cargo run --release --bin sfcwc -- m4-acceptance \
+    --project-a fixtures/projects/atom_edge_cases/harmonic_16_cycle_64.sfcproj.json \
+    --out build/m4/acceptance/harmonic_16_cycle_64 \
+    --frames 16000
+```
+
+Expected: `bundle.status=warn` (same `alignment_valid: false`
+M4.2 outcome 3 surfacing as warn; stages 1/3/4/5 ok).
+
+## M4-specific reproduction notes
+
+A few M4 outcomes affect what you'll see when running the CLI:
+
+- **`alignment_valid: false` is the expected v0.4 state.**
+  M4.2 outcome 3 documented the methodology gap (raw BRR
+  decode is sample-aligned 1:1 at 32 kHz; oracle render goes
+  through DSP pitch-register fractional stepping at atoms'
+  non-native sample rates). M4.5 pre-emphasis preset
+  implementation defers permanently to M5+ pending
+  methodology redesign.
+- **The M4.4 encoder spike does NOT swap into production.**
+  `encode_looped_m4_4_spike` (cross-block beam search,
+  width=4) is feature-flagged in `core::brr_encoder`. The
+  production `encode_looped` is unchanged from M3.3 phase
+  rotation. Re-running `sfcwc render-atom` produces the same
+  BRR bytes / SHAs as M3.3.
+- **M4.5 was permanently skipped.** Per M4.2 outcome 3 + M4.4
+  SKIP. The pre-emphasis pipeline order in SPEC §10.9
+  (M4.0-locked) remains the forward contract; no preset code
+  ships at v0.4.
+
+## Reproduce the M4.3 BRR noise-floor measurement
+
+The four SPEC §10.10 metrics
+(`peak_abs_raw_vs_source`, `rms_raw_vs_source`, `snr_db`,
+`clipping_count_raw`) are wired through `render_to_brr` and
+emitted on every `AtomRenderReport`. The 80 documentary
+baselines (44 atom-fixture + 36 characterization-signal) are
+locked in `baselines/m4.json`. To re-render the captures:
+
+```bash
+cargo test -p sfc-atomizer-core --test atom_edge_cases \
+    m4_3_print_atom_fixture_noise_floor -- --nocapture --ignored
+
+cargo test -p sfc-atomizer-core --lib \
+    m4_3_print_characterization_signal_noise_floor \
+    -- --nocapture --ignored
+```
+
+These ignored tests emit one line per fixture to stderr; the
+`m4_3_atom_fixture_noise_floor_baselines_pinned` hard test
+enforces drift detection automatically.
+
 ## Verify locked baselines
 
 `baselines/m2.json` and `baselines/m3.json` together list every
@@ -266,6 +389,29 @@ release baseline classified into:
 (`inherits: { m2: "baselines/m2.json" }`). The `m3-acceptance`
 bundle's stage 1 (M2 regression) is the runtime check that the
 inheritance still holds — any M2 baseline drift fails M3 too.
+
+`baselines/m4.json` inherits M3 (`inherits_m3: true`). The
+`m4-acceptance` bundle's stage 1 (M3 regression) is the runtime
+check that the inheritance chain still holds; an M2 break
+fails M3, which fails M4.
+
+`baselines/m4.json` M4-era classification:
+
+- `identity_gated` — **empty by design at M4**. M4's sub-passes
+  produced measurement + research outcomes (alignment plumbing,
+  noise-floor metrics, encoder spike skip), not new feature
+  surfaces. No accidental identity promotion.
+- `behavior_gated` — 6 M4.0 contract entries:
+  `M4_RELIABLE_ALIGNMENT_CRITERIA`,
+  `M4_ALIGNMENT_SEARCH_LIMIT`, `M4_BRR_NOISE_FLOOR_METRICS`,
+  `M4_ENCODER_SPIKE_EXIT_CRITERION`,
+  `M4_METHODOLOGY_REPAIR_BUDGET`,
+  `M4_PRE_EMPHASIS_PIPELINE_ORDER`.
+- `documentary_snapshot` — 74 M4.2 characterization entries
+  (post-M4.1 alignment fix), 80 M4.3 BRR noise-floor entries
+  (44 atom-fixture × 4 metrics + 36 characterization-signal ×
+  4 metrics), 13 M4.4 spike attempt records (11 per-fixture
+  deltas + 1 outcome + 1 finding).
 
 Tests pin identity-gated and behavior-gated values; documentary
 snapshots are not gated. The canonical SEQ2 bytecode + voice
@@ -321,8 +467,13 @@ The 32 KiB cap is hard.
 - `baselines/m2.json` — machine-readable M2 release baselines.
 - `baselines/m3.json` — machine-readable M3 release baselines
   (inherits M2 by reference).
+- `baselines/m4.json` — machine-readable M4 release baselines
+  (inherits M3 by reference).
 - `baselines/m2_canonical_fixtures.md` — canonical SEQ2 + voice
   setup table fixture hex.
 - `RELEASE_NOTES_v0.2-rc.md` — v0.2-rc release-candidate notes.
 - `RELEASE_NOTES_v0.3-rc.md` — v0.3-rc release-candidate notes
   including the M3.5/M3.5.1 methodology deferral.
+- `RELEASE_NOTES_v0.4-rc.md` — v0.4-rc release-candidate notes
+  including the M4.2 outcome 3 / M4.4 SKIP / M4.5 permanent
+  defer documentation.
