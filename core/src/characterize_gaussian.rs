@@ -257,6 +257,111 @@ pub fn peak_abs_diff(a: &[i16], b: &[i16]) -> i32 {
         .unwrap_or(0)
 }
 
+/// Sample indices of the first `n` sign-change zero crossings in
+/// `samples` (M3.5.1 methodology diagnostic). A zero crossing is
+/// recorded at the sample index where the sign flips relative to
+/// the previous sample (treating zero as positive for consistency
+/// with `pcm_zcr_per_sec`).
+///
+/// Returns up to `n` indices in ascending order. Used to surface
+/// alignment / phase artefacts in the characterization report when
+/// the bulk `zcr_per_sec` numbers look anomalous.
+pub fn first_n_zero_crossings(samples: &[i16], n: usize) -> Vec<u32> {
+    if samples.len() < 2 || n == 0 {
+        return Vec::new();
+    }
+    let sign = |x: i16| -> i32 {
+        if x < 0 {
+            -1
+        } else {
+            1
+        }
+    };
+    let mut out = Vec::with_capacity(n);
+    let mut prev = sign(samples[0]);
+    for (i, s) in samples.iter().enumerate().skip(1) {
+        let cur = sign(*s);
+        if cur != prev {
+            out.push(i as u32);
+            if out.len() >= n {
+                break;
+            }
+        }
+        prev = cur;
+    }
+    out
+}
+
+/// Pearson normalized correlation between two same-length `i16`
+/// PCM buffers (M3.5.1 methodology diagnostic).
+///
+/// `ρ = Σ((x - x̄)(y - ȳ)) / sqrt(Σ(x - x̄)² · Σ(y - ȳ)²)`
+///
+/// Returns `0.0` if either buffer is empty, lengths differ, or
+/// either variance is zero (a constant signal). Output is in
+/// `[-1.0, 1.0]` for finite non-trivial inputs.
+pub fn pearson_correlation(a: &[i16], b: &[i16]) -> f64 {
+    if a.is_empty() || a.len() != b.len() {
+        return 0.0;
+    }
+    let n = a.len() as f64;
+    let mean_a: f64 = a.iter().map(|&x| x as f64).sum::<f64>() / n;
+    let mean_b: f64 = b.iter().map(|&x| x as f64).sum::<f64>() / n;
+    let mut num: f64 = 0.0;
+    let mut var_a: f64 = 0.0;
+    let mut var_b: f64 = 0.0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let dx = (*x as f64) - mean_a;
+        let dy = (*y as f64) - mean_b;
+        num += dx * dy;
+        var_a += dx * dx;
+        var_b += dy * dy;
+    }
+    let denom = (var_a * var_b).sqrt();
+    if denom == 0.0 {
+        0.0
+    } else {
+        num / denom
+    }
+}
+
+/// Peak absolute per-sample error after rescaling `oracle` so its
+/// RMS matches `raw_aligned`'s RMS (M3.5.1 methodology diagnostic).
+///
+/// If `gain_delta_db` is small (raw and oracle differ only in level),
+/// `peak_abs_error_oracle_vs_raw` is dominated by that level
+/// difference; this function divides it out: scale = `raw_rms /
+/// oracle_rms`, then computes `max |raw[i] - oracle[i] * scale|`.
+/// A large residual indicates raw and oracle differ in shape, not
+/// just in amplitude.
+///
+/// Returns `i32::MAX` if lengths differ or either RMS is zero.
+pub fn peak_abs_error_after_gain_normalization(
+    raw_aligned: &[i16],
+    oracle_aligned: &[i16],
+    raw_rms: f64,
+    oracle_rms: f64,
+) -> i32 {
+    if raw_aligned.len() != oracle_aligned.len() {
+        return i32::MAX;
+    }
+    if raw_rms <= 0.0 || oracle_rms <= 0.0 {
+        return i32::MAX;
+    }
+    let scale = raw_rms / oracle_rms;
+    let mut peak: i32 = 0;
+    for (r, o) in raw_aligned.iter().zip(oracle_aligned.iter()) {
+        let o_scaled = (*o as f64) * scale;
+        let err = (*r as f64) - o_scaled;
+        let mag = err.abs();
+        let mag_i = mag.round().clamp(0.0, i32::MAX as f64) as i32;
+        if mag_i > peak {
+            peak = mag_i;
+        }
+    }
+    peak
+}
+
 /// Decode a flat BRR byte buffer to `i16` PCM via
 /// `core::brr::decode_blocks`.
 ///
@@ -426,6 +531,43 @@ pub struct Measurement {
     pub zcr_oracle: f64,
     pub clipping_count_raw: i32,
     pub clipping_count_oracle: i32,
+    // M3.5.1 methodology diagnostics (consultant M3.5 audit #4).
+    /// Sample offset chosen by `align_oracle_to_raw`. Surfaces the
+    /// gaussian delay the oracle render exhibits relative to host
+    /// BRR decode.
+    #[serde(default)]
+    pub alignment_best_offset: u32,
+    /// RMS of the raw buffer over the aligned window only.
+    #[serde(default)]
+    pub aligned_raw_rms: f64,
+    /// RMS of the oracle buffer over the aligned window only.
+    #[serde(default)]
+    pub aligned_oracle_rms: f64,
+    /// Pearson correlation between aligned raw and aligned oracle,
+    /// in `[-1.0, 1.0]`. Near 1.0 = oracle is a clean amplitude-
+    /// scaled version of raw; lower = shape differences.
+    #[serde(default)]
+    pub normalized_correlation: f64,
+    /// `zcr_oracle / zcr_raw`. Expected ≈ 1.0 for a clean sine
+    /// through gaussian interpolation. Values ≥ 1.5 or ≤ 0.67
+    /// indicate the oracle has additional zero crossings the raw
+    /// decode doesn't have — methodology suspicion.
+    #[serde(default)]
+    pub zcr_ratio: f64,
+    /// Sample indices of the first 8 zero crossings in the aligned
+    /// raw buffer. Empty when the buffer has fewer than 2 samples.
+    #[serde(default)]
+    pub first_8_zero_crossings_raw: Vec<u32>,
+    /// Sample indices of the first 8 zero crossings in the aligned
+    /// oracle buffer.
+    #[serde(default)]
+    pub first_8_zero_crossings_oracle: Vec<u32>,
+    /// `max |raw[i] - oracle[i] * (raw_rms / oracle_rms)|` over the
+    /// aligned window. If this drops sharply from
+    /// `peak_abs_error_oracle_vs_raw` the difference is gain-only;
+    /// if it stays high, the difference is in shape.
+    #[serde(default)]
+    pub peak_abs_error_after_gain_normalization: i32,
     #[serde(
         rename = "_phase_or_delay_note",
         skip_serializing_if = "Option::is_none"
@@ -568,6 +710,24 @@ pub fn finalize_measurement(
     let clipping_raw = pcm_clipping_count(&raw.raw_decoded_one_cycle);
     let clipping_oracle = pcm_clipping_count(&oracle_aligned);
 
+    // M3.5.1 methodology diagnostics (consultant M3.5 audit #4).
+    let aligned_raw_rms = pcm_rms(&raw_aligned);
+    let aligned_oracle_rms = pcm_rms(&oracle_aligned);
+    let normalized_correlation = pearson_correlation(&raw_aligned, &oracle_aligned);
+    let zcr_ratio = if zcr_raw > 0.0 {
+        zcr_oracle / zcr_raw
+    } else {
+        0.0
+    };
+    let first_8_zero_crossings_raw = first_n_zero_crossings(&raw_aligned, 8);
+    let first_8_zero_crossings_oracle = first_n_zero_crossings(&oracle_aligned, 8);
+    let peak_abs_error_after_gain_norm = peak_abs_error_after_gain_normalization(
+        &raw_aligned,
+        &oracle_aligned,
+        aligned_raw_rms,
+        aligned_oracle_rms,
+    );
+
     let note = if align.oracle_offset != 0 {
         Some(format!(
             "aligned oracle by skipping {} leading samples (gaussian delay); aligned_rms_error={:.3}",
@@ -593,6 +753,14 @@ pub fn finalize_measurement(
         zcr_oracle,
         clipping_count_raw: clipping_raw,
         clipping_count_oracle: clipping_oracle,
+        alignment_best_offset: align.oracle_offset as u32,
+        aligned_raw_rms,
+        aligned_oracle_rms,
+        normalized_correlation,
+        zcr_ratio,
+        first_8_zero_crossings_raw,
+        first_8_zero_crossings_oracle,
+        peak_abs_error_after_gain_normalization: peak_abs_error_after_gain_norm,
         phase_or_delay_note: note,
     }
 }
@@ -824,9 +992,11 @@ mod tests {
         assert_eq!(a.aligned_rms_error, 0.0);
     }
 
-    #[test]
-    fn decision_rule_defer_when_monotonicity_fails() {
-        let mk = |name: &str, gain: f64| Measurement {
+    /// Test helper: build a `Measurement` with sensible defaults
+    /// (including a `zcr_ratio = 1.0` that satisfies the M3.5.1
+    /// methodology precondition #0).
+    fn measurement_with_defaults(name: &str, gain: f64) -> Measurement {
+        Measurement {
             name: name.to_string(),
             frequency_hz: 0.0,
             raw_decoded_pcm_sha256: String::new(),
@@ -840,14 +1010,29 @@ mod tests {
             zcr_oracle: 0.0,
             clipping_count_raw: 0,
             clipping_count_oracle: 0,
+            alignment_best_offset: 0,
+            aligned_raw_rms: 0.0,
+            aligned_oracle_rms: 0.0,
+            normalized_correlation: 1.0,
+            zcr_ratio: 1.0,
+            first_8_zero_crossings_raw: Vec::new(),
+            first_8_zero_crossings_oracle: Vec::new(),
+            peak_abs_error_after_gain_normalization: 0,
             phase_or_delay_note: None,
-        };
+        }
+    }
+
+    #[test]
+    fn decision_rule_defer_when_monotonicity_fails() {
         // Non-monotonic: -1, -3, -2 (bumps up at h8), -4.
         let ms = vec![
-            mk("harmonic_2_cycle_64", -1.0),
-            mk("harmonic_4_cycle_64", -3.0),
-            mk("harmonic_8_cycle_64", -2.0),
-            mk("harmonic_16_cycle_64", -4.0),
+            measurement_with_defaults("sine_cycle_64", 0.0),
+            measurement_with_defaults("sine_cycle_128", 0.0),
+            measurement_with_defaults("sine_cycle_256", 0.0),
+            measurement_with_defaults("harmonic_2_cycle_64", -1.0),
+            measurement_with_defaults("harmonic_4_cycle_64", -3.0),
+            measurement_with_defaults("harmonic_8_cycle_64", -2.0),
+            measurement_with_defaults("harmonic_16_cycle_64", -4.0),
         ];
         let o = apply_m3_5_decision_rule(&ms);
         assert_eq!(o.recommended_next, "defer");
@@ -856,27 +1041,14 @@ mod tests {
 
     #[test]
     fn decision_rule_pending_preset_eval_when_monotonic_and_h16_responds() {
-        let mk = |name: &str, gain: f64| Measurement {
-            name: name.to_string(),
-            frequency_hz: 0.0,
-            raw_decoded_pcm_sha256: String::new(),
-            oracle_pcm_sha256: String::new(),
-            raw_rms: 0.0,
-            oracle_rms: 0.0,
-            gain_delta_db: gain,
-            peak_abs_error_oracle_vs_raw: 0,
-            peak_abs_raw_vs_source: 0,
-            zcr_raw: 0.0,
-            zcr_oracle: 0.0,
-            clipping_count_raw: 0,
-            clipping_count_oracle: 0,
-            phase_or_delay_note: None,
-        };
         let ms = vec![
-            mk("harmonic_2_cycle_64", -0.5),
-            mk("harmonic_4_cycle_64", -2.0),
-            mk("harmonic_8_cycle_64", -4.0),
-            mk("harmonic_16_cycle_64", -8.0),
+            measurement_with_defaults("sine_cycle_64", 0.0),
+            measurement_with_defaults("sine_cycle_128", 0.0),
+            measurement_with_defaults("sine_cycle_256", 0.0),
+            measurement_with_defaults("harmonic_2_cycle_64", -0.5),
+            measurement_with_defaults("harmonic_4_cycle_64", -2.0),
+            measurement_with_defaults("harmonic_8_cycle_64", -4.0),
+            measurement_with_defaults("harmonic_16_cycle_64", -8.0),
         ];
         let o = apply_m3_5_decision_rule(&ms);
         assert_eq!(o.recommended_next, "pending_preset_eval");
@@ -885,32 +1057,151 @@ mod tests {
 
     #[test]
     fn decision_rule_defer_when_h16_does_not_respond() {
-        let mk = |name: &str, gain: f64| Measurement {
-            name: name.to_string(),
-            frequency_hz: 0.0,
-            raw_decoded_pcm_sha256: String::new(),
-            oracle_pcm_sha256: String::new(),
-            raw_rms: 0.0,
-            oracle_rms: 0.0,
-            gain_delta_db: gain,
-            peak_abs_error_oracle_vs_raw: 0,
-            peak_abs_raw_vs_source: 0,
-            zcr_raw: 0.0,
-            zcr_oracle: 0.0,
-            clipping_count_raw: 0,
-            clipping_count_oracle: 0,
-            phase_or_delay_note: None,
-        };
         // Monotonic but h16 barely attenuates (-0.2 dB) — under the
         // -0.5 dB threshold.
         let ms = vec![
-            mk("harmonic_2_cycle_64", 0.0),
-            mk("harmonic_4_cycle_64", -0.05),
-            mk("harmonic_8_cycle_64", -0.10),
-            mk("harmonic_16_cycle_64", -0.20),
+            measurement_with_defaults("sine_cycle_64", 0.0),
+            measurement_with_defaults("sine_cycle_128", 0.0),
+            measurement_with_defaults("sine_cycle_256", 0.0),
+            measurement_with_defaults("harmonic_2_cycle_64", 0.0),
+            measurement_with_defaults("harmonic_4_cycle_64", -0.05),
+            measurement_with_defaults("harmonic_8_cycle_64", -0.10),
+            measurement_with_defaults("harmonic_16_cycle_64", -0.20),
         ];
         let o = apply_m3_5_decision_rule(&ms);
         assert_eq!(o.recommended_next, "defer");
         assert!(o.reasons.iter().any(|r| r.contains("insufficient")));
+    }
+
+    // ===== M3.5.1 Phase A — methodology diagnostic helpers =====
+
+    #[test]
+    fn first_n_zero_crossings_basic_sine_pattern() {
+        // Alternating sign every sample — every index is a crossing.
+        let v: Vec<i16> = (0..16)
+            .map(|i| if i % 2 == 0 { 1000 } else { -1000 })
+            .collect();
+        let z = first_n_zero_crossings(&v, 5);
+        assert_eq!(z, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn first_n_zero_crossings_handles_short_input() {
+        assert!(first_n_zero_crossings(&[], 8).is_empty());
+        assert!(first_n_zero_crossings(&[1000], 8).is_empty());
+    }
+
+    #[test]
+    fn first_n_zero_crossings_caps_at_available_crossings() {
+        // Three crossings present; ask for 8.
+        let v: Vec<i16> = vec![1000, 1000, -1000, -1000, 1000, -1000];
+        let z = first_n_zero_crossings(&v, 8);
+        assert_eq!(z, vec![2, 4, 5]);
+    }
+
+    #[test]
+    fn pearson_correlation_is_one_for_scaled_signal() {
+        let a: Vec<i16> = (0..256).map(|i| ((i as i16) - 128) * 100).collect();
+        let b: Vec<i16> = a.iter().map(|x| x / 2).collect();
+        let r = pearson_correlation(&a, &b);
+        assert!((r - 1.0).abs() < 1e-9, "expected ≈ 1.0, got {r}");
+    }
+
+    #[test]
+    fn pearson_correlation_is_negative_one_for_negated_signal() {
+        let a: Vec<i16> = (0..256).map(|i| ((i as i16) - 128) * 100).collect();
+        let b: Vec<i16> = a.iter().map(|x| -x).collect();
+        let r = pearson_correlation(&a, &b);
+        assert!((r + 1.0).abs() < 1e-9, "expected ≈ -1.0, got {r}");
+    }
+
+    #[test]
+    fn pearson_correlation_is_zero_for_constant_signal() {
+        let a: Vec<i16> = vec![100; 64];
+        let b: Vec<i16> = (0..64).map(|i| i as i16).collect();
+        let r = pearson_correlation(&a, &b);
+        assert_eq!(r, 0.0);
+    }
+
+    #[test]
+    fn peak_abs_error_after_gain_norm_zero_for_amplitude_only_difference() {
+        // raw = 1× sine, oracle = 2× sine. After normalizing oracle by
+        // raw_rms / oracle_rms = 0.5, the difference should vanish.
+        let raw: Vec<i16> = (0..256)
+            .map(|i| ((i as f64 * 2.0 * std::f64::consts::PI / 256.0).sin() * 10000.0) as i16)
+            .collect();
+        let oracle: Vec<i16> = raw.iter().map(|x| x.saturating_mul(2)).collect();
+        let raw_rms = pcm_rms(&raw);
+        let oracle_rms = pcm_rms(&oracle);
+        let peak = peak_abs_error_after_gain_normalization(&raw, &oracle, raw_rms, oracle_rms);
+        // Round-off accumulated through scale + saturating_mul; allow ≤ 2 LSB.
+        assert!(
+            peak <= 2,
+            "expected near-zero after gain normalization, got {peak}"
+        );
+    }
+
+    #[test]
+    fn peak_abs_error_after_gain_norm_persists_for_shape_difference() {
+        // raw = sine, oracle = square wave of equal RMS. Gain
+        // normalization can't make these equal because the SHAPE
+        // differs.
+        let raw: Vec<i16> = (0..256)
+            .map(|i| ((i as f64 * 2.0 * std::f64::consts::PI / 256.0).sin() * 10000.0) as i16)
+            .collect();
+        let oracle: Vec<i16> = (0..256)
+            .map(|i| if i < 128 { 7071i16 } else { -7071i16 })
+            .collect();
+        let raw_rms = pcm_rms(&raw);
+        let oracle_rms = pcm_rms(&oracle);
+        let peak = peak_abs_error_after_gain_normalization(&raw, &oracle, raw_rms, oracle_rms);
+        assert!(peak > 2000, "expected shape-induced residual, got {peak}");
+    }
+
+    #[test]
+    fn methodology_diagnostics_populated_for_sine_cycle_128() {
+        let signals = m3_5_canonical_signals();
+        let sig = signals.iter().find(|s| s.name == "sine_cycle_128").unwrap();
+        let raw = compute_raw_side(sig);
+
+        // Synthesize an "oracle" buffer as the host BRR decode tiled
+        // to 16000 samples — this bypasses the snes_spc path so the
+        // test stays hermetic, while still exercising
+        // finalize_measurement end-to-end.
+        let oracle = tile_cycle_to_length(&raw.raw_decoded_one_cycle, 16000);
+        let m = finalize_measurement(sig, &raw, &oracle, 32_000);
+
+        // All seven new fields populated to plausible values.
+        assert!(m.aligned_raw_rms > 0.0);
+        assert!(m.aligned_oracle_rms > 0.0);
+        assert!((m.normalized_correlation - 1.0).abs() < 1e-6);
+        // Identical buffers → zcr_ratio = 1.0.
+        assert!((m.zcr_ratio - 1.0).abs() < 1e-6);
+        assert!(!m.first_8_zero_crossings_raw.is_empty());
+        assert_eq!(
+            m.first_8_zero_crossings_raw,
+            m.first_8_zero_crossings_oracle
+        );
+        // Identical buffers → peak error near zero (after gain norm).
+        assert_eq!(m.peak_abs_error_after_gain_normalization, 0);
+    }
+
+    #[test]
+    fn zcr_ratio_near_1_for_clean_sine_cycle_64() {
+        // Sanity check the diagnostic on identical raw PCM (no BRR
+        // round-trip). The actual M3.5 anomaly (ZCR doubling on
+        // oracle output) does NOT appear here because the "oracle"
+        // is just a tiled copy of the raw cycle — there is no
+        // gaussian artefact in this hermetic test.
+        let signals = m3_5_canonical_signals();
+        let sig = signals.iter().find(|s| s.name == "sine_cycle_64").unwrap();
+        let raw = compute_raw_side(sig);
+        let oracle = tile_cycle_to_length(&raw.raw_decoded_one_cycle, 16000);
+        let m = finalize_measurement(sig, &raw, &oracle, 32_000);
+        assert!(
+            (0.9..=1.1).contains(&m.zcr_ratio),
+            "zcr_ratio = {} (expected ≈ 1.0 in the hermetic test)",
+            m.zcr_ratio
+        );
     }
 }
