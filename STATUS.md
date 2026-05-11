@@ -2,86 +2,169 @@
 
 ## Current milestone
 
-**M3.5 — Gaussian characterization (SPEC §10.9).** Reports-only
-pass: no encoder change, no atom PCM change, no driver change.
-Measures S-DSP gaussian interpolation behavior against the
-`m3_5_canonical` test signal set so PM can decide whether M3.6
-ships pre-emphasis presets or defers to M4+. Replaces the
-deferred M3.4 predictor pass (consultant M3.3 audit #21).
+**M3.5.1 — Gaussian characterization methodology audit.**
+Reports-only adjustments to M3.5. No encoder change, no atom
+PCM change, no driver change, no M2 baseline change. Per
+consultant M3.5 audit, the M3.5 absolute `gain_delta_db` curve
+and ZCR ratios are too anomalous to trust as input for M3.6
+pre-emphasis preset design.
 
-**Decision rule outcome: `recommended_next = "pending_preset_eval"`.**
-The two M3.5-evaluable conditions of the four-condition §10.9
-decision rule (locked at Phase 2.5A) both hold:
+**Outcome:**
 
-- **Condition #1 — monotonicity OK.** `gain_delta_db` across the
-  cycle_64 harmonic series (`harmonic_2 → harmonic_4 → harmonic_8 →
-  harmonic_16`) measures `+2.580 / +2.334 / +1.593 / -1.231 dB`
-  — strictly non-increasing across rising frequency. Confirms
-  the gaussian-dulling hypothesis.
-- **Condition #2 (M3.5 raw form) — `harmonic_16` responds.**
-  `gain_delta_db = -1.231 dB` at 8 kHz (near-Nyquist), well below
-  the -0.5 dB threshold required to consider a pre-emphasis
-  preset worth designing.
+- **M3.6 pre-emphasis preset implementation is DEFERRED to M4+.**
+  M3.5 had returned `pending_preset_eval`; M3.5.1's
+  precondition #0 re-evaluates the same characterization and
+  returns `methodology_review` instead.
+- **Schema bumped v2 → v3** (SPEC §10.9). `measurements[]`
+  gains seven methodology diagnostic fields +
+  `gain_delta_db_aligned`. Optional top-level
+  `_methodology_audit_m3_5_1` records anomaly fingerprints
+  when they fire.
+- **Decision rule precondition #0** added: `zcr_ratio ∈
+  [0.9, 1.1]` for all monotonicity-anchor signals
+  (sine_cycle_64/128/256, harmonic_2/4/8/16_cycle_64), OR a
+  documented methodology explanation. On failure
+  `recommended_next` short-circuits to `"methodology_review"`
+  without evaluating conditions #1–#4.
+- **Re-run confirms anomalies:** `zcr_ratio` measures 1.93,
+  1.93, 1.94 for sine_cycle_64/128/256 and 2.57, 2.20, 2.06,
+  **1.00** for harmonic_2/4/8/**16**. Only the near-Nyquist
+  harmonic_16 falls inside the sanity band — the rest are
+  ~2×, the same ZCR-doubling pattern the M3.5 raw eprintln
+  showed.
+- **Next pass: M3.7 — GUI polish.** M3.6 is SKIPPED entirely.
+  M3.7 covers `rename_sequence_id_cascade` + surfacing
+  loop-click metrics + `rotation_offset` in atom preview /
+  report (consultant audit #15 with one addition).
+- **M4 prelude scope (informational):** the methodology
+  resolution requires investigating the brute-force
+  `align_oracle_to_raw` (`max_offset = 32` cannot resolve
+  cycle lengths > 32 samples), the `+2.6 dB` low-frequency
+  oracle boost (gaussian kernel coefficient sum vs DSP
+  master-vol scaling), and the BRR encoder error magnitude
+  (`peak_abs_raw_vs_source ≈ 18431` across all signals — the
+  dominant atom-render artefact per consultant audit #14).
 
-Conditions #3 (anti-worsening on canonical sines) and #4 (no
-new clipping) require evaluation against a proposed preset's
-outputs; M3.5 does not implement a preset, so these stay
-unevaluated. The "go signal" semantics are: M3.6 may design a
-gentle pre-emphasis preset, re-run the characterization under
-that preset, and only ship the preset if all four conditions
-hold under the M3.6 follow-up.
+**M3.5.1 per-signal re-run table (frames = 16000, sample_rate
+= 32 kHz):**
 
-**Pass shape.** Six commits across Phase 2.5A/B/C (audition-driven
-SPEC + baseline amendments) and Phase 3-6 (implementation +
-run + populate + STATUS). One workspace-tested `characterize-gaussian`
-CLI subcommand. 9 V2 single-atom characterization projects
-emitted to `build/m3/characterize_gaussian/` (gitignored). 112
-new `documentary_snapshot` entries in `baselines/m3.json`
-(`M3_5_*` namespace).
+| Signal | f (Hz) | gain_delta_db | gain_delta_db_aligned | zcr_ratio | corr | peak_err | peak_after_norm | align_off |
+|---|---|---|---|---|---|---|---|---|
+| sine_cycle_64 | 500 | +2.645 | +2.645 | **1.93** | +0.056 | 36237 | 31025 | 13 |
+| sine_cycle_128 | 250 | +2.663 | +2.663 | **1.93** | +0.024 | 36788 | 30995 | 11 |
+| sine_cycle_256 | 125 | +2.673 | +2.673 | **1.94** | +0.013 | 39053 | 33047 | 32 |
+| harmonic_2_cycle_64 | 1000 | +2.580 | +2.581 | **2.57** | +0.261 | 39053 | 33226 | 23 |
+| harmonic_4_cycle_64 | 2000 | +2.334 | +2.335 | **2.20** | +0.492 | 39053 | 33710 | 7 |
+| harmonic_8_cycle_64 | 4000 | +1.593 | +1.594 | **2.06** | +0.598 | 39053 | 35253 | 7 |
+| harmonic_16_cycle_64 | 8000 | -1.231 | -1.231 | **1.00** | +0.983 | 16384 | 16384 | 31 |
+| all_8_partials | 250 | +2.530 | +2.547 | 0.97 | +0.191 | 29349 | 24008 | 25 |
+| normalize_false_clamp | 250 | +2.452 | +2.454 | 1.54 | +0.568 | 39053 | 33473 | 25 |
 
-**Earlier in pass (Phase 0-2 committed under prior summary):**
-SPEC §10.9 prelude lock, M3.3 close hygiene
-(`decoded_brr_pcm_sha_distinct_for_zero_seam_nonsilent_fixtures`,
-pair 4/5 fixture `_note` annotations, audition CLI), and 10
-A/B prelude audition WAVs at `build/audition/m3.5-prelude/`
-(commits `f917381`, `6e284f3`, `468f979`). PM auditioned the
-five A/B pairs and returned audit findings that drove the
-Phase 2.5 amendments.
+The bold `zcr_ratio` column is the precondition #0 trigger —
+seven of nine signals land outside `[0.9, 1.1]`.
 
-**Phase 2.5 amendments (audition-driven, locked before Phase 3).**
+**Phases.**
 
-- **2.5A.** SPEC §10.9 — expanded `m3_5_canonical` from 6 to 9
-  signals (added `harmonic_2/4/8_cycle_64` for a four-point
-  cycle_64 gain curve, replaced the standalone clipping
-  reference with a labeled stress entry); rewrote the M3.6
-  decision rule to four conditions (monotonicity,
-  harmonic_16-responds, anti-worsening on canonical sines, no
-  new clipping); expanded the characterization report schema
-  to `schema_version: 2` with `raw_decoded_pcm_sha256`,
-  `oracle_pcm_sha256`, `peak_abs_raw_vs_source`, `zcr_raw`,
-  `zcr_oracle`, `clipping_count_raw`, `clipping_count_oracle`,
-  `_phase_or_delay_note`.
-- **2.5B.** Added `_audition_note` to all seven `_PHASE_ROTATION`
-  entries on `NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY` and
-  `ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8` — pairs 4/5 from
-  audition where loop_click reduction was real but
-  perceptually masked (clipping / dense harmonics
-  respectively).
-- **2.5C.** Optional top-level `subjective_audition` field in
-  the characterization report (`perceived_change_axis` enum:
-  `seam_click | harmonic_content | harshness | none`;
-  `masked_by_signal_content` bool).
+- **Phase A (commit `4c28f68`)** — `core::characterize_gaussian`
+  gains seven `Measurement` fields: `alignment_best_offset`,
+  `aligned_raw_rms`, `aligned_oracle_rms`,
+  `normalized_correlation`, `zcr_ratio`,
+  `first_8_zero_crossings_raw`, `first_8_zero_crossings_oracle`,
+  `peak_abs_error_after_gain_normalization`. Three new helpers:
+  `first_n_zero_crossings`, `pearson_correlation`,
+  `peak_abs_error_after_gain_normalization`. 10 new unit tests
+  including a hermetic end-to-end
+  (`methodology_diagnostics_populated_for_sine_cycle_128`) and
+  the sanity-test `zcr_ratio_near_1_for_clean_sine_cycle_64`.
+  Existing 3 decision-rule tests refactored to populate the new
+  fields with `zcr_ratio = 1.0` (in-band) so they don't trip
+  the Phase C precondition.
+- **Phase B (commit `bfec32a`)** — `gain_delta_db_aligned` added
+  to `Measurement`. Uses aligned-window RMS on both sides per
+  consultant M3.5 audit #3; the original `gain_delta_db` stays
+  alongside as documentary. Window-form bias proves small in
+  practice (≤ 0.017 dB max across the signal set).
+- **Phase C (commit `95490e0`)** — SPEC §10.9 schema bumped to
+  `v3`; field semantics documented for the new diagnostics;
+  decision rule precondition #0 added (zcr_ratio sanity band).
+  `apply_m3_5_decision_rule` implements the short-circuit;
+  `PRECONDITION_ANCHOR_SIGNALS` + `PRECONDITION_ZCR_RATIO_LOW/_HIGH`
+  exposed publicly. `MethodologyAudit` struct added.
+  `CharacterizationReport` gains optional
+  `_methodology_audit_m3_5_1`. CLI's `cmd_characterize_gaussian`
+  builds the audit when M3.5 anomaly fingerprints fire and
+  emits schema_version=3 reports. 2 new precondition tests.
+- **Phase E (commit `894ee83`)** — cosmetic: rename
+  `signal_set_has_ten_signals` → `_nine_signals` and update the
+  "Ten signals" doc-comment to "Nine signals" (consultant
+  audit #13).
+- **Phase D (commit `165cbc5`)** — re-ran `sfcwc characterize-gaussian`
+  against the M3.5.1 implementation. 9 SPCs built, 9 oracle
+  renders, 9 measurements. `baselines/m3.json` gains 45
+  per-signal diagnostic entries + 4 summary entries
+  (`M3_5_1_PRECONDITION_OUTCOME`,
+  `M3_5_1_ANOMALIES_OBSERVED_COUNT`,
+  `M3_5_1_M3_6_DECISION`, `M3_5_1_DOCUMENTARY_CLASS_NOTE`).
+  `M3_5_RECOMMENDED_NEXT` shifts from `pending_preset_eval`
+  to `methodology_review`.
+- **Phase F (this entry)** — STATUS rewrite.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **578 tests
+  workspace-wide** (was 560 at M3.5 close; +12 from Phase A +
+  Phase C tests; +6 from the smaller helper coverage —
+  helpers added in Phase A as `pearson_correlation`,
+  `peak_abs_error_after_gain_normalization`,
+  `first_n_zero_crossings`).
 
-**Phase 3-6 (this pass, summarized below).**
+### Engineer's interpretation of the re-run
 
-**M3.6 next.** Conditional ship of pre-emphasis presets. PM
-designs a `gentle` preset (filter coefficients TBD), then this
-codebase re-runs `sfcwc characterize-gaussian` under the preset
-and applies all four conditions of the §10.9 decision rule
-against the new measurements. If the gentle preset closes ≥ 75%
-of the harmonic_16 loss without anti-worsening on canonical
-sines, `strong` also ships. If any condition fails, M3.6 defers
-to M4+.
+- **ZCR doubling is intrinsic.** Confirmed across both M3.5 and
+  M3.5.1 runs. The brute-force `align_oracle_to_raw` with
+  `max_offset = 32` can't resolve cycle lengths > 32 samples
+  (sine_cycle_128 has period 128 samples — 4× the search
+  range), so it picks a phase that minimises aligned RMS at the
+  cost of phase coherence. The `normalized_correlation` field
+  exposes this: 0.013–0.056 for low-frequency sines vs 0.983
+  for harmonic_16_cycle_64 (which has period 4 samples, well
+  inside the search range).
+- **gain_delta_db_aligned tells the same story as the raw form.**
+  Max delta is 0.017 dB (all_8_partials_max_amp_harmonics_1_to_8).
+  The window-form bias the new field was added to expose turns
+  out to be small in absolute terms — the diagnostic value is
+  in confirming it's not the cause of the +2.6 dB anomaly.
+- **Shape vs gain.** `peak_abs_error_after_gain_normalization`
+  ranges 30995–35253 across the low/mid signals vs
+  `peak_abs_error_oracle_vs_raw` 36237–39053. Gain
+  normalization reduces error by only ~14%. Raw and oracle
+  differ predominantly in shape, not amplitude — consistent
+  with the alignment-artefact hypothesis above.
+- **harmonic_16 is the only clean measurement.** zcr_ratio =
+  1.00, correlation = 0.983, gain_delta_db = -1.231 dB. The
+  gaussian dulling at near-Nyquist is real and well-measured.
+  If a future pass narrows the characterisation to
+  high-frequency signals only (where the alignment search range
+  is adequate), the data may be usable.
+
+**Stop conditions hit:** none. All four stop conditions from the
+brief (no anomaly, gain-norm doesn't help, precondition breaks
+existing tests, M2 acceptance regression) checked; none fired.
+The existing 3 decision-rule tests were preemptively refactored
+in Phase A to set `zcr_ratio = 1.0` so they continue to
+exercise conditions #1/#2 logic post-precondition. 560 → 578
+test count progression confirms no test regressions.
+
+**Spec ambiguities flagged:** none new beyond consultant M3.5
+audit's framing.
+
+**Previous milestone (M3.5) — Gaussian characterization.**
+Reports-only pass (now superseded by M3.5.1). M3.5
+`recommended_next = pending_preset_eval` was the initial
+"go signal" for M3.6 preset design; M3.5.1 re-evaluates the
+same measurement set under precondition #0 and downgrades to
+`methodology_review`. M3.5 baselines stay in
+`baselines/m3.json::documentary_snapshot::M3_5_*` for
+reproducibility cross-reference.
 
 **Previous milestone (M3.3) — Phase rotation implementation.**
 First encoder-shifting pass of M3. SPEC §10.7 phase rotation
@@ -160,6 +243,53 @@ where rotation either didn't help or only got partway there).
 PM go/defer decision at M3.4 entry brief.
 
 ## Last pass
+
+**Pass M3.5.1 — Gaussian characterization methodology audit
+(Phases A–F).** Detail is folded into the "Current milestone"
+section above; the bullets below capture the **decisions log
+additions** specific to this pass.
+
+### Decisions log additions (M3.5.1)
+
+- **M3.6 pre-emphasis preset implementation DEFERRED to M4+** per
+  consultant M3.5 audit #9, #19. Methodology audit M3.5.1
+  documents why: the M3.5 raw gain curve is dominated by an
+  alignment artefact at low frequencies (the brute-force
+  `align_oracle_to_raw` with `max_offset = 32` cannot resolve
+  cycles longer than 32 samples).
+- **7 methodology diagnostic fields added to schema v3**
+  (consultant audit #4): `alignment_best_offset`,
+  `aligned_raw_rms`, `aligned_oracle_rms`,
+  `normalized_correlation`, `zcr_ratio`,
+  `first_8_zero_crossings_raw`, `first_8_zero_crossings_oracle`,
+  `peak_abs_error_after_gain_normalization`.
+- **`gain_delta_db_aligned` alternative form added** (consultant
+  audit #3). Uses aligned-window RMS on both sides. Window-form
+  bias proves small in practice (≤ 0.017 dB) — the diagnostic
+  value is in confirming the +2.6 dB low-frequency anomaly is
+  not a window-mismatch artefact.
+- **Decision rule precondition #0 added** (consultant audit #8):
+  `zcr_ratio ∈ [0.9, 1.1]` for all seven monotonicity-anchor
+  signals. On failure the rule short-circuits to
+  `recommended_next = "methodology_review"`.
+- **Cosmetic** (consultant audit #13): `signal_set_has_ten_signals`
+  → `_nine_signals` test name + matching doc-comment update.
+- **ZCR-doubling anomaly persists in M3.5.1 re-run** (expected
+  per consultant interpretation). 7 of 9 signals trip
+  precondition #0; methodology resolution deferred to M4
+  prelude investigation.
+- **BRR encoder error magnitude confirmed as dominant
+  atom-render artefact** (consultant audit #14):
+  `peak_abs_raw_vs_source ≈ 18431` across all signals. This
+  informs M4 scope — BRR encoder quality is the leading
+  candidate for next-pass investment, not pre-emphasis.
+- **Next pass: M3.7 — GUI polish.** `rename_sequence_id_cascade`
+  + surface loop-click metrics and `rotation_offset` in atom
+  preview/report (consultant audit #15 with one addition).
+- **No M2 acceptance pre-check:** pass is reports-only; no
+  encoder or driver bytes changed.
+
+---
 
 **Pass M3.5 — Gaussian characterization (Phases 2.5A/B/C + 3-6).**
 
