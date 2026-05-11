@@ -2412,3 +2412,50 @@ These are empirical and resolved through use, not design:
 3. Practical wavetable frame caps — the 32 / 64 / 96 / 128 numbers are provisional; empirical testing may move them.
 4. Whether a later version adds a free pre-emphasis EQ editor.
 
+## 24. M4 prelude scope
+
+Forward visibility on questions identified during M3 that may
+be addressed at M4+. Not a commitment; M4 can pick and choose.
+Recorded here so the M3 release notes and the M3.5.1
+methodology audit have a stable forward reference.
+
+1. **Gaussian characterization methodology resolution.**
+   Expand `align_oracle_to_raw` search range to
+   `≥ max_cycle_len` (currently capped at 32 samples in
+   `core::characterize_gaussian`; canonical signals have
+   `cycle_len_samples` up to 256). Re-run the M3.5
+   characterization with reliable phase alignment. The
+   M3.5.1 §10.9 decision rule precondition #0 will pass when
+   `zcr_ratio` settles in `[0.9, 1.1]` for the
+   monotonicity-anchor signals. Brute-force search is one
+   option; cross-correlation or autocorrelation-guided
+   alignment are alternatives.
+
+2. **BRR encoder noise floor reduction.** M3.5.1 measured
+   `peak_abs_raw_vs_source ≈ 18431` LSBs (over half of i16
+   dynamic range) across all 9 canonical signals — BRR
+   encoder distortion, not gaussian coloration. M4 may
+   investigate per-block filter selection refinements
+   (the cross-block beam search that M3.4 deferred per
+   consultant M3.3 audit #21) or other predictor / quant
+   optimizations.
+
+3. **Pre-emphasis presets** (conditional on item 1
+   resolution). If the M4 methodology audit confirms a real
+   frequency-response curve worth compensating, ship
+   `gentle` and / or `strong` presets per SPEC §10.9 with
+   filter coefficients TBD. The §10.9 decision rule
+   conditions #3 (anti-worsening on canonical sines) and
+   #4 (no new clipping) require evaluation against a
+   proposed preset's outputs.
+
+4. **`rename_track_id_cascade`.** Currently no cascade
+   needed since `tracks[].id` is not referenced elsewhere
+   in the v2 schema (only `tracks[].voice` is referenced).
+   Revisit if schema additions reference track ids.
+
+5. **`baselines/m4.json`.** Create the file when M4 lands;
+   inherit M3 by reference (mirror the M3-inherits-M2
+   pattern). M3 acceptance becomes the M4 stage-1 regression
+   gate the same way M2 acceptance is the M3 stage-1 gate.
+
