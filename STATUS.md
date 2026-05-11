@@ -2,7 +2,255 @@
 
 ## Current milestone
 
-**M3.2 — Atom edge case fixture coverage.** Synthesized
+**M3.3 — Phase rotation implementation.** First encoder-shifting
+pass of M3. SPEC §10.7 phase rotation lands: block-aligned
+candidate offsets, lexicographic objective
+`(loop_click_abs, peak_abs_error, rms_error, rotation_offset)`,
+`f64::total_cmp` for the floating-point lex level, smallest-offset
+tie-break. Rotation operates on a *transient* encoder input — the
+stored atom PCM stays untouched per the SPEC §16.9 atom PCM
+stability amendment.
+
+**Improvement gate satisfied for all 11 atom fixtures.**
+`loop_click_abs` post-rotation is `≤` the pre-M3 value for every
+fixture, enforced by
+`phase_rotation_loop_click_never_regresses_against_pre_m3` which
+iterates the M3.0 + M3.1 + M3.2 fixture set against
+`baselines/m3.json`. 9 of 11 fixtures dropped to
+`loop_click_abs = 0`; 1 saw an 87% reduction
+(`normalize_false_multi_partial_clamp_safety`: 16384 → 2048); 1
+saw no improvement (`harmonic_16_cycle_64`: near-Nyquist content
+where any block-aligned rotation produces the same seam — lex
+correctly defaulted to `offset = 0`).
+
+**Tie-breaker pinned.** `amplitude_zero_atom_phase_rotation_picks_offset_zero`
+exercises the load-bearing case: all-zero PCM → every candidate
+scores `(0, 0, 0.0, offset)` → smallest-offset tie-break selects
+`rotation_offset = 0`. Block test per consultant M3.2 audit #16.
+
+**M2 acceptance pre-check (consultant M3.2 audit #20): bundle.status=ok.**
+Ran `m2-acceptance` against `fixtures/projects/canonical_m2/canonical_m2.sfcproj.json`
+post-rotation; all four stage rollups green. The LEFT (sample)
+channel reports `max_abs = 15624`, `rms = 11034` (≥ 1000/200
+audibility floor); the RIGHT (atom) channel reports
+`max_abs = 25706`, `rms = 20418` (also ≥ floor). Source-step ZCR
+ratio: `pre.right.zcr = 1001.5` → `post.right.zcr = 2000.4` →
+ratio ≈ **1.997** (≥ 1.5 minimum per
+`M2_SOURCE_STEP_ZCR_RATIO_FLOOR`). No regression on any M2 gate.
+
+545 tests workspace-wide (was 543 at M3.2; +2 from the
+tie-breaker test + improvement-gate test). 3 ignored
+(unchanged). 5 pre-existing M2.2 BRR-SHA-pinned tests updated to
+the post-rotation values (`cli_render_atom_happy_path`,
+`atom::tests::brr_loop_click_score_for_pure_sine_post_rotation_is_zero`,
+`atom::tests::atom_render_baselines_post_rotation_pinned`,
+`atom::tests::brr_round_trip_at_m1_reference_amp_within_atom_envelope`
+— now compares decoded against rotated source per §10.7,
+`render_canonical_atoms_match_locked_sha_baselines`).
+
+`baselines/m3.json` expanded: +1 `behavior_gated`
+(`M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE`) + 77 new
+`documentary_snapshot` entries (7 per fixture × 11 fixtures —
+`rotation_offset`, `loop_click_abs`, BRR SHA, decoded-BRR PCM
+SHA, peak/rms error, windowed RMS delta). All 11 PCM SHAs in
+`identity_gated` carry forward unchanged. `baselines/m2.json`
+gets `_same_numeric_value_as` cross-reference fields on the
+M2.2-era `M2_ATOM_*_LOOP_CLICK_SCORE` entries pointing at their
+M3.1 counterparts (consultant M3.2 audit #21).
+
+One on-disk project fixture committed:
+`fixtures/projects/atom_edge_cases/harmonic_16_cycle_64.sfcproj.json`
++ `README.md` — atoms-only v2 project (empty `sample_pool` via
+SPEC §16.6 M2.5 relaxation, one atom on voice 0). Reproduces the
+M3.2 `harmonic_16_cycle_64` fixture end-to-end through
+`sfcwc render-atom`; report fields match `baselines/m3.json`
+documentary values byte-exactly. Per consultant M3 plan #12 the
+remaining eight M3.2 edge-cases stay synthesized in tests.
+
+**M3.4 next.** Predictor optimization (SPEC §10.8 conditional).
+Goes ahead only if PM judges phase-rotation gains insufficient
+against the M3.0 loop-click target AND the consultant M3 plan
+beam-search proposal is expected to add measurable improvement
+above and beyond rotation. With 9 of 11 fixtures already at
+`loop_click_abs = 0`, the gain envelope for M3.4 is narrow —
+mostly `harmonic_16_cycle_64` and
+`normalize_false_multi_partial_clamp_safety` (the two fixtures
+where rotation either didn't help or only got partway there).
+PM go/defer decision at M3.4 entry brief.
+
+## Last pass
+
+**Pass M3.3 — Phase rotation implementation.**
+
+Nine phases, large pass. SPEC amendment + core implementation +
+report wiring + baseline expansion + tie-breaker + improvement
+gate + M2 acceptance pre-check + committed project fixture +
+STATUS. No predictor optimization (M3.4); no pre-emphasis (M3.5+);
+no GUI (M3.7); atom PCM stays locked per SPEC §16.9.
+
+- **Phase 0 (consultant M3.2 audit #13, #25):** SPEC §10.7
+  amended to lock the error-comparison sources. `peak_abs_error`
+  and `rms_error` compare decoded BRR PCM against the **rotated**
+  source PCM (not the unrotated original) — otherwise rotation
+  candidates would be penalized for phase displacement (which is
+  the literal definition of rotation), making rotation appear
+  artificially worse. Numeric types locked: `loop_click_abs:
+  i32`, `peak_abs_error: i32`, `rms_error: f64` (from i64
+  sum-of-squares, single final `sqrt`), `rotation_offset: u32`.
+  `f64::total_cmp` for the floating-point lex level documents
+  intent and removes any latent NaN-ordering footgun. Tie-break
+  to offset 0 explicitly pinned by a regression test.
+- **Phase A:** four new pure helpers in `core::atom`:
+  `rotation_candidate_offsets(cycle_len) → Vec<usize>`,
+  `rotate_pcm(source, offset) → Vec<i16>`,
+  `peak_abs_error(rotated_source, decoded) → i32`,
+  `rms_error(rotated_source, decoded) → f64`. Plus
+  `RotationCandidate` struct and `pick_best_rotation` selector
+  using `min_by` with the spec-locked lex tuple.
+- **Phase B:** `render_to_brr` reworked. Source PCM is rendered
+  once (identity-gated per §16.9). For each block-aligned
+  candidate offset: rotate source → encode → decode → score lex
+  tuple. Pick the lex-min candidate. `AtomBrrOutput` gains
+  `rotation_offset: u32`, `peak_abs_error_post_rotation: i32`,
+  `rms_error_post_rotation: f64`. Mirror fields land on
+  `AtomRenderReport` with `#[serde(default)]` for pre-M3.3 report
+  back-compat. Report round-trip tests in `core/src/report.rs`
+  + the `atom_render_report` builder in `app/src/main.rs`
+  updated. Five pre-existing M2.2 BRR-SHA-pinned tests updated to
+  the post-rotation values; the M1 round-trip test
+  (`brr_round_trip_at_m1_reference_amp_within_atom_envelope`)
+  refactored to compare decoded against `rotate_pcm(&out.pcm,
+  out.rotation_offset)` — the meaningful round-trip is against
+  the encoder's actual input, not the unrotated source.
+- **Phase C (consultant M3.2 audit #8, #19):** all 11 atom
+  fixtures rendered through the rotation path. 77 new
+  `documentary_snapshot` entries in `baselines/m3.json`:
+  7 per fixture (`ROTATION_OFFSET`, `LOOP_CLICK_ABS`,
+  `BRR_SHA256`, `DECODED_BRR_PCM_SHA256`, `PEAK_ABS_ERROR`,
+  `RMS_ERROR`, `LOOP_WINDOW_RMS_DELTA` — all `_PHASE_ROTATION`
+  suffix per consultant naming guidance). Documentary, not
+  identity-gated: M3.4 predictor / M3.6 pre-emphasis may shift
+  these further.
+- **Phase D (consultant M3.2 audit #16):**
+  `amplitude_zero_atom_phase_rotation_picks_offset_zero`
+  (Block) — pins the tie-break to offset 0 for all-zero PCM.
+  `phase_rotation_loop_click_never_regresses_against_pre_m3` —
+  iterates all 11 fixtures, parses pre-M3 +
+  PHASE_ROTATION entries from `baselines/m3.json`, asserts
+  `post <= pre`. Both pass; the improvement gate is
+  enforced by a single workspace test now.
+- **Phase E (consultant M3.2 audit #20):** ran `m2-acceptance`
+  against `fixtures/projects/canonical_m2/canonical_m2.sfcproj.json`
+  post-rotation. `bundle.status=ok`; all four stage rollups
+  green. Post-rotation canonical compile SHAs:
+  - `driver_code_sha256_a`:
+    `342ab3ec16a6dcbc2e6b8102b58d3b4f44412877af08201124d6c3a11d2f4804`
+    (M2 multi_voice_atom driver — not the identity-gated M1
+    driver SHA which still matches its locked baseline)
+  - `spc_sha256_a`:
+    `9f7f161054521c3550618adb3c090d98aa5fe56743cd7e385110b53eb478efc4`
+  - LEFT channel (sample voice): `max_abs = 15624`,
+    `rms = 11034`, `zcr = 999.8` (all ≥ M1/M2 audibility floors)
+  - RIGHT channel (atom voice): `max_abs = 25706`,
+    `rms = 20418`, `zcr = 1550.8`
+  - Source-step ZCR ratio (consultant M2.5 §21):
+    `post.right.zcr / pre.right.zcr ≈ 2000.4 / 1001.5 ≈ 1.997`
+    (≥ 1.5 minimum `M2_SOURCE_STEP_ZCR_RATIO_FLOOR`)
+- **Phase F (consultant M3.2 audit #21):**
+  `baselines/m2.json` gains `_same_numeric_value_as` fields on
+  `M2_ATOM_128_SINE_LOOP_CLICK_SCORE` and
+  `M2_ATOM_64_SINE_LOOP_CLICK_SCORE` pointing at their M3.1
+  pre-M3 counterparts. No retirement.
+- **Phase G (consultant M3.2 audit #12):** one on-disk project
+  fixture committed:
+  `fixtures/projects/atom_edge_cases/harmonic_16_cycle_64.sfcproj.json`
+  + `README.md`. Reproducible via `sfcwc render-atom --project
+  … --atom harmonic_16_cycle_64 --out-report …`. Engineer chose
+  `harmonic_16_cycle_64` over `amplitude_zero` because the
+  near-Nyquist content is the most likely M3.4 / M3.6 stress
+  vector and the boundary case where rotation correctly found
+  no improvement (informative reproducer).
+- **Phase H (this entry).**
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **545 tests
+  workspace-wide** (was 543 at M3.2; +2 from
+  `amplitude_zero_atom_phase_rotation_picks_offset_zero` +
+  `phase_rotation_loop_click_never_regresses_against_pre_m3`).
+
+### Per-fixture phase rotation table
+
+| Fixture | offset | loop_click pre → post | improvement | post peak_abs_error | post rms_error |
+|---|---|---|---|---|---|
+| `128_SINE` | 96 | 1197 → 0 | -1197 (100%) | 9582 | 4795.19 |
+| `64_SINE` | 48 | 2407 → 0 | -2407 (100%) | 10239 | 5108.55 |
+| `AMPLITUDE_ZERO` | 0 | 0 → 0 | 0 (tie-break) | 0 | 0 |
+| `ALL_PARTIALS_ZERO_NORMALIZE_TRUE` | 0 | 0 → 0 | 0 (tie-break) | 0 | 0 |
+| `TWO_PARTIALS_CANCEL_PARTIALLY` | 32 | 1024 → 0 | -1024 (100%) | 10239 | 1532.33 |
+| `MAX_AMPLITUDE_NO_NORMALIZE` | 16 | 16032 → 0 | -16032 (100%) | 18431 | 10576.55 |
+| `NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY` | 16 | 16384 → 2048 | -14336 (87%) | 18431 | 10562.45 |
+| `HARMONIC_16_CYCLE_64` | 0 | 16384 → 16384 | 0 (no improvement) | 18431 | 12329.89 |
+| `ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8` | 16 | 10240 → 0 | -10240 (100%) | 18431 | 4574.39 |
+| `PHASE_CYCLES_0_9999` | 96 | 1196 → 0 | -1196 (100%) | 9581 | 4797.03 |
+| `CYCLE_256_CANONICAL_SINE` | 224 | 606 → 0 | -606 (100%) | 9995 | 4920.93 |
+
+### Decisions log additions (M3.3)
+
+- SPEC §10.7 amended (Phase 0): error-comparison sources locked
+  to `decoded vs rotated_source`; numeric types locked
+  (i32/i32/f64/u32); `f64::total_cmp` for the floating lex
+  level; tie-break to offset 0 explicitly pinned by a
+  regression test.
+- Phase rotation implementation per SPEC §10.7: block-aligned
+  candidate offsets `[0, 16, 32, ..., cycle_len - 16]`; lex
+  `min_by` selector; `RotationCandidate` struct exposes the
+  intermediate state for tests.
+- 11 atom fixtures × 7 post-rotation entries (rotation_offset
+  / loop_click_abs / BRR SHA / decoded-BRR PCM SHA / peak / rms
+  / windowed RMS delta) added to
+  `baselines/m3.json::documentary_snapshot`. Naming uses the
+  `_PHASE_ROTATION` semantic suffix per consultant M3.2 audit
+  #8; not yet identity-gated (M3.4 / M3.6 may shift further per
+  consultant audit #19).
+- Behavior gate added: `M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE`
+  (post ≤ pre per fixture). Single workspace test enforces.
+- Tie-breaker test pins all-tied lex tuples → smallest offset
+  (consultant audit #16). Block-level test.
+- M2 acceptance pre-check passes; all four stages green; no
+  audibility / silence / source-step / module-cap regression
+  (consultant audit #20). This becomes the basis for M3.8
+  acceptance.
+- `baselines/m2.json` gains `_same_numeric_value_as` cross-refs
+  on M2.2 loop_click_score entries pointing at their M3.1
+  counterparts (consultant audit #21). No retirement.
+- One on-disk edge-case project fixture committed
+  (`harmonic_16_cycle_64.sfcproj.json` + README) per consultant
+  audit #12; remaining eight M3.2 fixtures stay synthesized.
+- Atom PCM SHAs unchanged across M3.3: all 11 identity-pin
+  tests pass unchanged; SPEC §16.9 stability amendment
+  preserved.
+- Five pre-existing M2.2 BRR-SHA-pinned tests updated to
+  post-rotation values; the M1 BRR round-trip test refactored
+  to compare decoded against `rotate_pcm(&out.pcm,
+  out.rotation_offset)` — meaningful fidelity is against the
+  encoder's actual input.
+- Encode runtime: M3.3 encodes once per candidate offset (4 for
+  cycle 64, 8 for cycle 128, 16 for cycle 256). The 16×
+  worst-case for the cycle-256 fixture stays well under the 2×
+  M2.2 ceiling per consultant SPEC §10.8 — for the canonical
+  rendering paths atom encode is microseconds, not a runtime
+  bottleneck.
+- **M3.4 go/defer judgment, narrowed:** with 9 of 11 fixtures
+  already at `loop_click_abs = 0` after rotation, the gain
+  envelope for predictor beam-search is mostly
+  `harmonic_16_cycle_64` (16384, unchanged) and
+  `normalize_false_multi_partial_clamp_safety` (2048, ~87%
+  already there). PM at M3.4 entry decides whether the residual
+  is worth the SPEC §10.8 conditional ship.
+
+## Previous passes
+
+**Pass M3.2 — Atom edge case fixture coverage.** Synthesized
 fixture additions only; no encoder changes; no phase rotation
 (M3.3); no committed-on-disk fixtures (deferred to M3.3 prelude
 per consultant M3 plan #12). Nine new edge-case atoms
