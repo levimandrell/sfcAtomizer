@@ -1229,26 +1229,45 @@ only `f64` ops. Cross-platform deterministic.
 
 ### 10.11 Native-rate characterization (M5)
 
-**Motivation.** M4.2 outcome 3 identified that M3.5 / M4.2's
-characterization compares two physically different processes:
-raw BRR decode (1:1 sample-aligned at 32 kHz) vs SPC playback
-(DSP pitch register fractionally stepping through samples per
-output sample, then 4-tap gaussian interpolated). For atoms at
-MIDI 60 with `cycle_len_samples = 128`, the atom's native rate
-is `128 × 261.63 ≈ 33489 Hz`; SPC plays at the project's 32 kHz
-master rate, producing the fractional-stepping shape divergence
-documented in M4.2 STATUS. M5 redesigns the comparison to
-eliminate the fractional-stepping mismatch.
+**Motivation.** M4.2 outcome 3 identified that the M3.5/M4.2
+characterization comparison produces invalid alignment metrics:
+correlation 0.117–0.274 on low-frequency sine anchors (far below
+the 0.90 threshold) and zcr_ratio ≈ 2 across most anchor signals.
+
+Earlier M4 notes hypothesized DSP pitch register fractional
+stepping as the cause. **M5.1 preflight verified the M2 atom
+voice setup path programs `pitch_register = 0x1000` (unity) for
+these signals** (`core::voice_setup` hardcodes
+`source_sample_rate_hz = 32000` for `TrackKind::AtomSequence`;
+`pitch_register(32000, root, root, 0) = 0x1000`; the M2 ASM
+driver writes the resulting bytes directly to the DSP `$F2/$F3`
+registers). Fractional pitch stepping is NOT the cause.
+
+The remaining candidate causes are:
+  1. S-DSP gaussian interpolation history / phase behavior at
+     unity pitch — the 4-tap gaussian kernel still applies
+     non-impulse weights at integer offsets, depending on
+     interpolation counter and sample-history state.
+  2. BRR predictor / loop-state differences between host "raw
+     decode tiled" and DSP-driven playback. Even at unity pitch,
+     the DSP's state at loop boundaries may not match a naïve
+     repeated raw PCM tile.
+
+M5 redesigns the characterization comparison to **directly
+investigate** these candidate causes rather than assume a root.
+The earlier fractional-stepping diagnosis is preserved here for
+historical context but is explicitly retracted.
 
 **Definition (M5).** For each characterization signal, the M5
 harness MUST:
 
 1. Build the characterization SPC such that the DSP pitch
-   register for the test voice equals exactly `0x1000` (i.e.
-   output rate = input rate; no fractional stepping). This is
-   achieved by selecting an SPC playback rate that matches the
-   signal's native cycle rate, OR by choosing test signals
-   whose native cycle rate equals the project rate.
+   register for the test voice equals exactly `0x1000` (unity
+   sample-step; output sample rate equals source sample rate).
+   This establishes the controlled comparison surface for M5
+   investigation. Achieved by selecting an SPC playback rate
+   that matches the signal's native cycle rate, OR by choosing
+   test signals whose native cycle rate equals the project rate.
 
 2. Define `raw_comparison_surface` = host BRR decode tiled at
    the same effective output cadence the SPC produces.

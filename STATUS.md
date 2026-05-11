@@ -748,6 +748,26 @@ investigates the persistent `zcr_ratio` doubling that
 alignment alone couldn't fix; decides M4 trajectory. No
 encoder change; no atom PCM change; no M2/M3 baseline change.
 
+> **[M5.1 correction note — read before the archived narrative
+> below.]** M5.1 preflight verified that the M2 atom-sequence
+> voice path programs `pitch_register == 0x1000` (unity) for
+> every M3.5 canonical signal: `core::voice_setup` hardcodes
+> `source_sample_rate_hz = 32000` for `TrackKind::AtomSequence`
+> (since M2.7); `pitch_register(32000, root, root, 0) = 0x1000`;
+> the M2 ASM driver writes those bytes directly to `$F2/$F3`.
+> The "DSP pitch register fractionally stepping through input
+> samples per output sample" mechanism described in the Phase C
+> root-cause paragraph below (and echoed in the M5+ scope notes)
+> is **NOT** the actual cause of the M4.2 shape divergence —
+> pitch register was already unity. The zcr_ratio ≈ 2 / low-
+> correlation pattern has a different origin among: (a) S-DSP
+> gaussian 4-tap kernel non-impulse response at unity pitch;
+> (b) BRR predictor/loop-state divergence between host raw-tile
+> decode and DSP playback. See **SPEC §10.11 motivation (M5.1
+> update)** for the corrected framing. M5.2 investigates the
+> actual root cause; the archived M4.2 narrative below is
+> preserved verbatim for provenance.
+
 **Outcome: Phase D outcome 3 — pre-emphasis defers
 permanently to M5+.** All 7 monotonicity-anchor signals fail
 at least one of the four SPEC §10.9 reliable-alignment

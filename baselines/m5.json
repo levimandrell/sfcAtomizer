@@ -13,7 +13,7 @@
       "kind": "harness_constant",
       "locked_at": "M5.0",
       "test": "core/tests/characterization_pitch_register.rs::m5_pitch_register_constant_pinned_at_4096",
-      "rule": "M5 native-rate characterization MUST configure each characterization SPC such that the DSP pitch register for the test voice equals exactly 0x1000 (4096). This eliminates the M4.2-identified fractional-stepping mismatch. Per SPEC §10.11. The M5.0 fixture-pin test asserts the locked value at compile time via include_str!; M5.1 adds the runtime-behavior test pitch_register_equals_4096_for_native_rate_signals that exercises actual harness output."
+      "rule": "M5 native-rate characterization MUST configure each characterization SPC such that the DSP pitch register for the test voice equals exactly 0x1000 (4096). This establishes the unity-pitch controlled comparison surface for the M5 investigation of the M4.2 shape divergence. Per SPEC §10.11. NOTE: M5.1 preflight verified that pitch_register == 0x1000 was already the case for atom-sequence voices via M2.7's core::voice_setup (which hardcodes source_sample_rate_hz = 32000); the earlier 'fractional-stepping' diagnosis of the M4.2 shape divergence is retracted (see SPEC §10.11 motivation, M5.1 update). Residual divergence is now investigated against unity-pitch baseline at M5.2 (candidates: gaussian-kernel non-impulse response at unity pitch; BRR predictor/loop-state). The M5.0 fixture-pin test asserts the locked value at compile time via include_str!; M5.1 adds the runtime-behavior test pitch_register_equals_4096_for_native_rate_signals that exercises actual harness output."
     },
     {
       "name": "M5_METHODOLOGY_REPAIR_BUDGET",
