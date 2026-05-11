@@ -67,21 +67,23 @@ fn render_64_vs_128_atom_distinct() {
 
 #[test]
 fn render_canonical_atoms_match_locked_sha_baselines() {
-    // Mirrors the in-module `m2_atom_render_baselines_locked` test
-    // but at integration-test scope so a `cargo test` against a
-    // clone of the repo (without recompiling internal-tests-only
-    // targets) still pins the baselines.
+    // Integration-test mirror of the in-module
+    // `atom_render_baselines_post_rotation_pinned` test. Post-M3.3
+    // BRR SHA values reflect phase rotation (SPEC §10.7) — M2.2
+    // values retired at M3.3.
     let out_128 = render_to_brr(&canonical_sine_atom(128)).expect("render");
     assert_eq!(
-        out_128.brr_sha256, "348c791449916e1f9169d0e229cd79bf97967b19e22db3c4a5be7dc9c69ac876",
-        "M2_ATOM_128_SINE_BRR_SHA256 drift"
+        out_128.brr_sha256, "b97f590f518ada958218d4de8ea8fe7bb294f7af4717cebc3d603ac296d25162",
+        "M3_ATOM_128_SINE_BRR_SHA256_PHASE_ROTATION drift"
     );
+    assert_eq!(out_128.rotation_offset, 96);
 
     let out_64 = render_to_brr(&canonical_sine_atom(64)).expect("render");
     assert_eq!(
-        out_64.brr_sha256, "78da253b65a6a8d067102fe30ed90353c25b6981a71e3cafc6dd4f3041822e96",
-        "M2_ATOM_64_SINE_BRR_SHA256 drift"
+        out_64.brr_sha256, "8fd44c1d56d36175b195f68fc5a5080b17bf9634545918d2d9f776267f49b655",
+        "M3_ATOM_64_SINE_BRR_SHA256_PHASE_ROTATION drift"
     );
+    assert_eq!(out_64.rotation_offset, 48);
 }
 
 /// M3.1 atom PCM SHA reclassification (SPEC §16.9 amendment, M3.0).

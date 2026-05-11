@@ -2768,11 +2768,18 @@ fn cli_render_atom_happy_path() {
     assert_eq!(r["partial_count"], 1);
     assert_eq!(r["normalize"], true);
     assert_eq!(r["brr_bytes"], 72);
-    // Locked M2_ATOM_128_SINE_BRR_SHA256 baseline.
+    // Post-M3.3 BRR SHA — phase rotation chose offset=96 for the
+    // canonical sine_128 atom, dropping loop_click_abs from 1197
+    // (M2.2 / pre-M3) to 0. The M2.2 SHA
+    // (348c7914…ac876) was retired here at M3.3; the
+    // post-rotation value is locked in
+    // baselines/m3.json::documentary_snapshot as
+    // M3_ATOM_128_SINE_BRR_SHA256_PHASE_ROTATION.
     assert_eq!(
         r["brr_sha256"],
-        "348c791449916e1f9169d0e229cd79bf97967b19e22db3c4a5be7dc9c69ac876"
+        "b97f590f518ada958218d4de8ea8fe7bb294f7af4717cebc3d603ac296d25162"
     );
+    assert_eq!(r["rotation_offset"], 96);
 }
 
 #[test]

@@ -2609,6 +2609,9 @@ fn atom_render_report(atom: &AtomSlot, render: &AtomBrrOutput) -> AtomRenderRepo
         decoded_brr_pcm_sha256: render.decoded_brr_pcm_sha256.clone(),
         loop_click_abs: render.loop_click_abs,
         loop_window_rms_delta: render.loop_window_rms_delta,
+        rotation_offset: render.rotation_offset,
+        peak_abs_error_post_rotation: render.peak_abs_error_post_rotation,
+        rms_error_post_rotation: render.rms_error_post_rotation,
     }
 }
 

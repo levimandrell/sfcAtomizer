@@ -774,6 +774,20 @@ pub struct AtomRenderReport {
     /// with `window = 8`. Reports-only at M3.
     #[serde(default)]
     pub loop_window_rms_delta: f64,
+    /// M3.3: chosen rotation offset per SPEC §10.7. `0` when no
+    /// rotation was applied (or all candidates tied). Defaulted on
+    /// deserialize for back-compat with pre-M3.3 reports.
+    #[serde(default)]
+    pub rotation_offset: u32,
+    /// M3.3: secondary lex-level for the chosen rotation candidate
+    /// (max `|rotated_source[i] - decoded[i]|`). Reports-only;
+    /// M3 gates only on `loop_click_abs`.
+    #[serde(default)]
+    pub peak_abs_error_post_rotation: i32,
+    /// M3.3: tertiary lex-level for the chosen rotation candidate
+    /// (sqrt of mean squared `rotated_source - decoded`). Reports-only.
+    #[serde(default)]
+    pub rms_error_post_rotation: f64,
 }
 
 impl AtomRenderReport {
@@ -2013,6 +2027,9 @@ mod tests {
             decoded_brr_pcm_sha256: "c".repeat(64),
             loop_click_abs: 1197,
             loop_window_rms_delta: 2262.74,
+            rotation_offset: 16,
+            peak_abs_error_post_rotation: 512,
+            rms_error_post_rotation: 123.456,
         };
         round_trip(&r);
     }
@@ -2045,6 +2062,9 @@ mod tests {
             decoded_brr_pcm_sha256: String::new(),
             loop_click_abs: 0,
             loop_window_rms_delta: 0.0,
+            rotation_offset: 0,
+            peak_abs_error_post_rotation: 0,
+            rms_error_post_rotation: 0.0,
         };
         round_trip(&r);
     }
