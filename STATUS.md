@@ -54,28 +54,44 @@ table.
   not pursued — runtime alone disqualifies even if the
   improvement gate cleared.
 
-**Investigation finding (the structural ceiling).** The
-high-noise atom-fixture cluster's `peak_abs_raw_vs_source = 18431`
-is arithmetically intrinsic to the BRR encoder's 4-bit ADPCM at
+**Investigation finding (the structural ceiling — narrowed per
+consultant M4.4 audit #2, #4, #9).** The high-noise
+atom-fixture cluster's `peak_abs_raw_vs_source = 18431` is
+explained by the current-sample contribution of 4-bit ADPCM at
 the highest non-degenerate shift:
 
 ```
-max BRR-decoded magnitude at shift = 12
+max BRR-decoded magnitude from current-sample term at shift = 12
   = max_nibble × 2^shift / 2
   = 7 × 4096 / 2
   = 14336
 
-i16::MAX − max_BRR_decoded
+i16::MAX − current_sample_term_max
   = 32767 − 14336
-  = 18431  ← the observed ceiling
+  = 18431  ← the observed plateau for full-scale peaks
 ```
 
-For source samples beyond ±14336 (common in `normalize = false`
-/ max-amplitude fixtures and any near-Nyquist content), the
-encoder **cannot** match — `|source − decoded|` at the peak
-sample is `source − 14336` regardless of filter/shift choice or
-trajectory. No cross-block beam search can find a path around
-this. Shift values 13–15 trigger the special-case
+The `18431` ceiling is **structural for samples whose critical
+peak is encoded through the current-sample term at shift = 12**,
+especially filter-0 / forced-loop-entry cases. It is **NOT** a
+universal mathematical upper bound on every decoded BRR sample
+under filters 1–3 — those filters add predictor terms from
+previous decoded samples, so the decoded value can exceed the
+raw shifted-nibble current-sample term. However, **for the M4.4
+spike's actual measurements** — full-scale peaks in filter-0,
+at the forced-loop-entry block (always filter-0 here), and at
+current-term-dominated cases for the high-noise cluster — the
+14336 current-sample ceiling explains the observed `18431`
+plateau, and the beam-search-width-4 spike did not find a
+trajectory around it.
+
+The **canonical sines do not hit 18431** because their atom
+amplitude is `0.75`, so their source peaks are below full-scale
+(`~24575 ≈ 0.75 × 32767`). Peak error of `~10239` for those
+fixtures matches `24575 − 14336 = 10239` — the same
+current-sample-term ceiling applied to a lower source peak.
+
+Shift values 13–15 trigger the special-case
 `negative → −2048, positive → 0` path that's degraded enough to
 be unusable for music (and M1's encoder contract excludes them
 per `brr_encoder.rs` doc-comment).
@@ -83,10 +99,15 @@ per `brr_encoder.rs` doc-comment).
 Productive future directions would have to operate either
 **before** the encoder (e.g. source-PCM attenuation, which §16.9
 forbids without atom amplitude-field change; or pre-emphasis,
-permanently deferred to M5+ per M4.2 outcome 3) or **outside the
+permanently deferred to M5+ per M4.2 outcome 3), **outside the
 spec** (e.g. extending into shift 13+, which would change the
 playback contract and require Mesen2 / `snes_spc` oracle
-validation). Neither is in M4 scope.
+validation), or **inside the filter-1/2/3 prediction surface**
+(which the beam-search-width-4 spike did NOT exhaust — wider
+beams or alternative scoring may find predictor trajectories
+that lift decoded peaks beyond the current-sample ceiling). The
+first two are out of M4 scope; the third is a candidate for a
+follow-up spike if PM decides to revisit at M5+.
 
 ### M4.4 per-fixture measurement table (11 atom fixtures)
 

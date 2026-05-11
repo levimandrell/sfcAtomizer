@@ -1373,10 +1373,10 @@
     },
     {
       "name": "M4_4_BRR_NEAR_LOCAL_OPTIMUM_FINDING",
-      "value": "structural_peak_18431_intrinsic_to_4bit_adpcm_shift_12",
+      "value": "current_sample_term_at_shift_12_explains_18431_plateau_in_filter_0_and_forced_loop_entry_cases",
       "kind": "investigation_finding",
       "snapshot_at": "M4.4",
-      "_note": "The high-noise atom-fixture cluster's peak_abs_raw_vs_source = 18431 is arithmetically structural, not a search-greediness artifact. Max BRR-decoded value at shift = 12 (highest non-degenerate shift; shift 13+ triggers the 'negative -> -2048, positive -> 0' special-case path that's unusable for music) is 7 * 4096 / 2 = 14336. For source samples > 14336 (common in normalize=false / max-amp fixtures), the encoder literally cannot match; min |source - decoded| at the peak sample is source - 14336, which for source = i16::MAX gives 32767 - 14336 = 18431. No cross-block beam search can find trajectories around this. Future encoder improvements would need to either (a) operate on the source PCM before encoding (e.g. attenuation, which \u00a716.9 forbids without amplitude field change; or pre-emphasis, M4.5 permanently deferred), or (b) extend the BRR spec into shift 13+ usage, which would alter the playback contract and require Mesen2 / snes_spc oracle validation."
+      "_note": "M4.4 spike (beam-search, width=4) failed exit criterion. Current-sample shift=12 BRR decoded magnitude tops out at (7 << 12) >> 1 = 14336. This explains the observed 18431 peak-error plateau (32767 - 14336) for full-scale source peaks in filter-0 / forced-loop-entry / current-term-dominated cases. Predictor filters 1-3 can exceed the current-sample term via prediction from previous decoded samples, so 14336 is a practical current-encoder ceiling observation on the high-noise cluster under the beam-width-4 search, NOT a universal mathematical upper bound on every decoded BRR output. The canonical sines do not hit 18431 because their atom amplitude is 0.75 (source peak ~24575, peak error ~10239 = 24575 - 14336). Future improvements likely require source-domain preprocessing OR pre-emphasis (M4.5 deferred permanently to M5+) OR a deliberate playback contract change (out of current SPEC scope) OR a wider beam / alternative scoring that explores the filter-1/2/3 predictor surface more aggressively than width=4 did."
     }
   ],
   "retired": []
