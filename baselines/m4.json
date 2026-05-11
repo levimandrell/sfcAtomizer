@@ -590,6 +590,566 @@
       "kind": "investigation_result",
       "snapshot_at": "M4.2",
       "_note": "Phase C tested three hypotheses for the M3.5.1/M4.1 zcr_ratio doubling on low/mid signals: (1) oracle sample-rate doubling - RULED OUT (raw_pcm_length == oracle_pcm_length == 16000 mono samples per run); (2) oracle output shape - ROOT CAUSE FOUND (oracle output for sine_cycle_128 has ~568 leading silent samples then alternating-amplitude plateau regions connected by discontinuous jumps; each plateau-to-plateau jump adds 2 zero crossings beyond a clean sine, producing the 2x ZCR ratio); (3) oracle invocation review - RULED OUT (oracle configured at sample_rate_hz=32000, channels=2, frames=16000 per oracle-side report). Cause: SPC plays the 128-sample atom at MIDI 60 = 261.63 Hz; atom's native rate at cycle_len 128 = 33489 Hz; pitch register fractionally steps through input samples per output sample, and combined with BRR quantization + gaussian interpolation produces the alternating-amplitude shape. Not a methodology bug; the characterization is fundamentally measuring 'raw 1:1 tile' vs 'SPC pitch-shift + gaussian playback'."
+    },
+    {
+      "name": "M4_3_ATOM_128_SINE_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 9582,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error peak magnitude (i32, widened-abs) for this atom under M3.3 phase rotation. Documentary; M4.4 encoder spike may shift this if production change ships."
+    },
+    {
+      "name": "M4_3_ATOM_128_SINE_RMS_RAW_VS_SOURCE",
+      "value": 4795.185290345932,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error RMS (f64). Used as M4.4 encoder-spike exit-criterion baseline (>= 10% improvement required on at least one fixture)."
+    },
+    {
+      "name": "M4_3_ATOM_128_SINE_SNR_DB",
+      "value": 11.18356076214923,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 signal-to-noise ratio (f64; higher is better). 0.0 means silent source; +infinity (not representable in JSON) means exact-encode."
+    },
+    {
+      "name": "M4_3_ATOM_128_SINE_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 count of decoded BRR samples at i16 saturation boundary (widened-i32 abs >= 32767; counts +/- 32767 and -32768)."
+    },
+    {
+      "name": "M4_3_ATOM_64_SINE_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 10239,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error peak magnitude (i32, widened-abs) for this atom under M3.3 phase rotation. Documentary; M4.4 encoder spike may shift this if production change ships."
+    },
+    {
+      "name": "M4_3_ATOM_64_SINE_RMS_RAW_VS_SOURCE",
+      "value": 5108.548781821507,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error RMS (f64). Used as M4.4 encoder-spike exit-criterion baseline (>= 10% improvement required on at least one fixture)."
+    },
+    {
+      "name": "M4_3_ATOM_64_SINE_SNR_DB",
+      "value": 10.633707712746418,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 signal-to-noise ratio (f64; higher is better). 0.0 means silent source; +infinity (not representable in JSON) means exact-encode."
+    },
+    {
+      "name": "M4_3_ATOM_64_SINE_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 count of decoded BRR samples at i16 saturation boundary (widened-i32 abs >= 32767; counts +/- 32767 and -32768)."
+    },
+    {
+      "name": "M4_3_ATOM_AMPLITUDE_ZERO_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error peak magnitude (i32, widened-abs) for this atom under M3.3 phase rotation. Documentary; M4.4 encoder spike may shift this if production change ships."
+    },
+    {
+      "name": "M4_3_ATOM_AMPLITUDE_ZERO_RMS_RAW_VS_SOURCE",
+      "value": 0.0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error RMS (f64). Used as M4.4 encoder-spike exit-criterion baseline (>= 10% improvement required on at least one fixture)."
+    },
+    {
+      "name": "M4_3_ATOM_AMPLITUDE_ZERO_SNR_DB",
+      "value": 0.0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 signal-to-noise ratio (f64; higher is better). 0.0 means silent source; +infinity (not representable in JSON) means exact-encode."
+    },
+    {
+      "name": "M4_3_ATOM_AMPLITUDE_ZERO_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 count of decoded BRR samples at i16 saturation boundary (widened-i32 abs >= 32767; counts +/- 32767 and -32768)."
+    },
+    {
+      "name": "M4_3_ATOM_ALL_PARTIALS_ZERO_NORMALIZE_TRUE_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error peak magnitude (i32, widened-abs) for this atom under M3.3 phase rotation. Documentary; M4.4 encoder spike may shift this if production change ships."
+    },
+    {
+      "name": "M4_3_ATOM_ALL_PARTIALS_ZERO_NORMALIZE_TRUE_RMS_RAW_VS_SOURCE",
+      "value": 0.0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error RMS (f64). Used as M4.4 encoder-spike exit-criterion baseline (>= 10% improvement required on at least one fixture)."
+    },
+    {
+      "name": "M4_3_ATOM_ALL_PARTIALS_ZERO_NORMALIZE_TRUE_SNR_DB",
+      "value": 0.0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 signal-to-noise ratio (f64; higher is better). 0.0 means silent source; +infinity (not representable in JSON) means exact-encode."
+    },
+    {
+      "name": "M4_3_ATOM_ALL_PARTIALS_ZERO_NORMALIZE_TRUE_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 count of decoded BRR samples at i16 saturation boundary (widened-i32 abs >= 32767; counts +/- 32767 and -32768)."
+    },
+    {
+      "name": "M4_3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 10239,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error peak magnitude (i32, widened-abs) for this atom under M3.3 phase rotation. Documentary; M4.4 encoder spike may shift this if production change ships."
+    },
+    {
+      "name": "M4_3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_RMS_RAW_VS_SOURCE",
+      "value": 1532.3267795659644,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error RMS (f64). Used as M4.4 encoder-spike exit-criterion baseline (>= 10% improvement required on at least one fixture)."
+    },
+    {
+      "name": "M4_3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_SNR_DB",
+      "value": 13.361525298522023,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 signal-to-noise ratio (f64; higher is better). 0.0 means silent source; +infinity (not representable in JSON) means exact-encode."
+    },
+    {
+      "name": "M4_3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 count of decoded BRR samples at i16 saturation boundary (widened-i32 abs >= 32767; counts +/- 32767 and -32768)."
+    },
+    {
+      "name": "M4_3_ATOM_MAX_AMPLITUDE_NO_NORMALIZE_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error peak magnitude (i32, widened-abs) for this atom under M3.3 phase rotation. Documentary; M4.4 encoder spike may shift this if production change ships."
+    },
+    {
+      "name": "M4_3_ATOM_MAX_AMPLITUDE_NO_NORMALIZE_RMS_RAW_VS_SOURCE",
+      "value": 10576.551517389777,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error RMS (f64). Used as M4.4 encoder-spike exit-criterion baseline (>= 10% improvement required on at least one fixture)."
+    },
+    {
+      "name": "M4_3_ATOM_MAX_AMPLITUDE_NO_NORMALIZE_SNR_DB",
+      "value": 6.395430157288107,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 signal-to-noise ratio (f64; higher is better). 0.0 means silent source; +infinity (not representable in JSON) means exact-encode."
+    },
+    {
+      "name": "M4_3_ATOM_MAX_AMPLITUDE_NO_NORMALIZE_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 count of decoded BRR samples at i16 saturation boundary (widened-i32 abs >= 32767; counts +/- 32767 and -32768)."
+    },
+    {
+      "name": "M4_3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error peak magnitude (i32, widened-abs) for this atom under M3.3 phase rotation. Documentary; M4.4 encoder spike may shift this if production change ships."
+    },
+    {
+      "name": "M4_3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_RMS_RAW_VS_SOURCE",
+      "value": 10562.454493245166,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error RMS (f64). Used as M4.4 encoder-spike exit-criterion baseline (>= 10% improvement required on at least one fixture)."
+    },
+    {
+      "name": "M4_3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_SNR_DB",
+      "value": 6.3332064396147185,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 signal-to-noise ratio (f64; higher is better). 0.0 means silent source; +infinity (not representable in JSON) means exact-encode."
+    },
+    {
+      "name": "M4_3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 count of decoded BRR samples at i16 saturation boundary (widened-i32 abs >= 32767; counts +/- 32767 and -32768)."
+    },
+    {
+      "name": "M4_3_ATOM_HARMONIC_16_CYCLE_64_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error peak magnitude (i32, widened-abs) for this atom under M3.3 phase rotation. Documentary; M4.4 encoder spike may shift this if production change ships."
+    },
+    {
+      "name": "M4_3_ATOM_HARMONIC_16_CYCLE_64_RMS_RAW_VS_SOURCE",
+      "value": 12329.88696217447,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error RMS (f64). Used as M4.4 encoder-spike exit-criterion baseline (>= 10% improvement required on at least one fixture)."
+    },
+    {
+      "name": "M4_3_ATOM_HARMONIC_16_CYCLE_64_SNR_DB",
+      "value": 5.479251764334529,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 signal-to-noise ratio (f64; higher is better). 0.0 means silent source; +infinity (not representable in JSON) means exact-encode."
+    },
+    {
+      "name": "M4_3_ATOM_HARMONIC_16_CYCLE_64_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 count of decoded BRR samples at i16 saturation boundary (widened-i32 abs >= 32767; counts +/- 32767 and -32768)."
+    },
+    {
+      "name": "M4_3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error peak magnitude (i32, widened-abs) for this atom under M3.3 phase rotation. Documentary; M4.4 encoder spike may shift this if production change ships."
+    },
+    {
+      "name": "M4_3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_RMS_RAW_VS_SOURCE",
+      "value": 4574.389392312377,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error RMS (f64). Used as M4.4 encoder-spike exit-criterion baseline (>= 10% improvement required on at least one fixture)."
+    },
+    {
+      "name": "M4_3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_SNR_DB",
+      "value": 7.405030359634541,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 signal-to-noise ratio (f64; higher is better). 0.0 means silent source; +infinity (not representable in JSON) means exact-encode."
+    },
+    {
+      "name": "M4_3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 count of decoded BRR samples at i16 saturation boundary (widened-i32 abs >= 32767; counts +/- 32767 and -32768)."
+    },
+    {
+      "name": "M4_3_ATOM_PHASE_CYCLES_0_9999_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 9581,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error peak magnitude (i32, widened-abs) for this atom under M3.3 phase rotation. Documentary; M4.4 encoder spike may shift this if production change ships."
+    },
+    {
+      "name": "M4_3_ATOM_PHASE_CYCLES_0_9999_RMS_RAW_VS_SOURCE",
+      "value": 4797.027063550663,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error RMS (f64). Used as M4.4 encoder-spike exit-criterion baseline (>= 10% improvement required on at least one fixture)."
+    },
+    {
+      "name": "M4_3_ATOM_PHASE_CYCLES_0_9999_SNR_DB",
+      "value": 11.180190397289538,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 signal-to-noise ratio (f64; higher is better). 0.0 means silent source; +infinity (not representable in JSON) means exact-encode."
+    },
+    {
+      "name": "M4_3_ATOM_PHASE_CYCLES_0_9999_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 count of decoded BRR samples at i16 saturation boundary (widened-i32 abs >= 32767; counts +/- 32767 and -32768)."
+    },
+    {
+      "name": "M4_3_ATOM_CYCLE_256_CANONICAL_SINE_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 9995,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error peak magnitude (i32, widened-abs) for this atom under M3.3 phase rotation. Documentary; M4.4 encoder spike may shift this if production change ships."
+    },
+    {
+      "name": "M4_3_ATOM_CYCLE_256_CANONICAL_SINE_RMS_RAW_VS_SOURCE",
+      "value": 4920.934859416959,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 BRR encoder error RMS (f64). Used as M4.4 encoder-spike exit-criterion baseline (>= 10% improvement required on at least one fixture)."
+    },
+    {
+      "name": "M4_3_ATOM_CYCLE_256_CANONICAL_SINE_SNR_DB",
+      "value": 10.95871942663798,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 signal-to-noise ratio (f64; higher is better). 0.0 means silent source; +infinity (not representable in JSON) means exact-encode."
+    },
+    {
+      "name": "M4_3_ATOM_CYCLE_256_CANONICAL_SINE_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 count of decoded BRR samples at i16 saturation boundary (widened-i32 abs >= 32767; counts +/- 32767 and -32768)."
+    },
+    {
+      "name": "M4_3_CHARSIG_SINE_CYCLE_64_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 peak encoder error for this m3_5_canonical characterization signal under M3.3 phase rotation + M4.1 alignment. Documentary; provides noise-floor comparison surface for M4.4 spike."
+    },
+    {
+      "name": "M4_3_CHARSIG_SINE_CYCLE_64_RMS_RAW_VS_SOURCE",
+      "value": 10442.45540001249,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 RMS encoder error for this characterization signal. M3.5.1 surfaced peak_abs ~18431 LSBs as the dominant atom-render artifact; M4.3 confirms RMS clusters near 10400 across most signals."
+    },
+    {
+      "name": "M4_3_CHARSIG_SINE_CYCLE_64_SNR_DB",
+      "value": 6.922362011369291,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 SNR (f64). Higher is better."
+    },
+    {
+      "name": "M4_3_CHARSIG_SINE_CYCLE_64_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 saturation count."
+    },
+    {
+      "name": "M4_3_CHARSIG_SINE_CYCLE_128_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 peak encoder error for this m3_5_canonical characterization signal under M3.3 phase rotation + M4.1 alignment. Documentary; provides noise-floor comparison surface for M4.4 spike."
+    },
+    {
+      "name": "M4_3_CHARSIG_SINE_CYCLE_128_RMS_RAW_VS_SOURCE",
+      "value": 10439.407814038712,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 RMS encoder error for this characterization signal. M3.5.1 surfaced peak_abs ~18431 LSBs as the dominant atom-render artifact; M4.3 confirms RMS clusters near 10400 across most signals."
+    },
+    {
+      "name": "M4_3_CHARSIG_SINE_CYCLE_128_SNR_DB",
+      "value": 6.924924682943974,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 SNR (f64). Higher is better."
+    },
+    {
+      "name": "M4_3_CHARSIG_SINE_CYCLE_128_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 saturation count."
+    },
+    {
+      "name": "M4_3_CHARSIG_SINE_CYCLE_256_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18328,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 peak encoder error for this m3_5_canonical characterization signal under M3.3 phase rotation + M4.1 alignment. Documentary; provides noise-floor comparison surface for M4.4 spike."
+    },
+    {
+      "name": "M4_3_CHARSIG_SINE_CYCLE_256_RMS_RAW_VS_SOURCE",
+      "value": 10353.63441302588,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 RMS encoder error for this characterization signal. M3.5.1 surfaced peak_abs ~18431 LSBs as the dominant atom-render artifact; M4.3 confirms RMS clusters near 10400 across most signals."
+    },
+    {
+      "name": "M4_3_CHARSIG_SINE_CYCLE_256_SNR_DB",
+      "value": 6.996575252896849,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 SNR (f64). Higher is better."
+    },
+    {
+      "name": "M4_3_CHARSIG_SINE_CYCLE_256_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 saturation count."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_2_CYCLE_64_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 peak encoder error for this m3_5_canonical characterization signal under M3.3 phase rotation + M4.1 alignment. Documentary; provides noise-floor comparison surface for M4.4 spike."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_2_CYCLE_64_RMS_RAW_VS_SOURCE",
+      "value": 10454.401795715046,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 RMS encoder error for this characterization signal. M3.5.1 surfaced peak_abs ~18431 LSBs as the dominant atom-render artifact; M4.3 confirms RMS clusters near 10400 across most signals."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_2_CYCLE_64_SNR_DB",
+      "value": 6.912445668637044,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 SNR (f64). Higher is better."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_2_CYCLE_64_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 saturation count."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_4_CYCLE_64_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 peak encoder error for this m3_5_canonical characterization signal under M3.3 phase rotation + M4.1 alignment. Documentary; provides noise-floor comparison surface for M4.4 spike."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_4_CYCLE_64_RMS_RAW_VS_SOURCE",
+      "value": 10459.205688052989,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 RMS encoder error for this characterization signal. M3.5.1 surfaced peak_abs ~18431 LSBs as the dominant atom-render artifact; M4.3 confirms RMS clusters near 10400 across most signals."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_4_CYCLE_64_SNR_DB",
+      "value": 6.908490971549797,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 SNR (f64). Higher is better."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_4_CYCLE_64_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 saturation count."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_8_CYCLE_64_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 peak encoder error for this m3_5_canonical characterization signal under M3.3 phase rotation + M4.1 alignment. Documentary; provides noise-floor comparison surface for M4.4 spike."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_8_CYCLE_64_RMS_RAW_VS_SOURCE",
+      "value": 10345.791136979327,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 RMS encoder error for this characterization signal. M3.5.1 surfaced peak_abs ~18431 LSBs as the dominant atom-render artifact; M4.3 confirms RMS clusters near 10400 across most signals."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_8_CYCLE_64_SNR_DB",
+      "value": 7.003203040561434,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 SNR (f64). Higher is better."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_8_CYCLE_64_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 saturation count."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_16_CYCLE_64_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 peak encoder error for this m3_5_canonical characterization signal under M3.3 phase rotation + M4.1 alignment. Documentary; provides noise-floor comparison surface for M4.4 spike."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_16_CYCLE_64_RMS_RAW_VS_SOURCE",
+      "value": 12329.88696217447,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 RMS encoder error for this characterization signal. M3.5.1 surfaced peak_abs ~18431 LSBs as the dominant atom-render artifact; M4.3 confirms RMS clusters near 10400 across most signals."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_16_CYCLE_64_SNR_DB",
+      "value": 5.479251764334529,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 SNR (f64). Higher is better."
+    },
+    {
+      "name": "M4_3_CHARSIG_HARMONIC_16_CYCLE_64_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 saturation count."
+    },
+    {
+      "name": "M4_3_CHARSIG_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 peak encoder error for this m3_5_canonical characterization signal under M3.3 phase rotation + M4.1 alignment. Documentary; provides noise-floor comparison surface for M4.4 spike."
+    },
+    {
+      "name": "M4_3_CHARSIG_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_RMS_RAW_VS_SOURCE",
+      "value": 4574.389392312377,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 RMS encoder error for this characterization signal. M3.5.1 surfaced peak_abs ~18431 LSBs as the dominant atom-render artifact; M4.3 confirms RMS clusters near 10400 across most signals."
+    },
+    {
+      "name": "M4_3_CHARSIG_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_SNR_DB",
+      "value": 7.405030359634541,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 SNR (f64). Higher is better."
+    },
+    {
+      "name": "M4_3_CHARSIG_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 saturation count."
+    },
+    {
+      "name": "M4_3_CHARSIG_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 peak encoder error for this m3_5_canonical characterization signal under M3.3 phase rotation + M4.1 alignment. Documentary; provides noise-floor comparison surface for M4.4 spike."
+    },
+    {
+      "name": "M4_3_CHARSIG_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_RMS_RAW_VS_SOURCE",
+      "value": 10562.454493245166,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 RMS encoder error for this characterization signal. M3.5.1 surfaced peak_abs ~18431 LSBs as the dominant atom-render artifact; M4.3 confirms RMS clusters near 10400 across most signals."
+    },
+    {
+      "name": "M4_3_CHARSIG_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_SNR_DB",
+      "value": 6.3332064396147185,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 SNR (f64). Higher is better."
+    },
+    {
+      "name": "M4_3_CHARSIG_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M4.3",
+      "_note": "SPEC 10.10 saturation count."
     }
   ],
   "retired": []
