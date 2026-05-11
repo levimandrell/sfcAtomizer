@@ -728,6 +728,39 @@ When pre-emphasis ships, `AtomBrrOutput` gains these fields
 `atom_pool[].pre_emphasis` field (default `"off"`). Schema rule
 finalized at M3.6 land.
 
+**Preset evaluation report fields (locked at M5.0 per
+consultant M5 plan #12).** When pre-emphasis preset
+evaluation runs at M5.3 (conditional on M5.2's
+`reliable_preset_eval` outcome), the characterization report
+gains optional fields per signal:
+
+```
+pre_emphasis_applied:        "off" | "gentle" | "strong"
+pre_emphasis_preset_id:      String
+pre_emphasis_filter_form:    "fir_3tap" | "one_pole_shelf" | ...
+rotation_offset_with_pre_emphasis:    u32
+loop_click_abs_with_pre_emphasis:     i32
+noise_floor_metrics_with_pre_emphasis: {
+    peak_abs_raw_vs_source: i32,
+    rms_raw_vs_source:      f64,
+    snr_db:                 f64,
+    clipping_count_raw:     u32
+}
+```
+
+M5.0 locks the schema. M5.3 picks coefficients + filter form
+per consultant M5 plan #13: hand-derivable FIR (up to 3 taps)
+OR one-pole IIR shelf. **No filter-design crate dependency**
+unless explicit PM approval at the M5.3 brief. Coefficients
+are documented in `RELEASE_NOTES_v0.5-rc.md` if M5.3 ships
+production presets, and locked literal-pin per the M2.8.1
+identity-gated baseline pattern.
+
+The §10.9 #1–#4 conditions evaluate against these preset
+report fields if M5.3 runs. Until then the fields are absent
+from the schema; consumers handle them as optional (M3.5.1
+`#[serde(skip_serializing_if = "Option::is_none")]` pattern).
+
 **Characterization report format (locked at M3.5 prelude per
 consultant M3.3 audit #12; expanded at M3.5 per audition audit
 #13; expanded again at M3.5.1 per consultant M3.5 audit #3, #4;
