@@ -2,7 +2,249 @@
 
 ## Current milestone
 
-**M5.0 — M5 Contracts Freeze.** No implementation. Contracts
+**M5.1 — Native-rate characterization harness
+verification + investigation.** First M5 research-spike per
+SPEC §24.1.1 (M5's tightened 1+1 budget; M5.1 occupies the
+main loop, M5.2.1 reserves the conditional correction slot).
+The M5.1 brief was reframed post-PM-consultation when
+engineer's preflight surfaced a diagnosis-discrepancy in SPEC
+§10.11 motivation: pitch register was already programmed at
+`0x1000` (unity) for every M3.5 canonical signal since M2.7
+via `core::voice_setup`'s hardcoded
+`source_sample_rate_hz = 32000` for `TrackKind::AtomSequence`.
+The earlier "fractional pitch stepping" attribution of the
+M4.2 shape divergence is therefore incorrect. Consultant
+verified the preflight finding (audit #1, #2). M5.1 reframes
+from "removing fractional pitch stepping" to "investigation of
+unity-pitch DSP playback vs host raw decode" per consultant M5
+plan #6.
+
+**Outcome:** harness contract verified end-to-end; SPEC §10.11
+motivation prose corrected; runtime regression guard in place;
+informal characterization run produces metrics numerically
+identical to M4.2 (confirming preflight diagnosis). The actual
+root cause of the `zcr_ratio ≈ 2` / low-correlation pattern
+narrows to candidate (a) S-DSP gaussian 4-tap kernel
+non-impulse response at unity pitch (since
+`force_filter_0_loop_entry: true` makes candidate (b)
+BRR-predictor/loop-state divergence inferentially equivalent
+to the no-state path for these atoms). **M5.2 will run the
+characterization re-run + decision against this refined
+hypothesis space.**
+
+### M5.1 strategy (Path X — already in place)
+
+Engineer's preflight determined that the M5.1 harness contract
+(`pitch_register == 0x1000`) was already produced by the
+existing M2.7 voice-setup path: `core::voice_setup::build_voice_entry`
+calls `pitch_register(source_sample_rate_hz, root, root, 0)`
+with `source_sample_rate_hz` hardcoded to 32000 for
+`TrackKind::AtomSequence`; with `desired == root` and
+`cents == 0` the formula collapses to
+`round(4096 × 32000/32000 × 2^0) = 4096 = 0x1000`. The M2 ASM
+driver (`core/fixtures/asm/m2_multi_voice_atom.asm`) writes the
+resulting bytes directly to `$F2/$F3` with no run-time
+override.
+
+M5.1 therefore ships **no code change** to achieve the unity-
+pitch contract. The M5.1 deliverables are:
+
+1. **Prose correction** — SPEC §10.11 motivation paragraph
+   replaced (consultant audit #7 wording); STATUS M4.2
+   narrative gains a blockquote correction note pointing to
+   the SPEC update; `baselines/m5.json` rule prose updated to
+   drop the "eliminates fractional-stepping" framing.
+2. **`harness_meta` field on `CharacterizationReport`** with
+   `pitch_register: u32`, `rate_strategy: String`,
+   `atom_native_rates_hz: BTreeMap<String, u32>` per SPEC
+   §10.11.4. Populated via `build_harness_meta(&signals)`.
+3. **Schema bump `v4 → v5`** on the characterization report.
+4. **Runtime regression guard test**
+   `pitch_register_equals_4096_for_native_rate_signals` drives
+   every `m3_5_canonical` signal through
+   `build_voice_setup_table` and asserts the encoded
+   `pitch_register` equals `0x1000`.
+
+### Phase E informal characterization observation
+
+Release-build run (oracle from
+`tools/snes_spc_oracle/build/Release/snes_spc_oracle.exe`, 9
+signals, 16000 frames). Runtime: **0.539 s** (well under the
+M5.0-locked target of 5 s; warning threshold 10 s).
+
+```
+schema_version: 5
+report_type: gaussian_characterization
+fixture_set: m3_5_canonical
+alignment_search_limit: 256
+alignment_boundary_hit: false
+alignment_valid: false
+methodology_precondition_passed: false
+recommended_next: methodology_review
+
+harness_meta:
+  pitch_register: 4096
+  rate_strategy: spc_rate_matches_atom_native_at_project_32k
+  atom_native_rates_hz: { 9 signals → 32000 }
+```
+
+| Signal | f (Hz) | align_off | corr | zcr_ratio | gain_db | peak_err | peak_after_norm |
+|---|---|---|---|---|---|---|---|
+| sine_cycle_64 | 500 | 55 | 0.153 | 1.93 | +2.657 | 39053 | 33080 |
+| sine_cycle_128 | 250 | 55 | 0.147 | 1.93 | +2.675 | 39053 | 33043 |
+| sine_cycle_256 | 125 | 55 | 0.117 | 1.94 | +2.679 | 39053 | 33034 |
+| harmonic_2_cycle_64 | 1000 | 55 | 0.274 | 2.58 | +2.589 | 39053 | 33210 |
+| harmonic_4_cycle_64 | 2000 | 7 | 0.492 | 2.20 | +2.334 | 39053 | 33710 |
+| harmonic_8_cycle_64 | 4000 | 7 | 0.598 | 2.06 | +1.593 | 39053 | 35253 |
+| harmonic_16_cycle_64 | 8000 | 63 | **0.984** | **1.00** | -1.223 | 16384 | 16384 |
+| all_8_partials | 250 | 40 | 0.613 | 0.97 | +2.534 | 35493 | 30107 |
+| normalize_false_clamp | 250 | 40 | 0.597 | 1.55 | +2.456 | 39053 | 33463 |
+
+**Numerically identical to M4.2** (same `align_off` / `corr` /
+`zcr_ratio` / `peak_err` on every signal — compare to M4.2
+data block above). This confirms the preflight diagnosis: the
+M4.2 shape divergence does not depend on the pitch register
+since that register was already `0x1000` then. The unity-pitch
+contract is **verified active** in both runs; only the
+interpretation of the comparison changes.
+
+### Phase E three-way comparison — deferred to M5.2
+
+The three-way comparison consultant #4 recommends (raw tiled /
+BRR-decoded-with-predictor-state-carried / oracle) is
+**deferred to M5.2**. Engineer's inferential finding makes the
+comparison's (2) reducible to (1) for these atoms:
+
+- Every M3.5 canonical atom sets
+  `render.force_filter_0_loop_entry: true`
+  (`core::characterize_gaussian::atom_base` line 69).
+  Filter 0 BRR blocks contain no prior-sample predictor term,
+  so the decoder state is **reset** at each loop boundary.
+  Within one cycle iteration the decoder state evolves
+  through filters 0–3; at the loop wrap, filter 0 on block 0
+  zeroes that state again. The PCM output of cycle N+1 is
+  therefore byte-identical to cycle N.
+- Consequently, "raw tiled (no state-carry)" and "BRR-decoded
+  with state-carry across loop iterations" produce the SAME
+  PCM buffer for these atoms. The three-way comparison's (1)
+  and (2) are equivalent.
+- The remaining candidate cause for the (1)/(2)-vs-(3)
+  divergence narrows to **gaussian-kernel non-impulse response
+  at unity pitch** (the S-DSP 4-tap kernel applies non-impulse
+  weights at integer offsets too). M5.2 investigates this
+  hypothesis.
+
+The engineering effort to *implement* a state-carrying decode
+helper would still be small (~30 lines), but the comparison
+itself would not add signal beyond what the inferential
+argument establishes. Per the M5.1 brief's feasibility caveat
+("if it's larger, defer to M5.2"), deferral is the right call.
+
+### M5.1 phase log
+
+- **Phase 0 (commit `900f6ad`)** — `docs(spec+baselines):
+  retract fractional-stepping diagnosis at SPEC §10.11`. SPEC
+  §10.11 motivation paragraph + definition item 1 reframed
+  per consultant audit #7. STATUS M4.2 narrative gains a
+  blockquote correction note (Option A; archived narrative
+  preserved). `baselines/m5.json:16`
+  `M5_NATIVE_RATE_CHARACTERIZATION_PITCH_REGISTER` rule prose
+  updated. Numeric value (4096), `locked_at` (M5.0), and
+  `kind` (harness_constant) unchanged.
+- **Chore (commit `637b20b`)** — `chore: track rust 1.95.0
+  clippy advances`. Three new lints
+  (`manual_is_multiple_of`, `doc_lazy_continuation`,
+  `items_after_test_module`) fired on pre-existing code under
+  the stable channel advance to 1.95.0. Minimum-impact fixes
+  applied so the M5.1 commit sequence keeps clippy green; not
+  part of the M5.1 narrative.
+- **Phase C (commit `2b0383a`)** — `feat(core): add
+  HarnessMeta struct + field on CharacterizationReport`. New
+  `HarnessMeta` struct + `build_harness_meta` helper in
+  `core::characterize_gaussian`. Field added with
+  `#[serde(default)]`; `main.rs` constructs with
+  `HarnessMeta::default()` (Phase B swaps this).
+- **Phase B (commit `9fd858e`)** — `feat(core): harness_meta
+  emission + schema v5 bump`. CLI now populates `harness_meta`
+  via `build_harness_meta(&signals)`; `schema_version` bumped
+  `4 → 5`.
+- **Phase D (commit `1a6496c`)** — `test(core):
+  pitch_register_equals_4096_for_native_rate_signals
+  regression guard`. Drives every M3.5 canonical signal
+  through `build_voice_setup_table` and asserts
+  `pitch_register == 0x1000` on voice 0. **617 tests
+  workspace-wide** (was 616 at M5.0 close; +1 from this
+  test).
+- **Phase E** — informal release-build characterization run;
+  numbers identical to M4.2; three-way comparison deferred to
+  M5.2 with inferential rationale. **No baseline update.**
+  Runtime 0.539 s.
+- **Phase F (this entry)** — STATUS rewrite.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` all green throughout. **617 tests
+  workspace-wide** (was 616 at M5.0 close; +1 from Phase D).
+
+### Decisions log additions (M5.1)
+
+- **SPEC §10.11 motivation paragraph corrected** per
+  consultant audit #1, #2, #5, #7. Fractional-stepping
+  diagnosis retracted; pitch register verified at `0x1000`
+  since M2.7 via `core::voice_setup`. Implementation contract
+  (definition item 1) preserved; only the motivation prose
+  changes.
+- **M5.1 strategy: Path X** — unity pitch already in place
+  via `voice_setup.rs` M2.7 hardcoding. No code changes
+  needed for the harness contract itself; M5.1 work is
+  reporting + verification.
+- **`harness_meta` field** added to `CharacterizationReport`;
+  populated per SPEC §10.11.4 with `pitch_register = 4096`,
+  `rate_strategy = "spc_rate_matches_atom_native_at_project_32k"`,
+  and per-signal `atom_native_rates_hz` (all 32000 for the
+  M3.5 canonical set).
+- **Schema bump `v4 → v5`** on the characterization report.
+- **`pitch_register_equals_4096_for_native_rate_signals`**
+  runtime test passes for all 9 signals (regression guard).
+- **Phase E informal observation:** `alignment_best_offset` /
+  `normalized_correlation` / `zcr_ratio` / `peak_err`
+  **numerically identical to M4.2** — confirming preflight
+  finding that pitch register was already `0x1000` in M4.2.
+  The M4.2 shape divergence is therefore not
+  pitch-register-related; the M5.2 investigation focuses on
+  gaussian-kernel behavior at unity pitch.
+- **Phase E three-way comparison deferred to M5.2** with
+  inferential rationale: `force_filter_0_loop_entry: true`
+  makes the BRR predictor-state-carry path equivalent to the
+  no-state path for these atoms, so the residual hypothesis
+  is gaussian-kernel-at-unity (candidate (a) of SPEC §10.11
+  motivation).
+- **Runtime: 0.539 s** vs M5.0-locked 5 s target / 10 s
+  warning.
+- **M5.1 does NOT re-run characterization for
+  baseline-locking; that's M5.2.** Phase E run is informal;
+  no `baselines/m5.json` changes.
+- **M5.1.1 docs-only patch follows this commit** to annotate
+  v0.4-rc1-era historical artifacts (surfaces 4–6 per the
+  M5.1 supplement disposition):
+  `baselines/m4.json::M4_2_PHASE_C_ZCR_DOUBLING_ROOT_CAUSE`
+  gains a `_correction_m5_1` sibling field;
+  `RELEASE_NOTES_v0.4-rc.md` and `docs/reproduce-m2.md` gain
+  inline `[M5.1 correction: ...]` annotations next to each
+  retracted claim. Annotation-style (not rewriting) preserves
+  released-artifact provenance. No tag change; `v0.4-rc1`
+  stays at `1223606`.
+- **M5.2.1 conditional correction slot remains unburned.**
+  M5 repair budget is 1+1; M5.1 is loop 1, M5.2.1 is the
+  conditional loop 2 if M5.2 surfaces a clear-cause fix.
+
+**Next pass: M5.2 — Characterization re-run + decision.**
+Research-spike per SPEC §24.1.1. Three locked outcomes per
+SPEC §10.11: `reliable_preset_eval`, `reliable_no_preset_needed`,
+`methodology_unresolved`. Refined M5.1 hypothesis space:
+gaussian-kernel non-impulse response at unity pitch is the
+primary M4.2-divergence candidate. PM to brief.
+
+**Previous milestone (M5.0) — M5 Contracts Freeze.** No implementation. Contracts
 only. Same shape as M2.0 / M3.0 / M4.0: lock the contracts
 that M5.1+ sub-passes build against. Per consultant M5 plan
 #36. No encoder change; no atom render formula change (SPEC
@@ -140,10 +382,6 @@ M2 / M3 / M4 numeric baseline change.
 - **M5 default position: hold the §16.9 line.** Source-domain
   preprocessing defers to M6+ unless M5 data demands it AND
   PM authorizes amendment per the §16.9.1 procedure.
-
-**Next pass: M5.1 — Native-rate characterization harness
-implementation.** Research-spike per SPEC §24.1.1 with M5's
-tightened 1+1 budget. PM to brief.
 
 **Previous milestone (M4.7) — M4 release prep + acceptance
 + tag `v0.4-rc1`.** Final M4 sub-pass. Mirrors M3.8 structure
