@@ -2,9 +2,188 @@
 
 ## Current milestone
 
-**M4.3 — BRR noise-floor measurement.** Contracted
-implementation pass per SPEC §24.1 (not a research-spike).
-Wires the four SPEC §10.10 noise-floor metrics
+**M4.4 — Encoder improvement spike (SKIP).** Research-spike per
+SPEC §24.1; consultant M4 plan #4, #17. **Decision: skip; no
+production encoder change ships.** Two of four SPEC §24.1 exit
+conditions fail; the spike's beam-search strategy doesn't clear
+the threshold, and the residual finding is documented for M5+
+reference. Per consultant plan #17 ("negative finding is an
+acceptable M4.4 outcome"), M4.4 closes cleanly. M4 proceeds to
+M4.6 GUI polish (M4.5 already permanently skipped per M4.2
+outcome 3).
+
+**Strategy:** Hypothesis A from the brief — **cross-block beam
+search** (`beam_width = 4`), the M3.4-deferred predictor
+optimization per consultant M3.3 audit #21. Implementation lives
+in `core::brr_encoder::encode_looped_m4_4_spike` behind an
+`M44SpikeConfig { strategy: M44Strategy::BeamSearch { beam_width } }`
+feature flag; tests invoke it directly; the M2.2 greedy
+`encode_looped` stays as the production encoder unchanged.
+Rationale per M4.3 STATUS: the bimodal noise floor at
+`peak = 18431` across the high-noise atom cluster suggested the
+greedy per-block search was leaving cross-block gains on the
+table.
+
+**Outcome: SKIP per SPEC §24.1 exit criterion application.**
+
+- **Condition 1 — ≥10% improvement on RMS or peak for at least
+  one fixture: FAIL.** Best RMS improvement across all 11 atom
+  fixtures was **-2.41% on `64_SINE`** (with peak going +1.4%, a
+  mixed outcome). Best peak improvement was **-0.16% on
+  `CYCLE_256_CANONICAL_SINE`**. The 10% gate is nowhere near
+  approached on any fixture, and the high-noise cluster
+  (`MAX_AMPLITUDE_NO_NORMALIZE`, `NORMALIZE_FALSE_*`,
+  `HARMONIC_16_CYCLE_64`, `ALL_8_PARTIALS_*`) sees 0% to -0.17%
+  RMS improvement and identical `peak = 18431`. **The structural
+  ceiling is arithmetic, not a search artifact** — see
+  "Investigation finding" below.
+- **Condition 2 — no `loop_click_abs` worsening: PASS.** The
+  in-process test
+  `m4_4_spike_does_not_worsen_loop_click_vs_m3_3_production`
+  asserts the M3.3 phase-rotation improvement gate holds against
+  the spike encoder for every atom fixture. All 11 pass; the
+  spike picks the same lex-optimal rotation as M3.3.
+- **Condition 3 — no M2 behavioral regression: PASS (trivially).**
+  No production encoder swap = no M2 risk surface. Confirmed
+  by leaving the canonical `m2-acceptance` fixture untouched.
+- **Condition 4 — encode runtime ≤ 2× M3.3 baseline: FAIL.**
+  Release-build wall-clock measurement on the 11-atom suite:
+  M3.3 production **13.709 ms**, M4.4 spike (beam_width=4)
+  **105.928 ms**, ratio **7.73×**. Way over the 2× ceiling.
+  Wider beams (16, 64) would scale ~4× and ~16× worse and were
+  not pursued — runtime alone disqualifies even if the
+  improvement gate cleared.
+
+**Investigation finding (the structural ceiling).** The
+high-noise atom-fixture cluster's `peak_abs_raw_vs_source = 18431`
+is arithmetically intrinsic to the BRR encoder's 4-bit ADPCM at
+the highest non-degenerate shift:
+
+```
+max BRR-decoded magnitude at shift = 12
+  = max_nibble × 2^shift / 2
+  = 7 × 4096 / 2
+  = 14336
+
+i16::MAX − max_BRR_decoded
+  = 32767 − 14336
+  = 18431  ← the observed ceiling
+```
+
+For source samples beyond ±14336 (common in `normalize = false`
+/ max-amplitude fixtures and any near-Nyquist content), the
+encoder **cannot** match — `|source − decoded|` at the peak
+sample is `source − 14336` regardless of filter/shift choice or
+trajectory. No cross-block beam search can find a path around
+this. Shift values 13–15 trigger the special-case
+`negative → −2048, positive → 0` path that's degraded enough to
+be unusable for music (and M1's encoder contract excludes them
+per `brr_encoder.rs` doc-comment).
+
+Productive future directions would have to operate either
+**before** the encoder (e.g. source-PCM attenuation, which §16.9
+forbids without atom amplitude-field change; or pre-emphasis,
+permanently deferred to M5+ per M4.2 outcome 3) or **outside the
+spec** (e.g. extending into shift 13+, which would change the
+playback contract and require Mesen2 / `snes_spc` oracle
+validation). Neither is in M4 scope.
+
+### M4.4 per-fixture measurement table (11 atom fixtures)
+
+| Fixture | M4.3 peak | M4.4 peak | Δ peak % | M4.3 rms | M4.4 rms | Δ rms % | Δ SNR dB |
+|---|---|---|---|---|---|---|---|
+| 128_SINE | 9582 | 9580 | -0.02 | 4795.19 | 4792.09 | -0.06 | +0.01 |
+| 64_SINE | 10239 | 10380 | **+1.38** | 5108.55 | 4985.33 | **-2.41** | +0.21 |
+| AMPLITUDE_ZERO | 0 | 0 | — | 0.00 | 0.00 | — | 0.00 |
+| ALL_PARTIALS_ZERO_NORMALIZE_TRUE | 0 | 0 | — | 0.00 | 0.00 | — | 0.00 |
+| TWO_PARTIALS_CANCEL_PARTIALLY | 10239 | 10239 | 0.00 | 1532.33 | 1532.15 | -0.01 | 0.00 |
+| MAX_AMPLITUDE_NO_NORMALIZE | 18431 | 18431 | 0.00 | 10576.55 | 10558.60 | -0.17 | +0.01 |
+| NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY | 18431 | 18431 | 0.00 | 10562.45 | 10562.45 | 0.00 | 0.00 |
+| HARMONIC_16_CYCLE_64 | 18431 | 18431 | 0.00 | 12329.89 | 12329.89 | 0.00 | 0.00 |
+| ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8 | 18431 | 18431 | 0.00 | 4574.39 | 4574.38 | -0.00 | 0.00 |
+| PHASE_CYCLES_0_9999 | 9581 | 9581 | 0.00 | 4797.03 | 4796.69 | -0.01 | 0.00 |
+| CYCLE_256_CANONICAL_SINE | 9995 | 9979 | -0.16 | 4920.93 | 4910.45 | -0.21 | +0.02 |
+
+### M4.4 phase log
+
+- **Phase A (commit `4f895b4`)** — feature-flagged
+  `encode_looped_m4_4_spike` with `M44Strategy::BeamSearch`.
+  ~230 lines. Score by `(sum_sq, peak, bytes)` lex order;
+  bytes tie-break ensures determinism.
+- **Phase B (commit `f09eeb3`)** — 3 hard tests + 4 ignored
+  helpers in `core/tests/m4_4_spike_measurement.rs`:
+  decode-roundtrip clean, deterministic two-run identity,
+  `loop_click` doesn't worsen vs production; plus
+  print-helpers for atom fixtures / characterization signals /
+  runtime / `beam_width = 16` follow-up.
+- **Phase C** — exit criterion applied; 2/4 conditions fail.
+- **Phase D (commit `e8265c4`)** — skip path. 13 new
+  `M4_4_*` documentary entries in `baselines/m4.json`:
+  11 per-fixture delta records + 1
+  `M4_4_SPIKE_OUTCOME` + 1
+  `M4_4_BRR_NEAR_LOCAL_OPTIMUM_FINDING`.
+- **Phase E (this entry)** — STATUS rewrite.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **610 tests
+  workspace-wide** (was 607 at M4.3 close; +3 hard M4.4
+  tests; 4 new `#[ignore]` helpers not counted).
+
+### Confirmations (stop-condition checks)
+
+- ✓ Spike decode-roundtrip clean for every fixture (no invalid
+  BRR).
+- ✓ Spike deterministic across two runs for all 11 fixtures
+  (peak / rms-via-`to_bits` / snr-via-`to_bits` / clipping /
+  loop_click / rotation_offset all bit-identical).
+- ✓ All 11 atom PCM SHA identity tests pass unchanged
+  (SPEC §16.9 stability preserved — spike doesn't touch
+  render formula).
+- ✓ M3.3 phase-rotation improvement gate test
+  (`phase_rotation_loop_click_never_regresses_against_pre_m3`)
+  passes unchanged.
+- ✓ No new crate dependencies.
+- ✓ No SPEC contract changes.
+- ✓ No M2 / M3 baseline changes.
+- ✓ Spike implementation preserved in `core::brr_encoder`
+  for M5+ reference; not wired into `render_to_brr` (no
+  production-code surface change beyond two new public types
+  `M44SpikeConfig` / `M44Strategy`).
+
+### Decisions log additions (M4.4)
+
+- M4.4 spike strategy chosen: cross-block beam search
+  (Hypothesis A from brief). `beam_width = 4` based on the
+  M4.3 bimodal-noise-floor interpretation. The greedy M2.2
+  encoder is mathematically `beam_width = 1`.
+- Spike scoring targets RMS primary (cumulative `sum_sq`) and
+  peak secondary, matching SPEC §24.1 exit criterion phrasing
+  (`≥ 10% on rms OR peak`).
+- Phase C: 2 of 4 exit conditions FAIL (criterion 1
+  improvement, criterion 4 runtime). 2 of 4 PASS (criterion 2
+  loop_click, criterion 3 M2 regression). Decision: SKIP.
+- Phase D skip path: 13 documentary entries recorded.
+  Spike implementation stays feature-flagged in
+  `core::brr_encoder` for M5+ reference.
+- Investigation finding: peak_abs_raw_vs_source = 18431 is
+  arithmetically structural at shift=12 (= i16::MAX − max
+  BRR-decoded). Beam search cannot fix arithmetic ceilings.
+- Acceptable close per consultant M4 plan #17 ("negative
+  finding is an acceptable M4.4 outcome"). M4 encoder surface
+  for `v0.4-rc1` is the M2.2 greedy encoder + M3.3 phase
+  rotation, unchanged at M4.
+- M5+ scope informal note: improving the high-noise cluster
+  needs either source-PCM preprocessing (currently forbidden
+  by SPEC §16.9 atom stability + M4.5-deferred pre-emphasis)
+  or BRR-spec extension into shift 13+. Neither is M4 scope.
+
+**Next pass: M4.6 — GUI polish.** Unconditional per SPEC §24.1
+(independent of research-spike outcomes). M4.5 is permanently
+SKIPPED per M4.2 outcome 3. PM to brief.
+
+**Previous milestone (M4.3) — BRR noise-floor measurement.**
+Contracted implementation pass per SPEC §24.1 (not a
+research-spike). Wires the four SPEC §10.10 noise-floor metrics
 (`peak_abs_raw_vs_source`, `rms_raw_vs_source`, `snr_db`,
 `clipping_count_raw`) through the `render_to_brr` path and
 locks documentary baselines for all 11 atom fixtures + the 9
@@ -1235,16 +1414,29 @@ PM go/defer decision at M3.4 entry brief.
 
 ## Last pass
 
+**Pass M4.4 — Encoder improvement spike (Phases A–E) — SKIP
+outcome.** Research-spike per SPEC §24.1. Three commits: spike
+implementation (Phase A), test infrastructure (Phase B + C),
+skip-path documentary baselines (Phase D). Workspace test count
+607 → 610. **Decision: skip; no production change ships.** Two
+of four exit conditions failed (≥10% improvement gate and
+≤2× runtime ceiling). Investigation finding: the high-noise
+cluster's peak=18431 ceiling is an arithmetic structural limit
+of 4-bit ADPCM at shift=12 — beam search cannot fix it. Spike
+implementation preserved feature-flagged in `core::brr_encoder`
+for M5+ reference. Acceptable close per consultant plan #17.
+
+---
+
 **Pass M4.3 — BRR noise-floor measurement (Phases A–D).**
 Contracted implementation. Four commits: noise-floor metrics
-wired through `render_to_brr` and `AtomRenderReport` (Phase A),
-three new hard tests + two ignored print helpers (Phase B),
-80 documentary baselines (`M4_3_ATOM_*` + `M4_3_CHARSIG_*`,
-Phase C), STATUS rewrite (Phase D). Workspace test count 604
-→ 607. **Bimodal noise floor surfaced across atom fixtures**
-(low-noise SNR > 10 dB vs high-noise SNR 5.5–7.4 dB at
-peak=18431); M4.4 spike scope recommendation: target the
-high-noise cluster.
+wired through `render_to_brr` and `AtomRenderReport`, three new
+hard tests + two ignored print helpers, 80 documentary baselines
+(`M4_3_ATOM_*` + `M4_3_CHARSIG_*`), STATUS rewrite. Workspace
+test count 604 → 607. **Bimodal noise floor surfaced across
+atom fixtures** (low-noise SNR > 10 dB vs high-noise SNR
+5.5–7.4 dB at peak = 18431); fed directly into M4.4 spike
+scope.
 
 ---
 
