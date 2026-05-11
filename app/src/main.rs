@@ -6780,8 +6780,8 @@ fn cmd_characterize_gaussian(
 ) -> Result<(), CliError> {
     use sfc_atomizer_core::characterize_gaussian::{
         apply_m3_5_decision_rule, compute_raw_side, finalize_measurement, m3_5_canonical_signals,
-        oracle_stereo_to_mono_left, CharacterizationReport, Measurement, Summary, TestSignal,
-        TestSignalSummary, ToolInfo,
+        oracle_stereo_to_mono_left, CharacterizationReport, HarnessMeta, Measurement, Summary,
+        TestSignal, TestSignalSummary, ToolInfo,
     };
 
     create_dir(out_dir)?;
@@ -6970,6 +6970,10 @@ fn cmd_characterize_gaussian(
         methodology_precondition_passed,
         subjective_audition: None,
         methodology_audit_m3_5_1: methodology_audit,
+        // Phase C lands the field with a default; Phase B's
+        // emission commit swaps in `build_harness_meta(&signals)`
+        // and bumps `schema_version` to 5.
+        harness_meta: HarnessMeta::default(),
         summary,
     };
 

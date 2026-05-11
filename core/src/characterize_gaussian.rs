@@ -22,6 +22,8 @@
 //! emission) lives in the `app` crate's `characterize-gaussian`
 //! CLI command.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -489,6 +491,52 @@ pub fn tile_cycle_to_length(cycle: &[i16], target_len: usize) -> Vec<i16> {
 // Report schema (SPEC §10.9 schema_version 2)
 // =====================================================================
 
+/// M5.1 — per-SPEC §10.11.4 harness metadata.
+///
+/// Records the unity-pitch contract the characterization harness
+/// enforces and the per-signal native-rate declarations. Phase C
+/// adds the field type; emission is populated by the
+/// `build_harness_meta` helper (called from the `characterize-
+/// gaussian` CLI in Phase B).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HarnessMeta {
+    /// The DSP pitch register value the M2 voice setup programs for
+    /// every characterization voice. Per SPEC §10.11 unity-pitch
+    /// contract this MUST be `4096` (`0x1000`).
+    pub pitch_register: u32,
+    /// Human-readable identifier for how the harness achieves unity
+    /// pitch. M5.1 uses
+    /// `"spc_rate_matches_atom_native_at_project_32k"` — the project
+    /// rate (32 kHz) is declared as each atom's native rate and the
+    /// voice setup table emits `pitch_register == 0x1000`.
+    pub rate_strategy: String,
+    /// Per-signal declared native sample rate. The harness asserts
+    /// that for every entry, the voice setup table for that signal
+    /// programs `pitch_register == 0x1000`. M5.1 declares 32000 Hz
+    /// for every M3.5 canonical signal.
+    pub atom_native_rates_hz: BTreeMap<String, u32>,
+}
+
+/// Build the M5.1 [`HarnessMeta`] block for a given test-signal set.
+///
+/// All M3.5 canonical signals are pinned to the project's 32 kHz
+/// rate via `core::voice_setup`'s hardcoded
+/// `source_sample_rate_hz = 32000` for `TrackKind::AtomSequence`
+/// (since M2.7). The strategy string identifies that mechanism. The
+/// per-signal map records the declared native rate for each signal
+/// the harness will exercise.
+pub fn build_harness_meta(signals: &[TestSignal]) -> HarnessMeta {
+    let atom_native_rates_hz: BTreeMap<String, u32> = signals
+        .iter()
+        .map(|s| (s.name.to_string(), 32_000))
+        .collect();
+    HarnessMeta {
+        pitch_register: 0x1000,
+        rate_strategy: "spc_rate_matches_atom_native_at_project_32k".to_string(),
+        atom_native_rates_hz,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CharacterizationReport {
     pub schema_version: u32,
@@ -536,6 +584,14 @@ pub struct CharacterizationReport {
         skip_serializing_if = "Option::is_none"
     )]
     pub methodology_audit_m3_5_1: Option<MethodologyAudit>,
+    /// M5.1 — SPEC §10.11.4 harness metadata. Records the unity-
+    /// pitch contract (`pitch_register == 0x1000`) and the per-
+    /// signal declared native rates. Phase C lands the field;
+    /// Phase B populates it with `build_harness_meta` in the CLI.
+    /// Empty `HarnessMeta::default()` at this commit; the schema
+    /// version stays at `4` until Phase B's emission lands.
+    #[serde(default)]
+    pub harness_meta: HarnessMeta,
     pub summary: Summary,
 }
 
