@@ -2,13 +2,190 @@
 
 ## Current milestone
 
-**M4.2 — Characterization re-run with reliable alignment.**
-Second M4 research-spike per SPEC §24.1 (methodology repair
-budget loop 2 of 2). Runs the M4.1 alignment plumbing
-end-to-end against `m3_5_canonical`; investigates the
-persistent `zcr_ratio` doubling that alignment alone couldn't
-fix; decides M4 trajectory. No encoder change; no atom PCM
-change; no M2/M3 baseline change.
+**M4.3 — BRR noise-floor measurement.** Contracted
+implementation pass per SPEC §24.1 (not a research-spike).
+Wires the four SPEC §10.10 noise-floor metrics
+(`peak_abs_raw_vs_source`, `rms_raw_vs_source`, `snr_db`,
+`clipping_count_raw`) through the `render_to_brr` path and
+locks documentary baselines for all 11 atom fixtures + the 9
+`m3_5_canonical` characterization signals. No encoder change;
+no phase-rotation change; no atom render formula change.
+
+**Outcomes:**
+
+- **Metrics wired** (commit `ddc35ab`). `AtomBrrOutput` and
+  `AtomRenderReport` each gain four `#[serde(default)]`
+  fields; `render_to_brr` populates them after the M3.3 lex
+  rotation picks `best`. Comparison source is `best.rotated_source`
+  (the encoder INPUT per SPEC §10.7), not the pre-rotation
+  original. `cmd_render_atom`'s JSON output propagates the
+  fields.
+- **Atom fixture coverage** (commit `488751d`). Three new
+  hard tests in `core/tests/atom_edge_cases.rs`:
+  `m4_3_atom_fixture_noise_floor_metrics_deterministic` (two
+  renders, bit-identical including `f64::to_bits()`),
+  `m4_3_atom_fixture_noise_floor_metrics_finite` (sanity
+  invariants), and `m4_3_atom_fixture_noise_floor_baselines_pinned`
+  (M2.8.1 `include_str!` pattern; reads
+  `baselines/m4.json::documentary_snapshot::M4_3_ATOM_*` and
+  asserts byte-exact match). Plus one `#[ignore]` print helper
+  per file (`atom_edge_cases.rs` + `characterize_gaussian.rs`)
+  for one-off baseline capture.
+- **Baselines locked** (commit `4edae98`). 80 new
+  `documentary_snapshot` entries in `baselines/m4.json`:
+  44 `M4_3_ATOM_<NAME>_<METRIC>` (11 fixtures × 4 metrics)
+  + 36 `M4_3_CHARSIG_<NAME>_<METRIC>` (9 signals × 4
+  metrics).
+
+### M4.3 atom-fixture noise-floor table (11 fixtures)
+
+| Fixture | peak_abs | rms | snr_db | clip |
+|---|---|---|---|---|
+| 128_SINE | 9582 | 4795.19 | **11.18** | 0 |
+| 64_SINE | 10239 | 5108.55 | 10.63 | 0 |
+| AMPLITUDE_ZERO | 0 | 0.00 | 0.00 | 0 |
+| ALL_PARTIALS_ZERO_NORMALIZE_TRUE | 0 | 0.00 | 0.00 | 0 |
+| TWO_PARTIALS_CANCEL_PARTIALLY | 10239 | 1532.33 | **13.36** | 0 |
+| MAX_AMPLITUDE_NO_NORMALIZE | 18431 | 10576.55 | 6.40 | 0 |
+| NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY | 18431 | 10562.45 | 6.33 | 0 |
+| HARMONIC_16_CYCLE_64 | 18431 | 12329.89 | **5.48** | 0 |
+| ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8 | 18431 | 4574.39 | 7.41 | 0 |
+| PHASE_CYCLES_0_9999 | 9581 | 4797.03 | 11.18 | 0 |
+| CYCLE_256_CANONICAL_SINE | 9995 | 4920.93 | 10.96 | 0 |
+
+### M4.3 characterization-signal noise-floor table (9 signals)
+
+| Signal | peak_abs | rms | snr_db | clip |
+|---|---|---|---|---|
+| sine_cycle_64 | 18431 | 10442.46 | 6.92 | 0 |
+| sine_cycle_128 | 18431 | 10439.41 | 6.92 | 0 |
+| sine_cycle_256 | 18328 | 10353.63 | 7.00 | 0 |
+| harmonic_2_cycle_64 | 18431 | 10454.40 | 6.91 | 0 |
+| harmonic_4_cycle_64 | 18431 | 10459.21 | 6.91 | 0 |
+| harmonic_8_cycle_64 | 18431 | 10345.79 | 7.00 | 0 |
+| harmonic_16_cycle_64 | 18431 | 12329.89 | **5.48** | 0 |
+| all_8_partials_max_amp_harmonics_1_to_8 | 18431 | 4574.39 | 7.41 | 0 |
+| normalize_false_multi_partial_clamp_safety | 18431 | 10562.45 | 6.33 | 0 |
+
+### Interpretation (M4.4 scoping input)
+
+**Noise floor is BIMODAL across the atom-fixture set.** Two
+distinct clusters:
+
+- **"Low-noise" cluster** (peak ≤ 10239, SNR > 10 dB): the
+  canonical sines (`128_SINE`, `64_SINE`, `CYCLE_256_CANONICAL_SINE`),
+  `PHASE_CYCLES_0_9999` (a slightly-phase-shifted canonical
+  sine), and the special-case-zero fixtures
+  (`AMPLITUDE_ZERO`, `ALL_PARTIALS_ZERO_NORMALIZE_TRUE` — both
+  literally silent). Plus `TWO_PARTIALS_CANCEL_PARTIALLY` —
+  the FP-noise-amplification fixture, where RMS is 1532
+  because the post-normalize signal IS FP noise dominated by
+  the dominant FFT/sin-error component, so most of the BRR
+  "error" is encoding tiny non-musical values.
+- **"High-noise" cluster** (peak = 18431, SNR 5.5–7.4 dB):
+  `MAX_AMPLITUDE_NO_NORMALIZE`, `NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY`,
+  `HARMONIC_16_CYCLE_64`, `ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8`.
+  The `peak_abs = 18431` ceiling matches the M3.5.1 finding;
+  it appears to be a structural ADPCM limit at the
+  full-scale-input edge.
+
+**Across the characterization-signal set** the noise floor is
+**near-uniform**: 8 of 9 signals at peak = 18431, SNR 6.3–7.0
+dB. `harmonic_16_cycle_64` is the lone outlier with SNR 5.48
+dB — consistent with near-Nyquist content being the hardest
+case for any prediction-based encoder.
+
+**No clipping** (`clipping_count_raw = 0` across all 20
+fixtures + signals). Host BRR decode stays within ±16384,
+well below i16 saturation.
+
+**M4.4 scope recommendation.** The bimodal split suggests
+**M4.4 should target the high-noise cluster specifically** —
+those are where the 10% improvement gate is easiest to clear
+and where any improvement matters most for real music
+content (clamped / max-amp / dense-harmonic / near-Nyquist
+fixtures). The low-noise fixtures already encode near-optimum
+at the current shift+filter selection; aggressive
+optimization there risks regression for sub-LSB improvement.
+
+The M4.4 spike's most promising candidates:
+- **`HARMONIC_16_CYCLE_64`** (SNR 5.48 dB, the worst). Near
+  the structural limit at peak=18431 = `9 * 2048 + 1023` ≈
+  half BRR full-scale; suggests filter-2/3 prediction
+  exhausted its dynamic range. Cross-block beam search
+  (deferred from M3.4) may find a better shift+filter
+  trajectory.
+- **`MAX_AMPLITUDE_NO_NORMALIZE` + `NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY`**
+  (SNR 6.33–6.40 dB). High-RMS-error fixtures where the
+  source itself clips the i16 range during render; encoder
+  has no room to improve the peak but might cut RMS.
+- **`ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8`** (SNR 7.41 dB,
+  RMS 4574). High peak but low RMS — the encoder is doing
+  well on average but spiking at certain samples.
+
+### M4.3 phase log
+
+- **Phase A (commit `ddc35ab`)** — wire 4 noise-floor metrics
+  through `core::atom::render_to_brr`; same fields on
+  `AtomRenderReport` with `#[serde(default)]`. CLI
+  `atom_render_report` propagates.
+- **Phase B (test commit `488751d`)** — 3 new hard tests
+  (determinism, finite, baseline-pin) + 1 ignored print
+  helper for atom fixtures.
+- **Phase C (test commit `488751d`, baselines commit
+  `4edae98`)** — 1 ignored print helper for characterization
+  signals + 80 `M4_3_*` documentary baselines.
+- **Phase D (this entry)** — STATUS rewrite.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **607 tests
+  workspace-wide** (was 604 at M4.2 close; +3 from the
+  three new hard tests; 2 new `#[ignore]` print helpers not
+  counted).
+
+### Decisions log additions (M4.3)
+
+- 4 M4.0 noise-floor metrics wired through `render_to_brr`
+  and `AtomRenderReport`. Comparison source = rotated source
+  PCM per SPEC §10.7.
+- 11 atom fixtures × 4 metrics = 44 documentary baselines
+  locked.
+- 9 characterization signals × 4 metrics = 36 documentary
+  baselines locked.
+- Determinism verified: two-run byte-identity for all 4
+  metrics on all 11 atom fixtures (via `f64::to_bits()` for
+  rms / snr_db; integer equality for peak / clipping).
+- All 11 atom PCM SHA identity tests pass unchanged
+  (SPEC §16.9 preserved).
+- M3.3 phase-rotation improvement gate test passes unchanged
+  (`phase_rotation_loop_click_never_regresses_against_pre_m3`).
+- No M2 / M3 baseline changes; no encoder-algorithm changes;
+  no SPEC contract changes.
+- M4.4 entry recommendation: the noise floor is **bimodal**
+  across atom fixtures (low-noise cluster SNR > 10 dB vs
+  high-noise cluster SNR 5.5–7.4 dB at peak = 18431) and
+  **near-uniform** across characterization signals (8 of 9
+  at peak = 18431, SNR 6.3–7.0 dB). Target the high-noise
+  atom fixtures first; the structural `peak = 18431`
+  ceiling suggests cross-block beam search (M3.4 deferred
+  work) is the most likely productive intervention.
+
+**Next pass: M4.4 — Encoder improvement spike (conditional
+production).** Research-spike per SPEC §24.1 with exit
+criterion (≥10% improvement on at least one fixture's
+`rms_raw_vs_source` OR `peak_abs_raw_vs_source` AND no
+`loop_click_abs` worsening AND no M2 regression AND encode
+runtime ≤ 2× M3.3). A negative finding ("BRR encoder near
+local optimum under current constraints") is an acceptable
+close. PM to brief.
+
+**Previous milestone (M4.2) — Characterization re-run with
+reliable alignment.** Second M4 research-spike per SPEC §24.1
+(methodology repair budget loop 2 of 2). Runs the M4.1
+alignment plumbing end-to-end against `m3_5_canonical`;
+investigates the persistent `zcr_ratio` doubling that
+alignment alone couldn't fix; decides M4 trajectory. No
+encoder change; no atom PCM change; no M2/M3 baseline change.
 
 **Outcome: Phase D outcome 3 — pre-emphasis defers
 permanently to M5+.** All 7 monotonicity-anchor signals fail
@@ -1058,15 +1235,27 @@ PM go/defer decision at M3.4 entry brief.
 
 ## Last pass
 
+**Pass M4.3 — BRR noise-floor measurement (Phases A–D).**
+Contracted implementation. Four commits: noise-floor metrics
+wired through `render_to_brr` and `AtomRenderReport` (Phase A),
+three new hard tests + two ignored print helpers (Phase B),
+80 documentary baselines (`M4_3_ATOM_*` + `M4_3_CHARSIG_*`,
+Phase C), STATUS rewrite (Phase D). Workspace test count 604
+→ 607. **Bimodal noise floor surfaced across atom fixtures**
+(low-noise SNR > 10 dB vs high-noise SNR 5.5–7.4 dB at
+peak=18431); M4.4 spike scope recommendation: target the
+high-noise cluster.
+
+---
+
 **Pass M4.2 — Characterization re-run with reliable alignment
-(Phases A–E).** Second M4 research-spike. Detail folded into
-"Current milestone" above. Two commits: 74 `M4_2_*` documentary
-baselines populated from the M4.1-aligned characterization run,
-plus STATUS. Phase C zcr_ratio doubling investigation identified
-the cause as intrinsic SPC playback (BRR + non-native pitch +
-gaussian) — not a fixable methodology bug. M4.2.1 budget NOT
-burned. **Outcome 3:** pre-emphasis defers permanently to M5+;
-M4.5 will be SKIPPED. M4 proceeds to M4.3 BRR noise-floor work.
+(Phases A–E).** Second M4 research-spike. Two commits: 74
+`M4_2_*` documentary baselines from the M4.1-aligned
+characterization run plus STATUS. Phase C zcr_ratio doubling
+investigation identified intrinsic SPC playback (BRR +
+non-native pitch + gaussian) — not a fixable methodology bug.
+M4.2.1 budget NOT burned. **Outcome 3:** pre-emphasis defers
+permanently to M5+; M4.5 will be SKIPPED.
 
 ---
 
