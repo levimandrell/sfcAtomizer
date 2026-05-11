@@ -354,6 +354,67 @@ impl V2EditorModel {
             self.mark_dirty();
         }
     }
+    /// Rename an `atom_sequences[idx].id`, cascading the change to
+    /// every `tracks[].kind = atom_sequence { atom_sequence_id }` that
+    /// pointed at the old id and to `m2.active_sequence_id` if it
+    /// matched. M3.7 GUI polish — mirrors M2.8's
+    /// `rename_atom_id_cascade`.
+    ///
+    /// Refuses (returns `false` without mutating) when:
+    /// - `idx` is out of range.
+    /// - `new_id` violates the SPEC §16.6 rule-40 id pattern
+    ///   (`^[a-z0-9_]+$`, length 1..=64).
+    /// - `new_id` collides with another `atom_sequences[]` entry
+    ///   (excluding `idx`).
+    ///
+    /// Renaming to the current id is a successful no-op.
+    pub fn rename_sequence_id_cascade(&mut self, idx: usize, new_id: String) -> bool {
+        let old_id = match self.project.atom_sequences.get(idx) {
+            Some(s) => s.id.clone(),
+            None => return false,
+        };
+        if old_id == new_id {
+            return true;
+        }
+        // SPEC §16.6 rule 40: id pattern `^[a-z0-9_]+$`, length 1..=64.
+        if new_id.is_empty()
+            || new_id.chars().count() > 64
+            || !new_id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return false;
+        }
+        // Uniqueness within atom_sequences[] excluding self.
+        if self
+            .project
+            .atom_sequences
+            .iter()
+            .enumerate()
+            .any(|(i, s)| i != idx && s.id == new_id)
+        {
+            return false;
+        }
+
+        self.project.atom_sequences[idx].id = new_id.clone();
+        for track in self.project.tracks.iter_mut() {
+            if let TrackKind::AtomSequence {
+                ref mut atom_sequence_id,
+            } = &mut track.kind
+            {
+                if *atom_sequence_id == old_id {
+                    *atom_sequence_id = new_id.clone();
+                }
+            }
+        }
+        if let Some(active_id) = self.project.m2.active_sequence_id.as_mut() {
+            if *active_id == old_id {
+                *active_id = new_id.clone();
+            }
+        }
+        self.mark_dirty();
+        true
+    }
     pub fn set_sequence_name(&mut self, idx: usize, name: String) {
         if let Some(s) = self.project.atom_sequences.get_mut(idx) {
             s.name = name;

@@ -2292,12 +2292,21 @@ fn draw_sequence_edit_panel(ui: &mut egui::Ui, model: &mut v2_editor::V2EditorMo
     egui::Grid::new(format!("seq_edit_{idx}"))
         .num_columns(2)
         .show(ui, |ui| {
+            // M3.7: route sequence-id edits through
+            // rename_sequence_id_cascade so renames propagate to
+            // tracks[].atom_sequence_id and m2.active_sequence_id.
+            // The cascade silently rejects invalid / colliding ids;
+            // the buffer rebuilds from the current model id each
+            // frame so a rejected typing attempt reverts on next
+            // redraw.
             ui.label("id");
-            if ui
-                .text_edit_singleline(&mut model.project.atom_sequences[idx].id)
-                .changed()
-            {
-                changed = true;
+            let current_id = model.project.atom_sequences[idx].id.clone();
+            let mut id_buf = current_id.clone();
+            if ui.text_edit_singleline(&mut id_buf).changed() && id_buf != current_id {
+                let accepted = model.rename_sequence_id_cascade(idx, id_buf);
+                if accepted {
+                    changed = true;
+                }
             }
             ui.end_row();
             ui.label("name");
