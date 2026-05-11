@@ -638,6 +638,69 @@ impl V2EditorModel {
             self.mark_dirty();
         }
     }
+    /// Rename a `tracks[idx].id`. M4.6 GUI polish — defensive
+    /// landing of the third v2-schema rename cascade for symmetry
+    /// with M2.8's `rename_atom_id_cascade` and M3.7's
+    /// `rename_sequence_id_cascade` (consultant M3 close-out
+    /// audit #19 item 5).
+    ///
+    /// **No cross-tree cascade is currently needed.** The v2 schema
+    /// does not reference `tracks[].id` from anywhere else: the
+    /// `tracks[]` validate rules cover uniqueness within the
+    /// array and pattern match on the id itself, but other
+    /// fields (`atom_sequence_id`, `m2.active_sequence_id`,
+    /// `sample_id`) reference atom_sequences / samples by their
+    /// ids, not tracks. Future schema additions that reference
+    /// track ids by string should extend this method with cascade
+    /// logic at the marked site.
+    ///
+    /// Refuses (returns `false` without mutating) when:
+    /// - `idx` is out of range.
+    /// - `new_id` violates the SPEC §16.6 rule-49 id pattern
+    ///   (`^[a-z0-9_]+$`, length 1..=64).
+    /// - `new_id` collides with another `tracks[]` entry
+    ///   (excluding `idx`).
+    ///
+    /// Renaming to the current id is a successful no-op.
+    pub fn rename_track_id_cascade(&mut self, idx: usize, new_id: String) -> bool {
+        let old_id = match self.project.tracks.get(idx) {
+            Some(t) => t.id.clone(),
+            None => return false,
+        };
+        if old_id == new_id {
+            return true;
+        }
+        // SPEC §16.6 rule 49: id pattern `^[a-z0-9_]+$`, length 1..=64.
+        if new_id.is_empty()
+            || new_id.chars().count() > 64
+            || !new_id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return false;
+        }
+        // Uniqueness within tracks[] excluding self.
+        if self
+            .project
+            .tracks
+            .iter()
+            .enumerate()
+            .any(|(i, t)| i != idx && t.id == new_id)
+        {
+            return false;
+        }
+
+        self.project.tracks[idx].id = new_id;
+        // ---- Future-schema-growth site: if a later v2 schema rev
+        // introduces fields that reference tracks[].id by string,
+        // cascade the rename across them here (mirroring the
+        // tracks/m2.active_sequence_id walks in
+        // rename_sequence_id_cascade). At M4.6 the schema has no
+        // such references, so the cascade body is a single
+        // self-update plus mark_dirty.
+        self.mark_dirty();
+        true
+    }
     pub fn set_track_name(&mut self, idx: usize, name: String) {
         if let Some(t) = self.project.tracks.get_mut(idx) {
             t.name = name;

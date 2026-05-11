@@ -2625,12 +2625,21 @@ fn draw_track_edit_panel(ui: &mut egui::Ui, model: &mut v2_editor::V2EditorModel
     egui::Grid::new(format!("track_edit_{idx}"))
         .num_columns(2)
         .show(ui, |ui| {
+            // M4.6: route track-id edits through
+            // rename_track_id_cascade for symmetry with the
+            // sequence-rename path (M3.7) and the atom-rename
+            // method (M2.8). The v2 schema doesn't currently
+            // reference tracks[].id cross-tree so this is a
+            // defensive landing — same buffer / cascade /
+            // self-revert mechanics as the sequence id field.
             ui.label("id");
-            if ui
-                .text_edit_singleline(&mut model.project.tracks[idx].id)
-                .changed()
-            {
-                changed = true;
+            let current_id = model.project.tracks[idx].id.clone();
+            let mut id_buf = current_id.clone();
+            if ui.text_edit_singleline(&mut id_buf).changed() && id_buf != current_id {
+                let accepted = model.rename_track_id_cascade(idx, id_buf);
+                if accepted {
+                    changed = true;
+                }
             }
             ui.end_row();
             ui.label("name");
