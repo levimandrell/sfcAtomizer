@@ -2,12 +2,147 @@
 
 ## Current milestone
 
-**M3.7 — GUI polish.** Three small, independent additions that
-sit cleanly on top of the M3.5/M3.5.1 methodology audit
-(deliberately not exposing the gaussian characterization
-surface to the GUI per consultant M3.5 audit #16). No encoder
-change, no atom PCM change, no driver change, no SPEC contract
-change, no M2 baseline change. Reports-only / GUI-only.
+**M3.8 — M3 release prep + acceptance + tag v0.3-rc1.** Final
+M3 sub-pass. Mirrors M2.8 in structure but with smaller
+scope — most release-prep patterns (literal SHA pins, STATUS
+split, machine-readable baselines) were established at M2.8
+and applied proactively through M3.0–M3.7. No encoder change,
+no atom PCM change, no driver change, no M2 baseline change.
+
+**Outcomes:**
+
+- **`m3-acceptance` bundle CLI** (Phase 1, commit `86fec96`).
+  Five-stage rollup analog of `m2-acceptance`: M2 regression
+  (subprocess `m2-acceptance`) → atom PCM stability (11
+  identity-pin tests) → loop-click improvement gate (post ≤
+  pre per fixture) → encoder-quality snapshot
+  (post-rotation documentary BRR / decoded-BRR SHAs,
+  soft-gate per brief) → baselines integrity audit
+  (every identity_gated entry carries a `test:` field).
+  `bundle.status = ok` on both
+  `fixtures/projects/canonical_m2/canonical_m2.sfcproj.json`
+  and
+  `fixtures/projects/atom_edge_cases/harmonic_16_cycle_64.sfcproj.json`.
+- **Reproducer doc updated for M3** (Phase 2, commit
+  `7e1367b`). `docs/reproduce-m2.md` is the unified
+  reproducer — Option A per brief; single doc beats two
+  separate docs because the actual fresh-clone flow is M2
+  then M3. New sections cover `m3-acceptance` invocation,
+  `characterize-gaussian` invocation + expected
+  `methodology_review` outcome, and prelude audition WAV
+  regeneration. Test count updated 521 → 579.
+- **`RELEASE_NOTES_v0.3-rc.md` shipped** (Phase 3, commit
+  `3f873a6`). Highlights covering M3.0–M3.8, locked-baseline
+  summary, the M3.6-deferred-to-M4 methodology note per
+  consultant M3.5 audit #17, and forward M4 prelude scope.
+- **M3 baseline classification audit complete** (Phase 4,
+  commit `b3255b5`). 11/11 `identity_gated` entries verified
+  with literal-pin `include_str!` + `serde-parse` +
+  `assert_eq!` tests. One `behavior_gated` gap patched:
+  `M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE` now carries
+  a `test:` field pointing at
+  `phase_rotation_loop_click_never_regresses_against_pre_m3`.
+  The three remaining `behavior_gated` entries are policy
+  contracts asserted by implementation code (lex comparison,
+  candidate-set generator) and follow M2's pattern of
+  `test: null` for policy-only entries.
+- **M4 prelude scope documented in SPEC §24** (Phase 5,
+  commit `bb34938`). Five forward-visibility questions:
+  alignment search expansion, BRR encoder noise floor
+  reduction, conditional pre-emphasis presets,
+  `rename_track_id_cascade`, `baselines/m4.json` creation
+  with M3-inherits-M2 pattern.
+- **`v0.3-rc1` annotated tag** at the M3.8 close commit
+  (Phase 6, this entry; tagged after STATUS push).
+
+**Stack-frame hardening (incidental).** The original
+`cmd_m3_acceptance` used a monolithic `serde_json::json!{}`
+that pushed the Windows debug `sfcwc` binary past the
+1 MiB PE-header default main-thread stack at startup
+(reproduced with `target/debug/sfcwc.exe --help` → stack
+overflow). Two-pronged fix landed in Phase 1:
+extracted bundle JSON construction into a separate
+`build_m3_acceptance_bundle_json` helper using explicit
+`serde_json::Map::insert` calls, and added
+`.cargo/config.toml` linking the `x86_64-pc-windows-msvc`
+target with `/STACK:8388608` (8 MiB, matching typical
+Linux soft default). Scope: Windows MSVC only.
+
+### M3.8 phase log
+
+- **Phase 1 (commit `86fec96`)** — `sfcwc m3-acceptance`
+  subcommand. ~300 lines across `app/src/main.rs`:
+  `cmd_m3_acceptance` orchestrator,
+  `build_m3_acceptance_bundle_json` helper +
+  `M3AcceptanceBundleArgs` struct, `Command::M3Acceptance`
+  enum variant + dispatch arm. Plus
+  `.cargo/config.toml` Windows MSVC stack-flag.
+- **Phase 2 (commit `7e1367b`)** — `docs/reproduce-m2.md`
+  extended from "Reproducing M2" to "Reproducing M2 / M3"
+  with three new sections (m3-acceptance run, M3.5
+  characterization, M3.5 prelude audition WAVs) and
+  expanded "Verify locked baselines" + "Reference"
+  sections.
+- **Phase 3 (commit `3f873a6`)** — `RELEASE_NOTES_v0.3-rc.md`
+  (new file, 230 lines). Mirrors `RELEASE_NOTES_v0.2-rc.md`
+  shape. Includes the explicit M3.6 deferral note per
+  consultant M3.5 audit #17 and the M4 prelude scope.
+- **Phase 4 (commit `b3255b5`)** — `baselines/m3.json`:
+  added `test:` field to
+  `M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE` pointing
+  at the existing test. 11/11 identity_gated audit clean.
+- **Phase 5 (commit `bb34938`)** — `SPEC.md` §24 M4 prelude
+  scope.
+- **Phase 6 (this entry)** — STATUS rewrite + `v0.3-rc1`
+  annotated tag at the M3.8 close commit.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **579 tests
+  workspace-wide** (same as M3.7 close; M3.8 added no new
+  test functions — release prep is implementation +
+  documentation work).
+- **m3-acceptance runtime confirmation (final tag-eve run):**
+  ```
+  m3-acceptance: project_a=fixtures/projects/canonical_m2/canonical_m2.sfcproj.json
+    stage_1_m2_regression: ok
+    stage_2_atom_pcm_stability: ok
+    stage_3_loop_click_improvement_gate: ok
+    stage_4_encoder_quality_snapshot: ok (ok)
+    stage_5_baselines_integrity: ok
+    bundle.status: ok
+  ```
+  Both the canonical M2 fixture and the M3.3
+  `harmonic_16_cycle_64.sfcproj.json` reproducer fixture
+  return `bundle.status = ok` end-to-end.
+
+### Decisions log additions (M3.8)
+
+- `m3-acceptance` bundle shipped; 5-stage rollup (M2
+  regression + atom PCM stability + loop-click gate +
+  encoder-quality snapshot + baselines integrity).
+- Reproducer doc updated for M3 (Option A — single doc).
+- `RELEASE_NOTES_v0.3-rc.md` shipped with explicit M3.6
+  deferral methodology note per consultant M3.5 audit #17.
+- Baseline classification audit complete: 11/11
+  identity_gated entries verified with literal-pin tests;
+  one behavior_gated `test:` field added.
+- M4 prelude scope documented in SPEC §24 (5 forward
+  questions).
+- `.cargo/config.toml` adds Windows MSVC `/STACK:8388608`
+  linker flag to handle the debug-build main-thread stack
+  growth from the m3-acceptance code path. Scope: Windows
+  MSVC only.
+- `v0.3-rc1` annotated tag at the M3.8 close commit.
+- **Next pass: M4 prelude.** PM may brief at M4 entry.
+  Open questions enumerated in SPEC §24.
+
+**Previous milestone (M3.7) — GUI polish.** Three small,
+independent additions that sit cleanly on top of the
+M3.5/M3.5.1 methodology audit (deliberately not exposing the
+gaussian characterization surface to the GUI per consultant
+M3.5 audit #16). No encoder change, no atom PCM change, no
+driver change, no SPEC contract change, no M2 baseline change.
+Reports-only / GUI-only.
 
 **Outcomes:**
 
@@ -345,11 +480,20 @@ PM go/defer decision at M3.4 entry brief.
 
 ## Last pass
 
-**Pass M3.7 — GUI polish (Phases A–D).** Detail folded into the
-"Current milestone" section above. Three independent additions:
-sequence-id rename cascade with reference updates, atom preview
-metric readout surfacing M3.1 / M3.3 fields, plus tests + STATUS.
-No encoder / SPEC / baseline change.
+**Pass M3.8 — M3 release prep + acceptance + tag v0.3-rc1
+(Phases 1–6).** Detail folded into the "Current milestone"
+section above. Final M3 sub-pass: `m3-acceptance` 5-stage
+bundle CLI, updated reproducer doc, release notes with M3.6
+deferral methodology note, baseline classification audit, SPEC
+§24 M4 prelude scope, and the `v0.3-rc1` annotated tag.
+M3 closed.
+
+---
+
+**Pass M3.7 — GUI polish (Phases A–D).** Three independent
+additions: sequence-id rename cascade with reference updates,
+atom preview metric readout surfacing M3.1 / M3.3 fields, plus
+tests + STATUS. No encoder / SPEC / baseline change.
 
 ---
 
