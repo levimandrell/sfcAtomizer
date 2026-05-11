@@ -6707,7 +6707,7 @@ fn build_characterization_project_json(
                 "steps": [
                     {
                         "atom_id": signal.name,
-                        "duration_ticks": 600,
+                        "duration_ticks": 240,
                         "target_volume": 1.0,
                         "transition": { "type": "initial_kon" }
                     }
