@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "report_type": "release_baselines",
+  "release": "v0.4-pre",
+  "milestone": "M4.0",
+  "_doc": "Machine-readable release baselines for the M4 milestone (alignment methodology resolution + BRR encoder noise-floor investigation + conditional pre-emphasis presets). Scaffolded at M4.0 with prelude contract entries; M4.1+ populates with measurement and encoder-quality baselines as the research-spike sub-passes land. Inherits M3 by reference (which inherits M2). Three classifications mirror M3: identity_gated (any drift = regression; ships with include_str! + serde-parse + assert_eq! test per M2.8.1 rule), behavior_gated (numeric or policy contracts), documentary_snapshot (informational; expected to shift on declared milestones).",
+  "inherits_m3": true,
+  "identity_gated": [],
+  "behavior_gated": [
+    {
+      "name": "M4_RELIABLE_ALIGNMENT_CRITERIA",
+      "value": "zcr_ratio_in_band_AND_normalized_correlation_ge_0.90_AND_alignment_best_offset_lt_search_limit_AND_peak_error_after_gain_normalization_improves",
+      "kind": "validity_predicate",
+      "locked_at": "M4.0",
+      "rule": "M4 characterization is RELIABLE only if all four criteria hold for every monotonicity-anchor signal per SPEC §10.9 amendment: (1) zcr_ratio in [0.9, 1.1]; (2) normalized_correlation >= 0.90; (3) alignment_best_offset < alignment_search_limit; (4) peak_abs_error_after_gain_normalization materially lower than peak_abs_error_oracle_vs_raw. Correlation threshold of 0.90 locked at M4.0 without PM-review change."
+    },
+    {
+      "name": "M4_ALIGNMENT_SEARCH_LIMIT",
+      "value": "max_cycle_len_samples_in_signal_set",
+      "kind": "search_range",
+      "locked_at": "M4.0",
+      "rule": "alignment_search_limit equals max_i(cycle_len_samples_i) across the signal set. For m3_5_canonical with cycles {64, 128, 256}, this yields 256. M3.5.1's max_offset = 32 is superseded; rationale in SPEC §24."
+    },
+    {
+      "name": "M4_BRR_NOISE_FLOOR_METRICS",
+      "value": [
+        "peak_abs_raw_vs_source",
+        "rms_raw_vs_source",
+        "snr_db",
+        "clipping_count_raw"
+      ],
+      "kind": "metric_names",
+      "locked_at": "M4.0",
+      "rule": "Four BRR encoder noise-floor metrics locked at M4.0 per SPEC §10.10. Compared against the rotated source PCM (SPEC §10.7), not the pre-rotation original. Formulas fixture-pinned in core/tests/brr_noise_floor_metric.rs (14 tests). Wired through the encoder path at M4.3."
+    },
+    {
+      "name": "M4_ENCODER_SPIKE_EXIT_CRITERION",
+      "value": "10_percent_improvement_on_rms_or_peak_no_regression",
+      "kind": "exit_criterion",
+      "locked_at": "M4.0",
+      "rule": "M4.4 encoder-improvement spike ships a production change ONLY IF at least one canonical/edge fixture improves rms_raw_vs_source OR peak_abs_raw_vs_source by >= 10% AND no fixture's loop_click_abs worsens AND no M2 behavioral gate regresses AND encode runtime stays within 2x the M3.3 phase-rotation baseline. A negative finding (BRR encoder near local optimum under current constraints) is an acceptable close."
+    },
+    {
+      "name": "M4_METHODOLOGY_REPAIR_BUDGET",
+      "value": "2_loops_max",
+      "kind": "iteration_cap",
+      "locked_at": "M4.0",
+      "rule": "M4.1 alignment fix + M4.2 characterization re-run + at most one M4.2.1 correction iteration. If alignment remains anomalous after this budget (any monotonicity-anchor signal still violates the four reliable-alignment criteria), characterization is declared unreliable and pre-emphasis defers to M5+. M4 proceeds to M4.3 BRR noise-floor work without expecting characterization-driven decisions."
+    },
+    {
+      "name": "M4_PRE_EMPHASIS_PIPELINE_ORDER",
+      "value": "render -> pre_emphasis -> rotation -> encode",
+      "kind": "pipeline_order",
+      "locked_at": "M4.0",
+      "rule": "When pre-emphasis presets ship at M4.5 (conditional), the encoder pipeline runs in this exact order. Atom PCM render output is identity-gated (SPEC §16.9) and refers to the pre-filter render; pre-emphasis operates on a transient encoder input; phase rotation operates on the filtered PCM; BRR encodes the rotated-filtered PCM. The SPEC §10.7 lex objective and SPEC §10.10 noise-floor metrics compare against the rotated-filtered source when pre-emphasis is active, the rotated unfiltered source otherwise."
+    }
+  ],
+  "documentary_snapshot": [],
+  "retired": []
+}
