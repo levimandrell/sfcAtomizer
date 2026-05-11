@@ -1004,6 +1004,80 @@ been performed. Do not populate stubs; absence means
 "perceptual data not collected", not "audition produced empty
 result".
 
+**Reliable alignment criteria (locked at M4.0 per consultant
+M4 plan #5, #6).** For the `m3_5_canonical` signal set,
+alignment is considered RELIABLE only if ALL of the following
+hold for every monotonicity-anchor signal
+(`sine_cycle_64/128/256`, `harmonic_2/4/8/16_cycle_64`):
+
+1. `zcr_ratio ∈ [0.9, 1.1]` (preserved from M3.5.1
+   precondition #0).
+2. `normalized_correlation ≥ 0.90` — Pearson correlation
+   between aligned raw and aligned oracle PCM. M3.5.1
+   measured 0.013–0.056 on low-frequency sines (well below
+   this threshold), confirming the alignment methodology
+   failure.
+3. `alignment_best_offset < alignment_search_limit` — the
+   chosen offset must not sit at the search-range boundary,
+   which would indicate the true offset lies beyond the
+   searched range.
+4. `peak_abs_error_after_gain_normalization` materially lower
+   than the unaligned `peak_abs_error_oracle_vs_raw` — gain
+   normalization should substantially reduce the error if the
+   raw/oracle difference is mostly amplitude; remaining error
+   indicates waveform-shape divergence.
+
+If any anchor signal violates any criterion,
+`methodology_precondition_passed` is set to `false` in the
+report; `recommended_next` is `"methodology_review"`; the
+preset-design conditions (§10.9 #1–#4 plus M3.5.1
+precondition #0) are NOT evaluated.
+
+The correlation threshold of `0.90` is locked at M4.0.
+Loosening requires explicit PM review.
+
+**Alignment search range (locked at M4.0 per consultant M4
+plan #7).** The search range used by
+`align_oracle_to_raw` is:
+
+```
+alignment_search_limit = max_i(cycle_len_samples_i)
+```
+
+across the signals in the characterization run. For the
+`m3_5_canonical` set with cycle lengths `{64, 128, 256}` this
+yields `alignment_search_limit = 256`. M3.5.1's
+`max_offset = 32` is superseded; the rationale is documented
+in M3.5.1 STATUS and in SPEC §24.
+
+If a future characterization set introduces longer cycle
+lengths, the search range scales accordingly.
+
+**Schema v4 (locked at M4.0).** The characterization report
+schema bumps to `schema_version: 4` to reflect the alignment
+contract. New top-level / per-measurement fields:
+
+- `alignment_search_limit` (`u32`): the `max_offset` used for
+  the run; surfaces the actual searched range so future
+  readers know the upper bound the search could have
+  resolved.
+- `alignment_boundary_hit` (`bool`): `true` if any anchor
+  signal's `alignment_best_offset == alignment_search_limit - 1`
+  (within a small implementation-defined tolerance). Indicates
+  the true offset may lie beyond the searched range.
+- `alignment_valid` (`bool`): the AND of all four
+  reliable-alignment criteria across monotonicity anchors.
+- `methodology_precondition_passed` (`bool`): M3.5.1
+  precondition #0 result; surfaced explicitly at v4 so
+  consumers don't have to infer it from
+  `recommended_next == "methodology_review"`.
+
+These four fields land on the report struct at M4.0
+(documentation here); they are populated by the
+characterization pipeline at M4.1 / M4.2 once the alignment
+fix and re-run land. The schema bump itself is locked at
+M4.0.
+
 ---
 
 ## 11. Voice allocation and SFX
