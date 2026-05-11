@@ -693,12 +693,13 @@ transient encoder input, not stored, and its SHAs are not pinned.
 finalized at M3.6 land.
 
 **Characterization report format (locked at M3.5 prelude per
-consultant M3.3 audit #12).** The characterization pass emits a
-JSON report with this shape:
+consultant M3.3 audit #12; expanded at M3.5 per audition audit
+#13).** The characterization pass emits a JSON report with this
+shape:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "report_type": "gaussian_characterization",
   "fixture_set": "m3_5_canonical",
   "sample_rate_hz": 32000,
@@ -711,14 +712,23 @@ JSON report with this shape:
   ],
   "measurements": [
     {
-      "name": "sine_cycle_64",
-      "frequency_hz": 500.0,
-      "raw_decode_rms": 0.0,
+      "name": "harmonic_8_cycle_64",
+      "frequency_hz": 4000.0,
+      "raw_decoded_pcm_sha256": "<sha>",
+      "oracle_pcm_sha256": "<sha>",
+      "raw_rms": 0.0,
       "oracle_rms": 0.0,
       "gain_delta_db": 0.0,
-      "peak_abs_error_oracle_vs_raw": 0
+      "peak_abs_error_oracle_vs_raw": 0,
+      "peak_abs_raw_vs_source": 0,
+      "zcr_raw": 0.0,
+      "zcr_oracle": 0.0,
+      "clipping_count_raw": 0,
+      "clipping_count_oracle": 0,
+      "_phase_or_delay_note": "optional"
     }
   ],
+  "subjective_audition": null,
   "summary": {
     "clear_target_for_pre_emphasis": false,
     "recommended_next": "defer",
@@ -729,74 +739,118 @@ JSON report with this shape:
 
 Field semantics:
 
-- `raw_decode_rms` (`f64`): RMS of host-side BRR decode
-  (`core::brr::decode_blocks`).
-- `oracle_rms` (`f64`): RMS of the `snes_spc` oracle render of
-  the same SPC (post-Gaussian-interpolation playback).
-- `gain_delta_db` (`f64`): `20 * log10(oracle_rms /
-  raw_decode_rms)`. Negative values indicate the oracle
-  attenuates relative to raw decode (the gaussian-dulling we
-  expect to find).
+- `raw_decoded_pcm_sha256` (`String`): SHA-256 of host-side BRR
+  decode output (`core::brr::decode_blocks`); per-measurement
+  deterministic reference.
+- `oracle_pcm_sha256` (`String`): SHA-256 of the `snes_spc`
+  oracle render (the DSP-interpolated playback).
+- `raw_rms` (`f64`): RMS of host-side BRR decode.
+- `oracle_rms` (`f64`): RMS of the oracle render.
+- `gain_delta_db` (`f64`): `20 * log10(oracle_rms / raw_rms)`.
+  Negative values indicate the oracle attenuates relative to raw
+  decode (the gaussian-dulling we expect to find).
 - `peak_abs_error_oracle_vs_raw` (`i32`): max-abs sample-wise
-  delta between oracle render and raw decode.
+  delta between oracle render and raw decode (gaussian + DSP
+  error magnitude).
+- `peak_abs_raw_vs_source` (`i32`): max-abs sample-wise delta
+  between BRR-decoded PCM and the original source PCM (BRR
+  encoder error magnitude). Separates encoder error from DSP
+  error in the gain measurement.
+- `zcr_raw` (`f64`): zero-crossing rate per second of the raw
+  decode.
+- `zcr_oracle` (`f64`): zero-crossing rate per second of the
+  oracle render. Large `zcr_oracle - zcr_raw` delta indicates
+  gaussian smoothing is flattening transients.
+- `clipping_count_raw` (`i32`): count of samples at ±32767 (±1
+  LSB) in the raw decode.
+- `clipping_count_oracle` (`i32`): same for the oracle render;
+  tracks whether DSP scaling introduces new clipping.
+- `_phase_or_delay_note` (optional `String`): documentary note
+  for any phase/delay alignment performed before the RMS / peak
+  comparison; omit when no alignment was needed.
+- `subjective_audition` (optional): see "Optional subjective
+  audition field" below; omit (or `null`) when no audition has
+  been performed for this characterization run.
 - `recommended_next` (`"defer"` | `"gentle_preset"` |
   `"strong_preset"`): outcome of applying the §10.9 decision
   rule below.
 
-**Test signal set `m3_5_canonical` (locked at M3.5 prelude per
-consultant M3.3 audit #13).** Synthetic single-cycle atoms
-covering the frequency-response axis the gaussian dulls:
+**Test signal set `m3_5_canonical` (locked at M3.5, expanded
+based on M3.5 audition audit #9).** The original Phase 0 set of
+six signals was thin for characterizing a frequency-response
+curve. Audition-driven amendment expands the harmonic series so
+the curve has multiple anchor points between low fundamentals
+and near-Nyquist.
+
+Frequency-response anchors (single-cycle sines):
 
 - `sine_cycle_64` — effective fundamental = 32000 Hz / 64 = 500 Hz.
 - `sine_cycle_128` — effective fundamental = 32000 Hz / 128 = 250 Hz.
 - `sine_cycle_256` — effective fundamental = 32000 Hz / 256 = 125 Hz.
 
-Higher-frequency content via harmonic stacking:
+Intermediate harmonics over `cycle_64` (probes the gain curve at
+2× / 4× / 8× / 16× the fundamental):
 
-- `harmonic_8_cycle_64` — 8th harmonic of 500 Hz = 4 kHz.
-- `harmonic_16_cycle_64` — 16th harmonic of 500 Hz = 8 kHz
-  (near-Nyquist for the 32 kHz S-DSP sample rate).
+- `harmonic_2_cycle_64` — 1 kHz.
+- `harmonic_4_cycle_64` — 2 kHz.
+- `harmonic_8_cycle_64` — 4 kHz.
+- `harmonic_16_cycle_64` — 8 kHz (near-Nyquist for the 32 kHz
+  S-DSP sample rate).
+
+Full partial bank as a complex-signal anchor:
+
 - `all_8_partials_max_amp_harmonics_1_to_8` — full partial-bank
   stress.
 
-Reference (excluded from `gain_delta_db` aggregation):
-`max_amplitude_no_normalize` — clipping stress case; included in
-the report's `measurements` array but the `summary` decision rule
-does NOT consider it (any clipping introduces nonlinear distortion
-that mis-shapes the frequency-response measurement).
+Stress reference (clipping-only; NOT a frequency-response anchor):
+`normalize_false_multi_partial_clamp_safety` — included in the
+report's `measurements` array but the `summary` decision rule
+does NOT consider it (clipping introduces nonlinear distortion
+that mis-shapes frequency-response measurement; audition
+confirmed the metric-vs-perception masking on this fixture).
 
-**M3.6 decision rule (locked at M3.5 prelude per consultant M3.3
-audit #14).** M3.6 ships pre-emphasis presets ONLY IF all three
+The frequency axis covers 125 Hz to 8 kHz with monotonic spacing
+on the `cycle_64` harmonic series (1, 2, 4, 8, 16 kHz). Pre-emphasis
+decisions need this curve, not a single high-frequency point.
+
+**M3.6 decision rule (locked at M3.5, refined per audition audit
+#10, #12).** M3.6 ships pre-emphasis presets ONLY IF all four
 conditions hold:
 
-1. **Monotonic `gain_delta_db`.** Across the three
-   `sine_cycle_64 / 128 / 256` fixtures (in order of increasing
-   effective fundamental: `cycle_256`, `cycle_128`, `cycle_64`),
-   `gain_delta_db` MUST be monotonically non-increasing — higher
-   frequencies attenuated at least as much as lower frequencies.
+1. **Monotonic `gain_delta_db`.** Across the `cycle_64` harmonic
+   series (`harmonic_2_cycle_64` → `harmonic_4_cycle_64` →
+   `harmonic_8_cycle_64` → `harmonic_16_cycle_64`),
+   `gain_delta_db` MUST be monotonically non-increasing. Higher
+   frequencies attenuate at least as much as lower frequencies.
    Confirms the gaussian-dulling hypothesis.
 
-2. **Gentle preset improvement.** A proposed `gentle`
-   pre-emphasis preset (filter coefficients TBD at M3.6) MUST
-   close at least 50% of the measured high-frequency loss
-   (specifically: `|gain_delta_db|` at `sine_cycle_64`) WITHOUT
-   increasing `peak_abs_error_post_rotation` by more than 25% on
-   the M3.3-fixture baselines.
+2. **`harmonic_16` specifically responds.** The proposed gentle
+   pre-emphasis preset MUST reduce `gain_delta_db` at
+   `harmonic_16_cycle_64` by at least 25% of the measured raw
+   loss. If `harmonic_16` characterization cannot show measurable
+   improvement under any reasonable preset, pre-emphasis defers
+   — this is the primary perceptual stress fixture per audition.
 
-3. **No clipping introduction.** The `gentle` preset MUST NOT
+3. **Anti-worsening on canonical sines.** The gentle preset MUST
+   NOT increase `peak_abs_error` or `rms_error` on
+   `sine_cycle_64` or `sine_cycle_128` by more than 10% relative
+   to the no-preset baseline. A high-frequency fix that degrades
+   the canonical case is not a useful default.
+
+4. **No clipping introduction.** The gentle preset MUST NOT
    cause any of the 11 atom fixtures to exceed `i16` saturation
    (no new clamping at ±32767 that wasn't already present at
    M3.3).
 
-If any of (1)/(2)/(3) fails, M3.6 defers to M4+. The report's
-`recommended_next` records the outcome:
+If any of (1) / (2) / (3) / (4) fails, M3.6 defers to M4+. The
+report's `recommended_next` records the outcome:
 
 - `defer` — at least one condition failed; details in
   `decision_rule_reasons`.
-- `gentle_preset` — all three conditions hold; M3.6 implements
+- `gentle_preset` — all four conditions hold; M3.6 implements
   `gentle` only.
-- `strong_preset` — all three conditions hold AND the `gentle`
-  preset closes ≥ 75% of the high-frequency loss; M3.6 also
+- `strong_preset` — all four conditions hold AND the gentle
+  preset closes ≥ 75% of the measured HF loss; M3.6 also
   implements `strong`.
 
 ---
