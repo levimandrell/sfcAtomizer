@@ -2,15 +2,100 @@
 
 ## Current milestone
 
-**M4.4 — Encoder improvement spike (SKIP).** Research-spike per
-SPEC §24.1; consultant M4 plan #4, #17. **Decision: skip; no
-production encoder change ships.** Two of four SPEC §24.1 exit
-conditions fail; the spike's beam-search strategy doesn't clear
-the threshold, and the residual finding is documented for M5+
-reference. Per consultant plan #17 ("negative finding is an
-acceptable M4.4 outcome"), M4.4 closes cleanly. M4 proceeds to
-M4.6 GUI polish (M4.5 already permanently skipped per M4.2
-outcome 3).
+**M4.6 — GUI polish + M4.4 arithmetic wording patch.** Small
+pass; two independent layers. Per consultant M4.4 audit close-out
+(layer 1) plus consultant M3 close-out audit #19 item 5 (layer
+2). No encoder change; no SPEC contract change; no M2 / M3 / M4
+numeric baseline change.
+
+**Layer 1 — M4.4 arithmetic wording patch** (commit `392dd04`).
+Consultant M4.4 audit #2, #4, #9: the "no filter/shift
+trajectory can exceed 14336" claim in STATUS + baselines/m4.json
+overstated the math. Patched to the narrower "current-sample
+term at shift = 12 explains the plateau in filter-0 /
+forced-loop-entry / current-term-dominated cases" wording.
+Filters 1–3 add predictor terms from previous decoded samples,
+so the decoded value **can** exceed the raw shifted-nibble
+current-sample term — the 14336 is the practical
+current-encoder ceiling under the beam-search-width-4 spike,
+not a universal mathematical upper bound. Also added the
+canonical-sine amplitude-factor explanation (atom amplitude =
+0.75, so source peak ~24575 ≈ 0.75 × 32767; peak error ~10239 =
+24575 − 14336). Block-M4.7 release-prep wording fix.
+
+**Layer 2 — `rename_track_id_cascade` defensive landing**
+(commits `726c036` model + GUI, `d7ec00b` tests). Mirrors M2.8's
+`rename_atom_id_cascade` and M3.7's
+`rename_sequence_id_cascade`. The third v2-schema rename
+cascade lands defensively for symmetry; the body does the
+self-update plus `mark_dirty()`. **No cross-tree cascade runs**
+because the v2 schema does not currently reference
+`tracks[].id` from anywhere else (verified by grep across
+core + app sources). A "future-schema-growth site" comment
+marks where cascade logic would live if a later v2 rev
+introduces fields that reference track ids. GUI side: the track
+edit panel's id field switches from direct mutation to buffer +
+cascade call with self-revert on rejection — same M3.7
+mechanics as the sequence-id field.
+
+### M4.6 phase log
+
+- **Phase 0 (commit `392dd04`)** — `STATUS.md` M4.4
+  "Investigation finding" reworded; `baselines/m4.json`
+  `M4_4_BRR_NEAR_LOCAL_OPTIMUM_FINDING` `value` and `_note`
+  rewritten per consultant audit #2 / #4 / #9.
+- **Phase A + B (commit `726c036`)** —
+  `V2EditorModel::rename_track_id_cascade(idx, new_id) -> bool`
+  added next to `set_track_id` in `app/src/v2_editor.rs`; SPEC
+  §16.6 rule 49 pattern inlined. GUI side: `app/src/app_main.rs`
+  `draw_track_edit_panel` id text field swapped from direct
+  mutate to buffer + cascade.
+- **Phase C (commit `d7ec00b`)** — five model-level tests in
+  `app/src/v2_editor.rs::tests` mirroring M3.7's
+  sequence-rename test shape: updates_track_id, rejects
+  collision, rejects invalid regex, out-of-range no-op, same-id
+  no-op success. All five pass.
+- **Phase D (this entry)** — STATUS rewrite.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **615 tests
+  workspace-wide** (was 610 at M4.4 close; +5 new
+  track-rename tests).
+
+### Decisions log additions (M4.6)
+
+- M4.4 arithmetic wording patched per consultant M4.4 audit
+  #2, #4, #9. The "structural ceiling" claim narrowed to
+  "current-sample term at shift=12, dominated in filter-0 /
+  forced-loop-entry cases." Canonical-sine amplitude factor
+  (0.75 → source peak ~24575 → peak error ~10239) added to
+  explanation. Filter-1/2/3 predictor surface explicitly
+  named as a follow-up direction not exhausted by
+  beam-width-4.
+- `rename_track_id_cascade` lands defensively per consultant
+  M3 close-out audit #19 item 5. v2 schema does not currently
+  reference `tracks[].id` cross-tree, so no actual cascade
+  work needed; method mirrors M2.8 atom + M3.7 sequence
+  patterns for symmetry and future schema growth.
+- Consultant signed off on M4.4 SKIP per audit #14. M4.5 was
+  already permanently skipped at M4.2 outcome 3. M4.6 confirms
+  both holds.
+- Three v2-schema id surfaces (atom, sequence, track) now have
+  parallel `rename_*_id_cascade` methods + GUI wirings + test
+  coverage. Pattern is consistent across M2.8 / M3.7 / M4.6.
+- No encoder changes; no SPEC contract changes; no numeric
+  baseline changes; no new crate dependencies.
+
+**Next pass: M4.7 — Acceptance + release prep + tag `v0.4-rc1`.**
+Analog of M3.8. PM to brief.
+
+**Previous milestone (M4.4) — Encoder improvement spike (SKIP).**
+Research-spike per SPEC §24.1; consultant M4 plan #4, #17.
+**Decision: skip; no production encoder change ships.** Two of
+four SPEC §24.1 exit conditions failed; the spike's beam-search
+strategy didn't clear the threshold, and the residual finding is
+documented for M5+ reference. Per consultant plan #17 ("negative
+finding is an acceptable M4.4 outcome"), M4.4 closed cleanly.
 
 **Strategy:** Hypothesis A from the brief — **cross-block beam
 search** (`beam_width = 4`), the M3.4-deferred predictor
@@ -1435,17 +1520,34 @@ PM go/defer decision at M3.4 entry brief.
 
 ## Last pass
 
+**Pass M4.6 — GUI polish + M4.4 arithmetic wording patch
+(Phases 0, A–D).** Small two-layer pass. Phase 0 (commit
+`392dd04`): patched the M4.4 "structural ceiling" wording in
+STATUS + `baselines/m4.json` per consultant M4.4 audit #2 / #4
+/ #9 (narrower current-sample-term claim, amplitude=0.75
+explanation, filter-1/2/3 predictor surface as a follow-up
+direction). Phases A–D (commits `726c036`, `d7ec00b`): defensive
+`rename_track_id_cascade` landing for symmetry with M2.8 atom
+and M3.7 sequence cascades. The v2 schema does not currently
+reference `tracks[].id` cross-tree, so no actual cascade
+work — method + GUI + 5 tests land the pattern for future
+schema growth. Workspace test count 610 → 615.
+
+---
+
 **Pass M4.4 — Encoder improvement spike (Phases A–E) — SKIP
 outcome.** Research-spike per SPEC §24.1. Three commits: spike
-implementation (Phase A), test infrastructure (Phase B + C),
-skip-path documentary baselines (Phase D). Workspace test count
-607 → 610. **Decision: skip; no production change ships.** Two
-of four exit conditions failed (≥10% improvement gate and
-≤2× runtime ceiling). Investigation finding: the high-noise
-cluster's peak=18431 ceiling is an arithmetic structural limit
-of 4-bit ADPCM at shift=12 — beam search cannot fix it. Spike
-implementation preserved feature-flagged in `core::brr_encoder`
-for M5+ reference. Acceptable close per consultant plan #17.
+implementation, test infrastructure, skip-path documentary
+baselines. Workspace test count 607 → 610. **Decision: skip; no
+production change ships.** Two of four exit conditions failed
+(≥10% improvement gate and ≤2× runtime ceiling). Investigation
+finding: the high-noise cluster's peak=18431 plateau is
+explained by the current-sample-term ceiling at shift=12 in
+filter-0 / forced-loop-entry cases (M4.6 wording patch
+narrowed the original "universal ceiling" claim). Spike
+implementation preserved feature-flagged in
+`core::brr_encoder` for M5+ reference. Acceptable close per
+consultant plan #17.
 
 ---
 
