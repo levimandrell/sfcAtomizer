@@ -150,14 +150,16 @@
       "value": 1197,
       "kind": "click_score",
       "snapshot_at": "M2.2",
-      "_note": "|first_loop_decoded - last_decoded| with M2.2 BRR encoder + force_filter_0_first_block. Audible loop click expected; deferred to M3 BRR-quality (consultant #9)."
+      "_same_numeric_value_as": "baselines/m3.json::M3_ATOM_128_SINE_LOOP_CLICK_ABS_PRE_M3",
+      "_note": "M2.2-era encoder-internal score: |first_loop_decoded - last_decoded| with M2.2 BRR encoder + force_filter_0_first_block, no phase rotation. Same formula as SPEC §10.6 loop_click_abs (confirmed at M3.1 reconciliation). Documentary; the authoritative M3 entries are in baselines/m3.json (`M3_ATOM_128_SINE_LOOP_CLICK_ABS_PRE_M3 = 1197` pre-rotation, `…_PHASE_ROTATION = 0` post-M3.3 rotation). Retired from gating but kept here for historical traceability."
     },
     {
       "name": "M2_ATOM_64_SINE_LOOP_CLICK_SCORE",
       "value": 2407,
       "kind": "click_score",
       "snapshot_at": "M2.2",
-      "_note": "Same envelope as the 128 atom; higher absolute value reflects shorter cycle length."
+      "_same_numeric_value_as": "baselines/m3.json::M3_ATOM_64_SINE_LOOP_CLICK_ABS_PRE_M3",
+      "_note": "Same envelope as the 128 atom; higher absolute value reflects shorter cycle length. M3.3 phase rotation drops this to 0 (rotation_offset=48); see baselines/m3.json::M3_ATOM_64_SINE_LOOP_CLICK_ABS_PHASE_ROTATION."
     }
   ],
   "retired": [
