@@ -2809,6 +2809,33 @@ extends the M3.8 `m3-acceptance` pattern with M4-specific
 stages. Tags `v0.4-rc1` only after the integrity audit signs
 off per the M2/M3 lessons.
 
+### 24.1.1 M5 methodology repair budget (locked at M5.0 per consultant M5 plan #4)
+
+M5 inherits M4.0's research-spike pattern but **tightens** the
+methodology repair budget. M4's budget was 2 loops (M4.1 +
+M4.2 + M4.2.1); M5 reduces to one main loop plus at most one
+correction:
+
+```
+M5.1 (native-rate harness implementation)
+  + M5.2 (characterization re-run + decision)
+  + AT MOST ONE M5.2.1 correction if a clear implementation
+    bug emerges
+```
+
+If M5.2 produces `methodology_unresolved` AFTER one correction
+iteration (or directly if no clear bug presents), declare
+methodology unresolved at the M5 scale, defer pre-emphasis
+to M6+, and proceed to M5.4 BRR noise-floor strategy spike
+without expecting characterization-driven decisions.
+
+This is **STRICTER** than M4's 2-loop budget. Rationale per
+consultant M5 plan #4: M4 surfaced that methodology
+investigation can iterate indefinitely without converging.
+M5 is committed to producing a decision (positive or
+negative) within tighter bounds. The M4 budget applies to
+M4-era logic; M5's tighter budget applies to M5+ work.
+
 ### 24.2 M4 baseline shift rules (locked at M4.0)
 
 **Must NOT shift across M4 (regression if they do):**
