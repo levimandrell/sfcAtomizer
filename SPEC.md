@@ -692,6 +692,113 @@ transient encoder input, not stored, and its SHAs are not pinned.
 `atom_pool[].pre_emphasis` field (default `"off"`). Schema rule
 finalized at M3.6 land.
 
+**Characterization report format (locked at M3.5 prelude per
+consultant M3.3 audit #12).** The characterization pass emits a
+JSON report with this shape:
+
+```json
+{
+  "schema_version": 1,
+  "report_type": "gaussian_characterization",
+  "fixture_set": "m3_5_canonical",
+  "sample_rate_hz": 32000,
+  "tool": {
+    "snes_spc_oracle_sha256": "<runtime>",
+    "rust_version": "<runtime>"
+  },
+  "test_signals": [
+    { "name": "...", "kind": "sine|atom_fixture", "cycle_len_samples": 128 }
+  ],
+  "measurements": [
+    {
+      "name": "sine_cycle_64",
+      "frequency_hz": 500.0,
+      "raw_decode_rms": 0.0,
+      "oracle_rms": 0.0,
+      "gain_delta_db": 0.0,
+      "peak_abs_error_oracle_vs_raw": 0
+    }
+  ],
+  "summary": {
+    "clear_target_for_pre_emphasis": false,
+    "recommended_next": "defer",
+    "decision_rule_reasons": []
+  }
+}
+```
+
+Field semantics:
+
+- `raw_decode_rms` (`f64`): RMS of host-side BRR decode
+  (`core::brr::decode_blocks`).
+- `oracle_rms` (`f64`): RMS of the `snes_spc` oracle render of
+  the same SPC (post-Gaussian-interpolation playback).
+- `gain_delta_db` (`f64`): `20 * log10(oracle_rms /
+  raw_decode_rms)`. Negative values indicate the oracle
+  attenuates relative to raw decode (the gaussian-dulling we
+  expect to find).
+- `peak_abs_error_oracle_vs_raw` (`i32`): max-abs sample-wise
+  delta between oracle render and raw decode.
+- `recommended_next` (`"defer"` | `"gentle_preset"` |
+  `"strong_preset"`): outcome of applying the §10.9 decision
+  rule below.
+
+**Test signal set `m3_5_canonical` (locked at M3.5 prelude per
+consultant M3.3 audit #13).** Synthetic single-cycle atoms
+covering the frequency-response axis the gaussian dulls:
+
+- `sine_cycle_64` — effective fundamental = 32000 Hz / 64 = 500 Hz.
+- `sine_cycle_128` — effective fundamental = 32000 Hz / 128 = 250 Hz.
+- `sine_cycle_256` — effective fundamental = 32000 Hz / 256 = 125 Hz.
+
+Higher-frequency content via harmonic stacking:
+
+- `harmonic_8_cycle_64` — 8th harmonic of 500 Hz = 4 kHz.
+- `harmonic_16_cycle_64` — 16th harmonic of 500 Hz = 8 kHz
+  (near-Nyquist for the 32 kHz S-DSP sample rate).
+- `all_8_partials_max_amp_harmonics_1_to_8` — full partial-bank
+  stress.
+
+Reference (excluded from `gain_delta_db` aggregation):
+`max_amplitude_no_normalize` — clipping stress case; included in
+the report's `measurements` array but the `summary` decision rule
+does NOT consider it (any clipping introduces nonlinear distortion
+that mis-shapes the frequency-response measurement).
+
+**M3.6 decision rule (locked at M3.5 prelude per consultant M3.3
+audit #14).** M3.6 ships pre-emphasis presets ONLY IF all three
+conditions hold:
+
+1. **Monotonic `gain_delta_db`.** Across the three
+   `sine_cycle_64 / 128 / 256` fixtures (in order of increasing
+   effective fundamental: `cycle_256`, `cycle_128`, `cycle_64`),
+   `gain_delta_db` MUST be monotonically non-increasing — higher
+   frequencies attenuated at least as much as lower frequencies.
+   Confirms the gaussian-dulling hypothesis.
+
+2. **Gentle preset improvement.** A proposed `gentle`
+   pre-emphasis preset (filter coefficients TBD at M3.6) MUST
+   close at least 50% of the measured high-frequency loss
+   (specifically: `|gain_delta_db|` at `sine_cycle_64`) WITHOUT
+   increasing `peak_abs_error_post_rotation` by more than 25% on
+   the M3.3-fixture baselines.
+
+3. **No clipping introduction.** The `gentle` preset MUST NOT
+   cause any of the 11 atom fixtures to exceed `i16` saturation
+   (no new clamping at ±32767 that wasn't already present at
+   M3.3).
+
+If any of (1)/(2)/(3) fails, M3.6 defers to M4+. The report's
+`recommended_next` records the outcome:
+
+- `defer` — at least one condition failed; details in
+  `decision_rule_reasons`.
+- `gentle_preset` — all three conditions hold; M3.6 implements
+  `gentle` only.
+- `strong_preset` — all three conditions hold AND the `gentle`
+  preset closes ≥ 75% of the high-frequency loss; M3.6 also
+  implements `strong`.
+
 ---
 
 ## 11. Voice allocation and SFX
