@@ -694,12 +694,12 @@ finalized at M3.6 land.
 
 **Characterization report format (locked at M3.5 prelude per
 consultant M3.3 audit #12; expanded at M3.5 per audition audit
-#13).** The characterization pass emits a JSON report with this
-shape:
+#13; expanded again at M3.5.1 per consultant M3.5 audit #3, #4).**
+The characterization pass emits a JSON report with this shape:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "report_type": "gaussian_characterization",
   "fixture_set": "m3_5_canonical",
   "sample_rate_hz": 32000,
@@ -719,16 +719,26 @@ shape:
       "raw_rms": 0.0,
       "oracle_rms": 0.0,
       "gain_delta_db": 0.0,
+      "gain_delta_db_aligned": 0.0,
       "peak_abs_error_oracle_vs_raw": 0,
       "peak_abs_raw_vs_source": 0,
       "zcr_raw": 0.0,
       "zcr_oracle": 0.0,
       "clipping_count_raw": 0,
       "clipping_count_oracle": 0,
+      "alignment_best_offset": 0,
+      "aligned_raw_rms": 0.0,
+      "aligned_oracle_rms": 0.0,
+      "normalized_correlation": 0.0,
+      "zcr_ratio": 0.0,
+      "first_8_zero_crossings_raw": [],
+      "first_8_zero_crossings_oracle": [],
+      "peak_abs_error_after_gain_normalization": 0,
       "_phase_or_delay_note": "optional"
     }
   ],
   "subjective_audition": null,
+  "_methodology_audit_m3_5_1": null,
   "summary": {
     "clear_target_for_pre_emphasis": false,
     "recommended_next": "defer",
@@ -746,9 +756,18 @@ Field semantics:
   oracle render (the DSP-interpolated playback).
 - `raw_rms` (`f64`): RMS of host-side BRR decode.
 - `oracle_rms` (`f64`): RMS of the oracle render.
-- `gain_delta_db` (`f64`): `20 * log10(oracle_rms / raw_rms)`.
-  Negative values indicate the oracle attenuates relative to raw
-  decode (the gaussian-dulling we expect to find).
+- `gain_delta_db` (`f64`): `20 * log10(oracle_rms / raw_rms)`
+  using the raw-window form (`raw_rms` over the full tiled raw
+  buffer, `oracle_rms` over the aligned oracle window). Kept for
+  backward comparability with M3.5 baselines; the M3.5.1
+  `gain_delta_db_aligned` form (below) is the methodologically
+  cleaner number.
+- `gain_delta_db_aligned` (`f64`, M3.5.1 per consultant M3.5
+  audit #3): `20 * log10(aligned_oracle_rms / aligned_raw_rms)`.
+  Both RMSes are computed over the same aligned window. Removes
+  the window-length bias the original `gain_delta_db` carries.
+  Recommended reference if a future pass designs pre-emphasis
+  presets.
 - `peak_abs_error_oracle_vs_raw` (`i32`): max-abs sample-wise
   delta between oracle render and raw decode (gaussian + DSP
   error magnitude).
@@ -771,9 +790,52 @@ Field semantics:
 - `subjective_audition` (optional): see "Optional subjective
   audition field" below; omit (or `null`) when no audition has
   been performed for this characterization run.
-- `recommended_next` (`"defer"` | `"gentle_preset"` |
-  `"strong_preset"`): outcome of applying the §10.9 decision
-  rule below.
+- `recommended_next` (`"defer"` | `"pending_preset_eval"` |
+  `"gentle_preset"` | `"strong_preset"` | `"methodology_review"`):
+  outcome of applying the §10.9 decision rule below. The
+  `"methodology_review"` outcome (M3.5.1) is set when the
+  precondition #0 sanity check fails.
+
+**M3.5.1 methodology diagnostic fields (consultant M3.5 audit
+#4).** The following per-measurement fields surface methodology
+artefacts (alignment phase, ZCR doubling, shape vs gain
+differences) so they can be flagged in the report without
+redesigning the underlying alignment / RMS pipeline:
+
+- `alignment_best_offset` (`u32`): sample offset chosen by
+  `align_oracle_to_raw`. Surfaces the gaussian delay.
+- `aligned_raw_rms` (`f64`): RMS of the raw buffer over the
+  aligned window only.
+- `aligned_oracle_rms` (`f64`): RMS of the oracle buffer over
+  the aligned window.
+- `normalized_correlation` (`f64`, `[-1.0, 1.0]`): Pearson
+  correlation between aligned raw and aligned oracle.
+  Expected close to 1.0 when the oracle is a clean amplitude-
+  scaled version of the raw decode; lower values indicate
+  waveform shape differences (gaussian doing more than scaling,
+  OR methodology artefact such as oracle-side aliasing).
+- `zcr_ratio` (`f64`): `zcr_oracle / zcr_raw`. Expected ≈ 1.0
+  for a clean sine through gaussian interpolation. Values ≥ 1.5
+  or ≤ 0.67 indicate the oracle waveform has additional zero
+  crossings the raw decode doesn't have — methodology
+  suspicion. The precondition #0 sanity band is `[0.9, 1.1]`.
+- `first_8_zero_crossings_raw` (`Vec<u32>`): sample indices of
+  the first 8 zero crossings in the aligned raw buffer.
+- `first_8_zero_crossings_oracle` (`Vec<u32>`): same for the
+  aligned oracle buffer. Visual cross-reference with the raw
+  series exposes inserted / removed crossings.
+- `peak_abs_error_after_gain_normalization` (`i32`):
+  `max |raw[i] - oracle[i] * (raw_rms / oracle_rms)|`. If this
+  drops sharply from `peak_abs_error_oracle_vs_raw` the
+  difference is gain-only; if it stays high, the difference is
+  in shape.
+
+**Optional `_methodology_audit_m3_5_1`** (top-level documentary
+field, M3.5.1). When the M3.5.1 re-run surfaces methodology
+anomalies, the report may include a top-level
+`_methodology_audit_m3_5_1` object recording the anomalies
+observed, the audit actions taken in this pass, and the next
+steps. Field is optional (`null` when no audit applies).
 
 **Test signal set `m3_5_canonical` (locked at M3.5, expanded
 based on M3.5 audition audit #9).** The original Phase 0 set of
@@ -814,8 +876,33 @@ on the `cycle_64` harmonic series (1, 2, 4, 8, 16 kHz). Pre-emphasis
 decisions need this curve, not a single high-frequency point.
 
 **M3.6 decision rule (locked at M3.5, refined per audition audit
-#10, #12).** M3.6 ships pre-emphasis presets ONLY IF all four
-conditions hold:
+#10, #12; methodology precondition added at M3.5.1 per consultant
+M3.5 audit #8).**
+
+**Condition #0 — Methodology sanity (precondition, M3.5.1).**
+Before evaluating conditions #1–#4, the characterization must
+satisfy:
+
+```
+characterization_valid =
+  zcr_ratio ∈ [0.9, 1.1] for ALL monotonicity-anchor signals
+  (sine_cycle_64/128/256, harmonic_2/4/8/16_cycle_64),
+  OR a documented methodology explanation exists in the
+  report's _methodology_audit_m3_5_1 field.
+```
+
+If `characterization_valid` is false, `recommended_next` is set
+to `"methodology_review"` and conditions #1–#4 are NOT
+evaluated. The characterization is treated as informational
+only; no preset ships from it. This precondition prevents
+preset design against measurements that contain unresolved
+methodology artefacts (e.g. the M3.5 ZCR-doubling anomaly that
+motivated M3.5.1).
+
+If `characterization_valid` is true, proceed to conditions #1–#4.
+
+M3.6 ships pre-emphasis presets ONLY IF all four conditions
+hold:
 
 1. **Monotonic `gain_delta_db`.** Across the `cycle_64` harmonic
    series (`harmonic_2_cycle_64` → `harmonic_4_cycle_64` →
@@ -845,10 +932,17 @@ conditions hold:
 If any of (1) / (2) / (3) / (4) fails, M3.6 defers to M4+. The
 report's `recommended_next` records the outcome:
 
-- `defer` — at least one condition failed; details in
+- `methodology_review` — precondition #0 failed; conditions
+  #1–#4 not evaluated. Details in `decision_rule_reasons`.
+- `defer` — precondition #0 held but at least one of #1–#4
+  failed (or M3.5-era raw form: `harmonic_16` did not attenuate
+  past the -0.5 dB threshold); details in
   `decision_rule_reasons`.
-- `gentle_preset` — all four conditions hold; M3.6 implements
-  `gentle` only.
+- `pending_preset_eval` — M3.5 raw form: monotonicity and
+  raw-`harmonic_16` response both hold but no preset has been
+  evaluated yet. The "go signal" for M3.6 preset design.
+- `gentle_preset` — all four conditions hold under a proposed
+  preset; M3.6 implements `gentle` only.
 - `strong_preset` — all four conditions hold AND the gentle
   preset closes ≥ 75% of the measured HF loss; M3.6 also
   implements `strong`.

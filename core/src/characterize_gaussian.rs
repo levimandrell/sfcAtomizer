@@ -500,7 +500,26 @@ pub struct CharacterizationReport {
     pub measurements: Vec<Measurement>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subjective_audition: Option<SubjectiveAudition>,
+    /// M3.5.1 (consultant M3.5 audit #4): when the M3.5.1 re-run
+    /// surfaces methodology anomalies (e.g. the ZCR-doubling
+    /// observed on M3.5 oracle output for low-frequency sines),
+    /// the report records the anomalies, audit actions taken,
+    /// and next steps. Omitted when no audit applies.
+    #[serde(
+        rename = "_methodology_audit_m3_5_1",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub methodology_audit_m3_5_1: Option<MethodologyAudit>,
     pub summary: Summary,
+}
+
+/// M3.5.1 methodology audit summary (optional top-level report
+/// field). Documentary only; not consumed by the decision rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MethodologyAudit {
+    pub anomalies_observed: Vec<String>,
+    pub audit_actions_taken_m3_5_1: Vec<String>,
+    pub next_steps: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -797,28 +816,93 @@ pub struct DecisionOutcome {
     pub reasons: Vec<String>,
 }
 
-/// Apply the M3.5 monotonicity check (condition #1) to a slice of
-/// measurements. The other three conditions (`harmonic_16` responds,
-/// anti-worsening on canonical sines, no new clipping) require a
-/// proposed preset's outputs to evaluate, which M3.5 does NOT
-/// implement — they are evaluated at M3.6 land.
+/// Names of the monotonicity-anchor signals that precondition #0
+/// (M3.5.1) checks `zcr_ratio` against.
+pub const PRECONDITION_ANCHOR_SIGNALS: &[&str] = &[
+    "sine_cycle_64",
+    "sine_cycle_128",
+    "sine_cycle_256",
+    "harmonic_2_cycle_64",
+    "harmonic_4_cycle_64",
+    "harmonic_8_cycle_64",
+    "harmonic_16_cycle_64",
+];
+
+/// `zcr_ratio` sanity band for precondition #0 (M3.5.1).
+pub const PRECONDITION_ZCR_RATIO_LOW: f64 = 0.9;
+pub const PRECONDITION_ZCR_RATIO_HIGH: f64 = 1.1;
+
+/// Apply the SPEC §10.9 decision rule.
 ///
-/// At M3.5 the report's recommended_next outcomes are:
+/// **Precondition #0 (M3.5.1, consultant M3.5 audit #8):**
+/// `zcr_ratio` of every monotonicity-anchor signal must fall in
+/// `[0.9, 1.1]`. If any anchor's `zcr_ratio` lands outside the
+/// band, the precondition fires and `recommended_next` is set to
+/// `"methodology_review"` without evaluating conditions #1–#4.
 ///
-/// - `"defer"`: monotonicity fails, OR `harmonic_16` shows ≤ 0 dB
-///   attenuation (no measurable gaussian dulling to compensate for).
-/// - `"pending_preset_eval"`: monotonicity holds and `harmonic_16`
-///   shows measurable attenuation — M3.6 will need to design a
-///   gentle preset and re-run the report under it. This is the
-///   "go signal" for designing presets; M3.6 still has to satisfy
-///   conditions #2 / #3 / #4 to actually ship.
+/// Conditions #1–#4 (evaluated only if the precondition holds):
 ///
-/// Reasons are appended verbosely so the report can be reviewed
-/// without re-running the characterization.
+/// - **#1 monotonicity** of `gain_delta_db` across the cycle_64
+///   harmonic series.
+/// - **#2 (M3.5 raw form):** `harmonic_16_cycle_64` attenuates
+///   past -0.5 dB.
+/// - **#3 / #4** require a proposed preset's outputs and remain
+///   unevaluated at M3.5 / M3.5.1.
+///
+/// Outcomes:
+/// - `"methodology_review"`: precondition #0 failed.
+/// - `"defer"`: precondition held, but at least one of #1 / #2
+///   failed.
+/// - `"pending_preset_eval"`: precondition + #1 + #2 all hold;
+///   the "go signal" for M3.6 preset design.
 pub fn apply_m3_5_decision_rule(measurements: &[Measurement]) -> DecisionOutcome {
     let mut reasons = Vec::new();
 
     let by_name = |n: &str| -> Option<&Measurement> { measurements.iter().find(|m| m.name == n) };
+
+    // ---- Precondition #0 — methodology sanity (M3.5.1) ----
+    let mut precondition_failures: Vec<String> = Vec::new();
+    for anchor in PRECONDITION_ANCHOR_SIGNALS {
+        match by_name(anchor) {
+            Some(m) => {
+                if !(PRECONDITION_ZCR_RATIO_LOW..=PRECONDITION_ZCR_RATIO_HIGH)
+                    .contains(&m.zcr_ratio)
+                {
+                    precondition_failures.push(format!(
+                        "zcr_ratio for {} = {:.3} (outside [{:.2}, {:.2}] sanity band)",
+                        anchor,
+                        m.zcr_ratio,
+                        PRECONDITION_ZCR_RATIO_LOW,
+                        PRECONDITION_ZCR_RATIO_HIGH
+                    ));
+                }
+            }
+            None => {
+                precondition_failures.push(format!(
+                    "monotonicity-anchor signal {} missing from measurements; cannot evaluate precondition #0",
+                    anchor
+                ));
+            }
+        }
+    }
+    if !precondition_failures.is_empty() {
+        reasons.extend(precondition_failures);
+        reasons.push(
+            "precondition #0 (SPEC §10.9 methodology sanity) FAILS — conditions #1–#4 NOT evaluated. The characterization is informational only; no preset ships."
+                .to_string(),
+        );
+        return DecisionOutcome {
+            recommended_next: "methodology_review".to_string(),
+            clear_target_for_pre_emphasis: false,
+            reasons,
+        };
+    }
+    reasons.push(format!(
+        "precondition #0 (SPEC §10.9 methodology sanity) OK: zcr_ratio ∈ [{:.2}, {:.2}] for all {} monotonicity-anchor signals.",
+        PRECONDITION_ZCR_RATIO_LOW,
+        PRECONDITION_ZCR_RATIO_HIGH,
+        PRECONDITION_ANCHOR_SIGNALS.len()
+    ));
 
     let h2 = by_name("harmonic_2_cycle_64");
     let h4 = by_name("harmonic_4_cycle_64");
@@ -1205,6 +1289,57 @@ mod tests {
         );
         // Identical buffers → peak error near zero (after gain norm).
         assert_eq!(m.peak_abs_error_after_gain_normalization, 0);
+    }
+
+    #[test]
+    fn decision_rule_precondition_fires_when_zcr_ratio_doubles() {
+        // Simulate the M3.5 ZCR-doubling anomaly: zcr_ratio ≈ 2.0 on
+        // sine_cycle_128. Precondition #0 must short-circuit to
+        // methodology_review without evaluating #1–#4.
+        let mut ms = vec![
+            measurement_with_defaults("sine_cycle_64", 0.0),
+            measurement_with_defaults("sine_cycle_128", 0.0),
+            measurement_with_defaults("sine_cycle_256", 0.0),
+            measurement_with_defaults("harmonic_2_cycle_64", -0.5),
+            measurement_with_defaults("harmonic_4_cycle_64", -2.0),
+            measurement_with_defaults("harmonic_8_cycle_64", -4.0),
+            measurement_with_defaults("harmonic_16_cycle_64", -8.0),
+        ];
+        // Trip the precondition on sine_cycle_128.
+        for m in ms.iter_mut() {
+            if m.name == "sine_cycle_128" {
+                m.zcr_ratio = 1.93;
+            }
+        }
+        let o = apply_m3_5_decision_rule(&ms);
+        assert_eq!(o.recommended_next, "methodology_review");
+        assert!(!o.clear_target_for_pre_emphasis);
+        assert!(o
+            .reasons
+            .iter()
+            .any(|r| r.contains("zcr_ratio for sine_cycle_128 = 1.930")));
+        assert!(o.reasons.iter().any(|r| r.contains("precondition #0")));
+        // The conditions #1 / #2 messages must NOT appear (short-circuited).
+        assert!(!o.reasons.iter().any(|r| r.contains("monotonicity OK")));
+    }
+
+    #[test]
+    fn decision_rule_precondition_fires_when_anchor_signal_missing() {
+        // Drop sine_cycle_256; rest within band.
+        let ms = vec![
+            measurement_with_defaults("sine_cycle_64", 0.0),
+            measurement_with_defaults("sine_cycle_128", 0.0),
+            measurement_with_defaults("harmonic_2_cycle_64", -0.5),
+            measurement_with_defaults("harmonic_4_cycle_64", -2.0),
+            measurement_with_defaults("harmonic_8_cycle_64", -4.0),
+            measurement_with_defaults("harmonic_16_cycle_64", -8.0),
+        ];
+        let o = apply_m3_5_decision_rule(&ms);
+        assert_eq!(o.recommended_next, "methodology_review");
+        assert!(o
+            .reasons
+            .iter()
+            .any(|r| r.contains("sine_cycle_256 missing")));
     }
 
     #[test]

@@ -6881,8 +6881,12 @@ fn cmd_characterize_gaussian(
         decision_rule_reasons: outcome.reasons.clone(),
     };
 
+    // ----- M3.5.1 methodology audit: surface what changed in M3.5.1
+    // and what anomalies (if any) the run observed.
+    let methodology_audit = build_methodology_audit_m3_5_1(&measurements);
+
     let report = CharacterizationReport {
-        schema_version: 2,
+        schema_version: 3,
         report_type: "gaussian_characterization".to_string(),
         fixture_set: "m3_5_canonical".to_string(),
         sample_rate_hz: 32_000,
@@ -6895,6 +6899,7 @@ fn cmd_characterize_gaussian(
         test_signals: test_signals_summary,
         measurements: measurements.clone(),
         subjective_audition: None,
+        methodology_audit_m3_5_1: methodology_audit,
         summary,
     };
 
@@ -6908,13 +6913,82 @@ fn cmd_characterize_gaussian(
     );
     for m in &measurements {
         eprintln!(
-            "  {:38} f={:>7.1} Hz  gain_delta={:>+7.3} dB  raw_rms={:>8.1}  oracle_rms={:>8.1}  peak_err={:>5}  zcr_raw={:>7.1}  zcr_oracle={:>7.1}  clip_raw={:>4} clip_oracle={:>4}",
-            m.name, m.frequency_hz, m.gain_delta_db, m.raw_rms, m.oracle_rms,
-            m.peak_abs_error_oracle_vs_raw, m.zcr_raw, m.zcr_oracle,
-            m.clipping_count_raw, m.clipping_count_oracle
+            "  {:42} f={:>7.1} Hz  gain={:>+6.3} / aligned={:>+6.3} dB  zcr_ratio={:>5.2}  corr={:>+5.3}  peak_err={:>5}  peak_after_norm={:>5}  align_off={:>3}",
+            m.name, m.frequency_hz, m.gain_delta_db, m.gain_delta_db_aligned, m.zcr_ratio,
+            m.normalized_correlation, m.peak_abs_error_oracle_vs_raw,
+            m.peak_abs_error_after_gain_normalization, m.alignment_best_offset
         );
     }
     eprintln!("characterize-gaussian: report -> {}", out_report.display());
 
     Ok(())
+}
+
+/// Build the M3.5.1 `_methodology_audit_m3_5_1` summary by checking
+/// the just-computed measurements against the M3.5-observed anomaly
+/// fingerprints (ZCR doubling on low-frequency sines, persistent
+/// shape error after gain normalization).
+fn build_methodology_audit_m3_5_1(
+    measurements: &[sfc_atomizer_core::characterize_gaussian::Measurement],
+) -> Option<sfc_atomizer_core::characterize_gaussian::MethodologyAudit> {
+    use sfc_atomizer_core::characterize_gaussian::{
+        MethodologyAudit, PRECONDITION_ZCR_RATIO_HIGH, PRECONDITION_ZCR_RATIO_LOW,
+    };
+    let mut anomalies: Vec<String> = Vec::new();
+
+    let by_name = |n: &str| -> Option<&sfc_atomizer_core::characterize_gaussian::Measurement> {
+        measurements.iter().find(|m| m.name == n)
+    };
+
+    // ZCR-ratio anomaly fingerprint: any anchor signal outside the
+    // [0.9, 1.1] sanity band.
+    for n in [
+        "sine_cycle_64",
+        "sine_cycle_128",
+        "sine_cycle_256",
+        "harmonic_2_cycle_64",
+        "harmonic_4_cycle_64",
+        "harmonic_8_cycle_64",
+        "harmonic_16_cycle_64",
+    ] {
+        if let Some(m) = by_name(n) {
+            if !(PRECONDITION_ZCR_RATIO_LOW..=PRECONDITION_ZCR_RATIO_HIGH).contains(&m.zcr_ratio) {
+                anomalies.push(format!(
+                    "{}: zcr_ratio = {:.3} (zcr_oracle / zcr_raw outside [{:.2}, {:.2}] sanity band)",
+                    n, m.zcr_ratio, PRECONDITION_ZCR_RATIO_LOW, PRECONDITION_ZCR_RATIO_HIGH
+                ));
+            }
+        }
+    }
+
+    // Shape-residual anomaly fingerprint: peak_abs_error_after_gain_normalization
+    // remaining within 25% of peak_abs_error_oracle_vs_raw for low-frequency
+    // signals indicates raw and oracle differ in shape, not just gain.
+    for n in ["sine_cycle_64", "sine_cycle_128", "sine_cycle_256"] {
+        if let Some(m) = by_name(n) {
+            if m.peak_abs_error_oracle_vs_raw > 0
+                && m.peak_abs_error_after_gain_normalization
+                    >= (m.peak_abs_error_oracle_vs_raw as f64 * 0.75) as i32
+            {
+                anomalies.push(format!(
+                    "{}: peak_abs_error_after_gain_normalization ({}) is >= 75% of peak_abs_error_oracle_vs_raw ({}) — raw and oracle differ in shape, not just gain",
+                    n, m.peak_abs_error_after_gain_normalization, m.peak_abs_error_oracle_vs_raw
+                ));
+            }
+        }
+    }
+
+    if anomalies.is_empty() {
+        return None;
+    }
+
+    Some(MethodologyAudit {
+        anomalies_observed: anomalies,
+        audit_actions_taken_m3_5_1: vec![
+            "added 7 methodology diagnostic fields per consultant audit #4 (alignment_best_offset, aligned_raw_rms, aligned_oracle_rms, normalized_correlation, zcr_ratio, first_8_zero_crossings_raw/_oracle, peak_abs_error_after_gain_normalization)".to_string(),
+            "added gain_delta_db_aligned alternative form per consultant audit #3".to_string(),
+            "added decision rule precondition #0 (zcr_ratio sanity band) per consultant audit #8".to_string(),
+        ],
+        next_steps: "M3.6 pre-emphasis preset implementation deferred to M4+ until methodology resolved (zcr_ratio doubling, shape vs gain separation). M3.7 GUI polish next; M3.8 release.".to_string(),
+    })
 }
