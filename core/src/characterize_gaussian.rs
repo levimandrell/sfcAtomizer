@@ -367,7 +367,7 @@ pub fn peak_abs_error_after_gain_normalization(
 ///
 /// Returns an empty `Vec` if `brr_bytes.len()` is not a multiple of 9.
 pub fn decode_brr_flat(brr_bytes: &[u8]) -> Vec<i16> {
-    if brr_bytes.is_empty() || brr_bytes.len() % 9 != 0 {
+    if brr_bytes.is_empty() || !brr_bytes.len().is_multiple_of(9) {
         return Vec::new();
     }
     let blocks: Vec<[u8; 9]> = brr_bytes
@@ -389,7 +389,7 @@ pub fn decode_brr_flat(brr_bytes: &[u8]) -> Vec<i16> {
 /// right are equal in that case, so taking L is loss-free. Returns
 /// an empty `Vec` if `bytes.len()` is not a multiple of 4.
 pub fn oracle_stereo_to_mono_left(bytes: &[u8]) -> Vec<i16> {
-    if bytes.is_empty() || bytes.len() % 4 != 0 {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
         return Vec::new();
     }
     let frames = bytes.len() / 4;

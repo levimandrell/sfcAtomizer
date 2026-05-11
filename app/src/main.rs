@@ -499,8 +499,8 @@ enum Command {
         #[arg(long)]
         with_source_step_windows: bool,
     },
-    /// Run the M2 per-channel acceptance suite: compile + render
-    /// + verify three .spc files (sample_only, atom_only, combined)
+    /// Run the M2 per-channel acceptance suite: compile, render,
+    /// and verify three .spc files (sample_only, atom_only, combined)
     /// against SPEC §21 thresholds and emit a unified report.
     /// Engineer's call: this is the M2.5 audible gate ahead of the
     /// full m2-acceptance bundle (M2.8).
@@ -5033,6 +5033,7 @@ fn detect_driver_version_from_aram(aram: &[u8]) -> Option<u8> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod driver_version_detection_tests {
     use super::detect_driver_version_from_aram;
 
