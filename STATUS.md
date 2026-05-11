@@ -2,7 +2,142 @@
 
 ## Current milestone
 
-**M5.1 — Native-rate characterization harness
+**M5.2 — Characterization re-run + decision.** Second M5
+research-spike per SPEC §24.1.1 (M5 budget: 1+1 loops; M5.2
+is the second of the main loops; M5.2.1 conditional
+correction remains unburned). Given M5.1's empirical finding
+that Phase E metrics were numerically identical to M4.2,
+M5.2's scope was narrower than originally anticipated: lock
+M5.2 baselines under the corrected-mechanism framing, apply
+the SPEC §10.9 four-criterion validity predicate, decide
+outcome per the three SPEC §10.11 alternatives.
+
+**Outcome: methodology_unresolved per SPEC §10.11.** 0/7
+anchor signals satisfy all four reliable-alignment criteria.
+The methodology cannot characterize gaussian-kernel
+non-impulse response at unity pitch with the current
+comparison surfaces (raw BRR decode tile vs SPC oracle
+render). **M5.3 pre-emphasis preset evaluation is SKIPPED;
+defers permanently to M6+** unless a future milestone
+introduces fundamentally different characterization
+methodology that can clear the four-criterion predicate.
+**M5.2.1 correction budget NOT burned** — the limitation is
+structural under the current comparison-surface design, not
+a clear-cause implementation bug.
+
+### M5.2 strategy
+
+Phase A re-ran `sfcwc characterize-gaussian` (release build)
+and confirmed byte-identity against M5.1 Phase E across every
+measurement field and top-level value: zero measurement-row
+mismatches; `schema_version` / `fixture_set` /
+`alignment_search_limit` / `alignment_valid` / `harness_meta`
+/ `summary` / `tool` all match exactly. Runtime: 0.605 s (vs
+M5.1's 0.539 s; ~12% system jitter; both well under
+M5.0-locked 5 s target / 10 s warning).
+
+Phase B locked 74 documentary snapshots in `baselines/m5.json`
+mirroring the M4.2 surface shape with M5.2 framing: 72
+`M5_2_GAUSSIAN_*_<SIGNAL>` per-signal entries (8 fields × 9
+signals) + 1 `M5_2_CHARACTERIZATION_SUMMARY` (`decision_summary`
+kind, carries the harness_meta block + anchor rollups +
+validity-per-criterion counts + decision outcome) + 1
+`M5_2_RESIDUAL_DIVERGENCE_HYPOTHESIS` (`investigation_result`
+kind, formalizes the M5.1 inferential closure).
+
+Phase C applied the SPEC §10.9 four-criterion predicate to
+the 7 monotonicity-anchor signals:
+
+| Criterion | Anchor pass count | Detail |
+|---|---|---|
+| 1. `zcr_ratio ∈ [0.9, 1.1]` | 1/7 | `harmonic_16_cycle_64` only |
+| 2. `normalized_correlation ≥ 0.90` | 1/7 | `harmonic_16_cycle_64` only |
+| 3. `offset_in_range < 256` | 7/7 | universal pass under M4.1 expanded search range |
+| 4. `gain_separator_ok ≤ 80%` | **0/7** | universal fail (peak_after_norm ≈ peak_err for every anchor) |
+| **All four pass** | **0/7** | criterion 4 alone forces failure on every anchor |
+
+Phase E adopted Path 1 (inferential closure) per brief
+recommendation. The M5.1 STATUS argument is formalized as
+the `M5_2_RESIDUAL_DIVERGENCE_HYPOTHESIS` baseline entry.
+Empirical confirmation via Path 2 (~30-line state-carrying
+decode helper) is deferred to M6+ as its result is
+predictable from the algebraic argument: `force_filter_0_loop_entry: true`
+on every M3.5 canonical atom zeroes the BRR decoder state
+at each loop boundary, so a three-way comparison's (1) raw
+tiled no-state and (2) raw-with-state-carry produce
+byte-identical PCM. The residual (1)/(2)-vs-(3) divergence
+narrows to **S-DSP gaussian 4-tap kernel non-impulse
+response at unity pitch** — the only remaining candidate
+after the inferential closure eliminates BRR-predictor/loop-
+state.
+
+### M5.2 phase log
+
+- **Phase A** — re-run characterization (release build,
+  oracle from
+  `tools/snes_spc_oracle/build/Release/snes_spc_oracle.exe`).
+  Diff vs M5.1 Phase E: 0 measurement mismatches across 9
+  signals; all top-level fields match. Runtime 0.605 s.
+- **Phase B (commit `58e87a5`)** — 74 documentary snapshots
+  locked in `baselines/m5.json`. 9 `alignment_offset` + 18
+  `gain_delta_db` + 45 `metric_value` + 1 `decision_summary`
+  + 1 `investigation_result`. UTF-8 encoding preserved.
+- **Phase C** — SPEC §10.9 four-criterion predicate applied;
+  0/7 anchors pass all four. Counts encoded in
+  `M5_2_CHARACTERIZATION_SUMMARY.value.anchor_validity_per_criterion`.
+- **Phase D** — `methodology_unresolved` adopted; `M5.3`
+  pre-emphasis SKIPPED; defers permanently to M6+.
+- **Phase E** — Path 1 inferential closure formalized in
+  `M5_2_RESIDUAL_DIVERGENCE_HYPOTHESIS`. No code change. Path
+  2 deferred to M6+.
+- **Phase F (this entry)** — STATUS rewrite.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` all green. **617 tests
+  workspace-wide** (unchanged from M5.1 close; M5.2 is
+  data + docs only, no new code).
+
+### Decisions log additions (M5.2)
+
+- M5.2 characterization re-run: byte-identical to M5.1 Phase
+  E (which was byte-identical to M4.2). Locks 74 documentary
+  snapshots under corrected-mechanism framing.
+- SPEC §10.9 four-criterion predicate: 0/7 anchors satisfy
+  all four; `alignment_valid = false`; `recommended_next =
+  methodology_unresolved`.
+- **Decision: outcome `methodology_unresolved` per SPEC
+  §10.11.** Pre-emphasis preset evaluation (M5.3) SKIPPED
+  entirely; defers permanently to M6+ unless a future
+  milestone introduces a fundamentally different
+  characterization methodology.
+- M5.2.1 correction budget **not burned** — no clear-cause
+  implementation bug exists; the methodology limitation is
+  structural under the current comparison-surface design.
+- Three-way comparison Path 1 (inferential closure) adopted
+  and formalized as `M5_2_RESIDUAL_DIVERGENCE_HYPOTHESIS`.
+- Refined residual hypothesis: **S-DSP gaussian 4-tap kernel
+  non-impulse response at unity pitch** is the only remaining
+  candidate after the M5.1 inferential closure eliminated
+  BRR-predictor/loop-state for atoms with
+  `force_filter_0_loop_entry: true`.
+- **M5 trajectory:** M5.3 skipped; **M5.4 BRR noise-floor
+  strategy spike** becomes the next substantive work. M5 still
+  produces a tagged release (`v0.5-rc1`) per consultant M5
+  plan #33 — a trustworthy negative methodology result is
+  valuable project progress.
+- All M3.3 phase rotation, M2/M3/M4 acceptance, and 11 atom
+  PCM SHA identity tests pass unchanged.
+
+**Next pass: M5.4 — BRR noise-floor strategy spike.**
+Per consultant M5 plan #29. With pre-emphasis off the table,
+the remaining productive substantive work is investigating
+BRR encoder noise-floor compensation strategies (source-domain
+attenuation per SPEC §16.9.1 amendment procedure, OR shift-13–15
+exploration, OR something else outside the current SPEC).
+M5.5 GUI/schema polish + M5.6 acceptance/release follow. PM to
+brief.
+
+**Previous milestone (M5.1) — Native-rate characterization harness
 verification + investigation.** First M5 research-spike per
 SPEC §24.1.1 (M5's tightened 1+1 budget; M5.1 occupies the
 main loop, M5.2.1 reserves the conditional correction slot).
@@ -236,13 +371,6 @@ argument establishes. Per the M5.1 brief's feasibility caveat
 - **M5.2.1 conditional correction slot remains unburned.**
   M5 repair budget is 1+1; M5.1 is loop 1, M5.2.1 is the
   conditional loop 2 if M5.2 surfaces a clear-cause fix.
-
-**Next pass: M5.2 — Characterization re-run + decision.**
-Research-spike per SPEC §24.1.1. Three locked outcomes per
-SPEC §10.11: `reliable_preset_eval`, `reliable_no_preset_needed`,
-`methodology_unresolved`. Refined M5.1 hypothesis space:
-gaussian-kernel non-impulse response at unity pitch is the
-primary M4.2-divergence candidate. PM to brief.
 
 **Previous milestone (M5.0) — M5 Contracts Freeze.** No implementation. Contracts
 only. Same shape as M2.0 / M3.0 / M4.0: lock the contracts
