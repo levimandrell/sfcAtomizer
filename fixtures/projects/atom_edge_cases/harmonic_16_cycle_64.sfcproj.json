@@ -1,0 +1,69 @@
+{
+  "schema_version": 2,
+  "project": {
+    "name": "harmonic_16_cycle_64",
+    "tick_rate_hz": 60
+  },
+  "driver": {
+    "profile": "multi_voice_atom",
+    "bytecode_version": 2
+  },
+  "master_echo": {
+    "enabled": false,
+    "edl": 0,
+    "efb": 0,
+    "evol_l": 0,
+    "evol_r": 0,
+    "fir": [127, 0, 0, 0, 0, 0, 0, 0]
+  },
+  "sample_pool": [],
+  "atom_pool": [
+    {
+      "id": "harmonic_16_cycle_64",
+      "name": "harmonic_16_cycle_64",
+      "kind": "additive_single_cycle_v0",
+      "root_midi_note": 60,
+      "cycle_len_samples": 64,
+      "amplitude": 1.0,
+      "partials": [
+        { "harmonic": 16, "amplitude": 1.0, "phase_cycles": 0.0 }
+      ],
+      "render": {
+        "normalize": true,
+        "force_filter_0_first_block": true,
+        "force_filter_0_loop_entry": true
+      },
+      "playback": {
+        "volume": 1.0,
+        "pan": 0.0,
+        "echo": false,
+        "envelope": { "type": "gain_raw", "gain_byte": 127 }
+      }
+    }
+  ],
+  "atom_sequences": [
+    {
+      "id": "atomseq_0001",
+      "name": "harmonic_16_demo",
+      "voice": 0,
+      "steps": [
+        {
+          "atom_id": "harmonic_16_cycle_64",
+          "duration_ticks": 120,
+          "target_volume": 0.8,
+          "transition": { "type": "initial_kon" }
+        }
+      ],
+      "loop": false
+    }
+  ],
+  "tracks": [
+    {
+      "id": "track_atom_0",
+      "voice": 0,
+      "kind": "atom_sequence",
+      "atom_sequence_id": "atomseq_0001"
+    }
+  ],
+  "m2": { "active_sequence_id": "atomseq_0001" }
+}
