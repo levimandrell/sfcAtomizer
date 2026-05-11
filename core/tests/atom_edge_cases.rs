@@ -26,8 +26,11 @@
 //! identity-gated and MUST NOT shift across M3+.
 
 use sfc_atomizer_core::atom::{
-    render_to_brr, AtomBrrOutput, AtomKind, AtomPartial, AtomRenderOptions, AtomSlot,
+    render_to_brr, render_to_pcm, AtomBrrOutput, AtomKind, AtomPartial, AtomRenderOptions, AtomSlot,
 };
+use sfc_atomizer_core::audition::write_pcm16_mono_wav_pub;
+use sfc_atomizer_core::brr::{decode_blocks, BrrDecoderState};
+use sfc_atomizer_core::brr_encoder::{encode_looped, EncodeOptions};
 use sfc_atomizer_core::project::{Envelope, SamplePlayback};
 
 fn base(cycle: u16) -> AtomSlot {
@@ -202,6 +205,145 @@ fn all_fixtures() -> Vec<(&'static str, AtomSlot)> {
 }
 
 // ---------------------------------------------------------------- helpers
+
+/// **M3.5 prelude (consultant M3.3 audit #16) — A/B audition WAVs.**
+///
+/// Emits 10 WAV files (5 fixtures × pre/post phase rotation) into
+/// `build/audition/m3.5-prelude/`. PM auditions these before
+/// signing off on Phase 3 characterization.
+///
+/// Each WAV: 16-bit mono PCM, 32 kHz, ~3 s of decoded-BRR PCM
+/// (looped at the cycle boundary).
+///
+/// - **pre-rotation** = `encode_looped(source_pcm, 0, opts)` →
+///   `decode_blocks(brr)` (M2.2-era encoder path, no rotation).
+/// - **post-rotation** = `render_to_brr(atom)` → `decode_blocks(out.brr_bytes)`
+///   (M3.3 lex-objective rotation path).
+///
+/// Run with:
+///
+/// ```text
+/// cargo test -p sfc-atomizer-core --test atom_edge_cases \
+///     m3_5_emit_audition_wavs -- --nocapture --ignored
+/// ```
+///
+/// WAVs land under `build/` which is gitignored — emit and audition
+/// out of band; do not commit.
+#[test]
+#[ignore]
+fn m3_5_emit_audition_wavs() {
+    // `cargo test` sets CWD to the crate dir; resolve relative to
+    // workspace root so the WAVs land under
+    // `<repo>/build/audition/m3.5-prelude/` as the brief specifies.
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let out_dir = manifest_dir
+        .parent()
+        .expect("crate dir has a parent (workspace root)")
+        .join("build")
+        .join("audition")
+        .join("m3.5-prelude");
+    std::fs::create_dir_all(&out_dir).expect("create build/audition/m3.5-prelude");
+
+    let fixtures: &[(&str, AtomSlot)] = &[
+        ("sine_128", base(128)),
+        ("sine_64", base(64)),
+        ("harmonic_16_cycle_64", fixture_harmonic_16_cycle_64()),
+        (
+            "normalize_false_clamp",
+            fixture_normalize_false_multi_partial_clamp_safety(),
+        ),
+        (
+            "all_8_partials",
+            fixture_all_8_partials_max_amp_harmonics_1_to_8(),
+        ),
+    ];
+
+    const SAMPLE_RATE_HZ: u32 = 32_000;
+    const TARGET_SAMPLES: usize = 96_000; // 3.0 s at 32 kHz
+
+    for (label, atom) in fixtures {
+        // Source PCM (identical for both branches; identity-gated
+        // per SPEC §16.9).
+        let source = render_to_pcm(atom);
+
+        // ----- pre-rotation: encode at offset=0 directly.
+        let opts = EncodeOptions {
+            force_filter_0_first_block: atom.render.force_filter_0_first_block,
+            loop_entry_block_index: Some(0),
+        };
+        let pre_brr = encode_looped(&source, 0, &opts)
+            .expect("encode_looped infallible at loop_start=0")
+            .bytes;
+        let pre_blocks: Vec<[u8; 9]> = pre_brr
+            .chunks_exact(9)
+            .map(|c| {
+                let mut b = [0u8; 9];
+                b.copy_from_slice(c);
+                b
+            })
+            .collect();
+        let mut pre_state = BrrDecoderState::default();
+        let pre_decoded = decode_blocks(&pre_blocks, &mut pre_state);
+
+        // ----- post-rotation: full render_to_brr path.
+        let post = render_to_brr(atom).expect("render_to_brr");
+        let post_blocks: Vec<[u8; 9]> = post
+            .brr_bytes
+            .chunks_exact(9)
+            .map(|c| {
+                let mut b = [0u8; 9];
+                b.copy_from_slice(c);
+                b
+            })
+            .collect();
+        let mut post_state = BrrDecoderState::default();
+        let post_decoded = decode_blocks(&post_blocks, &mut post_state);
+
+        // Loop each to ~3 s at 32 kHz.
+        let pre_looped = loop_to_length(&pre_decoded, TARGET_SAMPLES);
+        let post_looped = loop_to_length(&post_decoded, TARGET_SAMPLES);
+
+        let pre_path = out_dir.join(format!("{label}_pre_rotation.wav"));
+        let post_path = out_dir.join(format!("{label}_post_rotation.wav"));
+        write_pcm16_mono_wav_pub(&pre_path, &pre_looped, SAMPLE_RATE_HZ)
+            .expect("write pre-rotation WAV");
+        write_pcm16_mono_wav_pub(&post_path, &post_looped, SAMPLE_RATE_HZ)
+            .expect("write post-rotation WAV");
+
+        eprintln!(
+            "{}: cycle={}, rotation_offset(post)={}, pre_loop_click={}, post_loop_click={}",
+            label,
+            source.len(),
+            post.rotation_offset,
+            crate_loop_click_abs(&pre_decoded),
+            post.loop_click_abs,
+        );
+    }
+
+    eprintln!("WAVs written under build/audition/m3.5-prelude/");
+}
+
+fn loop_to_length(cycle: &[i16], target_len: usize) -> Vec<i16> {
+    let mut out = Vec::with_capacity(target_len);
+    while out.len() < target_len {
+        let remaining = target_len - out.len();
+        if remaining >= cycle.len() {
+            out.extend_from_slice(cycle);
+        } else {
+            out.extend_from_slice(&cycle[..remaining]);
+        }
+    }
+    out
+}
+
+fn crate_loop_click_abs(decoded: &[i16]) -> i32 {
+    if decoded.is_empty() {
+        return 0;
+    }
+    let a = decoded[0] as i32;
+    let b = decoded[decoded.len() - 1] as i32;
+    (a - b).abs()
+}
 
 /// Sentinel that prints every fixture's M3.2-pinned values. Run
 /// with `cargo test -p sfc-atomizer-core --test atom_edge_cases
