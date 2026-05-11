@@ -2633,3 +2633,102 @@ methodology audit have a stable forward reference.
    pattern). M3 acceptance becomes the M4 stage-1 regression
    gate the same way M2 acceptance is the M3 stage-1 gate.
 
+### 24.1 M4 research-spike exit criteria (locked at M4.0)
+
+M4 contains research passes with genuine uncertainty. Each
+research-spike sub-pass ships with explicit exit criteria;
+"no production change" is an acceptable outcome.
+
+**M4.1 + M4.2 + M4.2.1 — Methodology repair budget.**
+Alignment fix at M4.1; characterization re-run at M4.2; AT
+MOST ONE correction iteration M4.2.1 if a clear bug emerges.
+If alignment remains anomalous after this budget — any
+monotonicity-anchor signal still violates the four
+reliable-alignment criteria from §10.9 — characterization
+is declared unreliable and pre-emphasis defers to M5+. M4
+proceeds to M4.3 BRR noise-floor work without expecting
+characterization-driven decisions.
+
+**M4.3 — Contracted implementation, not a research-spike.**
+Wire the four §10.10 noise-floor metrics through the
+`render_to_brr` path and the gaussian characterization report
+so M4.4 has measurements to act on. No exit criteria; lands as
+a normal implementation pass.
+
+**M4.4 — Encoder improvement spike exit criterion.** Ship a
+production encoder change ONLY IF all of:
+
+- `≥ 10%` improvement on `rms_raw_vs_source` OR
+  `peak_abs_raw_vs_source` on at least one canonical / edge
+  fixture, AND
+- no fixture's `loop_click_abs` worsens (M3.3 improvement gate
+  retained), AND
+- no M2 behavioral gate regresses (audibility, silence,
+  source-step ratio, module cap), AND
+- encode runtime stays within `2×` the M3.3 phase-rotation
+  baseline.
+
+If not met, M4.4 produces a documentary report ("BRR encoder
+near local optimum under current constraints; no production
+change") and M4 proceeds to M4.5.
+
+**M4.5 — Conditional pre-emphasis evaluation.** Runs ONLY if
+M4.2 yields VALID measurements (`alignment_valid: true`; all
+four reliable-alignment criteria met for every anchor). If
+M4.2 declares characterization unreliable, M4.5 is SKIPPED
+entirely. M4.5 produces a reports-only assessment first;
+production integration only if all four decision-rule
+conditions from §10.9 (the Phase 0C original four plus the
+M3.5.1 precondition #0) pass against the proposed preset.
+
+**M4.6 — GUI / schema polish.** Runs unconditionally;
+independent of research-spike outcomes.
+
+**M4.7 — Acceptance + release.** Runs unconditionally at end;
+extends the M3.8 `m3-acceptance` pattern with M4-specific
+stages. Tags `v0.4-rc1` only after the integrity audit signs
+off per the M2/M3 lessons.
+
+### 24.2 M4 baseline shift rules (locked at M4.0)
+
+**Must NOT shift across M4 (regression if they do):**
+
+- All M1/M2 driver and loader identity baselines
+  (`M1_LOADER_SHA256`, `M1_DRIVER_CODE_SHA256`, the canonical
+  SEQ2 bytecode SHA, the canonical voice setup table SHA, the
+  canonical sequence `total_ticks = 249` and
+  `total_elapsed_ticks = 254`).
+- All 11 atom PCM SHAs in
+  `baselines/m3.json::identity_gated` (SPEC §16.9 atom PCM
+  stability amendment).
+- M2 behavioral gates: audibility floors (`max_abs ≥ 1000`,
+  `rms ≥ 200`), silence ceiling (`max_abs ≤ 50` on hard-panned
+  silent channel), source-step ZCR ratio (`≥ 1.5×`), 32 KiB
+  module cap.
+
+**Expected to shift at M4 (intentional encoder changes):**
+
+- All atom BRR SHAs (`*_PHASE_ROTATION` documentary snapshots
+  from M3.3) — IF M4.4 ships a production encoder change.
+- All decoded-BRR PCM SHAs
+  (`*_DECODED_BRR_PCM_SHA256_PHASE_ROTATION`) — same surface.
+- All `loop_click_abs` post-rotation values — IF M4.4 changes
+  encoder strategy. If only metric wiring (M4.3) or methodology
+  fix (M4.1 / M4.2) happens, `loop_click_abs` stays.
+- All `rms_raw_vs_source` and `peak_abs_raw_vs_source` values —
+  these are new M4 metrics, populated at M4.3.
+- Gaussian characterization snapshots after M4.1 alignment fix:
+  `zcr_ratio`, `normalized_correlation`, `gain_delta_db` curve
+  all shift to reflect reliable measurement. The pre-M4 M3.5.1
+  measurements stay in `baselines/m3.json::documentary_snapshot`
+  as a historical reference.
+
+**M4 identity-gated baseline rule (carried from M2.8.1 per
+consultant M4 plan #14).** Every new `identity_gated` baseline
+added to `baselines/m4.json` ships with a test that parses the
+baseline file via `include_str!` + `serde-parse` and asserts
+the generated value matches. No exception. The M3.8
+`m3-acceptance` stage-5 "baselines integrity" check enforces
+this at runtime for M3 entries; an analogous check will land
+in the M4.7 `m4-acceptance` bundle.
+
