@@ -144,7 +144,7 @@ fn signal_normalize_false_clamp() -> TestSignal {
 
 /// The full `m3_5_canonical` signal set per SPEC §10.9 (M3.5).
 ///
-/// Ten signals: three sines (cycle_64/128/256) as frequency-response
+/// Nine signals: three sines (cycle_64/128/256) as frequency-response
 /// anchors, four cycle_64 harmonics (2/4/8/16) as gain-curve probes,
 /// one full partial-bank atom, and one clipping-stress reference.
 pub fn m3_5_canonical_signals() -> Vec<TestSignal> {
@@ -988,7 +988,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signal_set_has_ten_signals() {
+    fn signal_set_has_nine_signals() {
         let s = m3_5_canonical_signals();
         assert_eq!(s.len(), 9);
         let names: Vec<&str> = s.iter().map(|t| t.name).collect();
