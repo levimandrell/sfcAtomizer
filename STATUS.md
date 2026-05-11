@@ -2,14 +2,193 @@
 
 ## Current milestone
 
-**M4.1 — Alignment search range expansion.** First M4
-research-spike per SPEC §24.1. Mechanically lands the
-alignment-search fix locked at M4.0 (SPEC §10.9 amendment):
-`align_oracle_to_raw` now uses per-signal
-`max_offset = signal.atom.cycle_len_samples` (was hard-coded
-to 32 at M3.5.1). Plus the schema v4 alignment fields and
-the reliable-alignment validity predicate. No encoder change;
-no atom PCM change; no M2/M3 baseline change.
+**M4.2 — Characterization re-run with reliable alignment.**
+Second M4 research-spike per SPEC §24.1 (methodology repair
+budget loop 2 of 2). Runs the M4.1 alignment plumbing
+end-to-end against `m3_5_canonical`; investigates the
+persistent `zcr_ratio` doubling that alignment alone couldn't
+fix; decides M4 trajectory. No encoder change; no atom PCM
+change; no M2/M3 baseline change.
+
+**Outcome: Phase D outcome 3 — pre-emphasis defers
+permanently to M5+.** All 7 monotonicity-anchor signals fail
+at least one of the four SPEC §10.9 reliable-alignment
+criteria (criterion 4, `gain_separator_ok`, fails universally
+across all 9 signals including `harmonic_16_cycle_64` which
+otherwise passes ZCR + correlation). Phase C investigation
+identified the cause as **intrinsic to the SPC playback
+pipeline**, not a fixable methodology bug. M4.2.1 correction
+budget was NOT burned because no clear-cause fix exists for
+this characterization comparison. **M4.5 conditional
+pre-emphasis evaluation is now SKIPPED.** M4 proceeds to M4.3
+BRR noise-floor measurement without expecting
+characterization-driven decisions.
+
+### M4.2 characterization data (locked as documentary)
+
+```
+schema_version: 4
+alignment_search_limit: 256
+alignment_boundary_hit: false
+alignment_valid: false
+methodology_precondition_passed: false
+recommended_next: methodology_review
+runtime: 0.566 s (release build, 9 signals)
+```
+
+| Signal | f (Hz) | align_off | corr | zcr_ratio | gain_db | peak_err | peak_after_norm | validity |
+|---|---|---|---|---|---|---|---|---|
+| sine_cycle_64 | 500 | 55 | 0.153 | 1.93 | +2.657 | 39053 | 33080 | fail (zcr, corr, gain) |
+| sine_cycle_128 | 250 | 55 | 0.147 | 1.93 | +2.675 | 39053 | 33043 | fail (zcr, corr, gain) |
+| sine_cycle_256 | 125 | 55 | 0.117 | 1.94 | +2.679 | 39053 | 33034 | fail (zcr, corr, gain) |
+| harmonic_2_cycle_64 | 1000 | 55 | 0.274 | 2.58 | +2.589 | 39053 | 33210 | fail (zcr, corr, gain) |
+| harmonic_4_cycle_64 | 2000 | 7 | 0.492 | 2.20 | +2.334 | 39053 | 33710 | fail (zcr, corr, gain) |
+| harmonic_8_cycle_64 | 4000 | 7 | 0.598 | 2.06 | +1.593 | 39053 | 35253 | fail (zcr, corr, gain) |
+| harmonic_16_cycle_64 | 8000 | 63 | **0.984** | **1.00** | -1.223 | 16384 | 16384 | fail (gain only) |
+| all_8_partials | 250 | 40 | 0.613 | 0.97 | +2.534 | 35493 | 30107 | fail (corr, gain) |
+| normalize_false_clamp | 250 | 40 | 0.597 | 1.55 | +2.456 | 39053 | 33463 | fail (zcr, corr, gain) |
+
+**Pass/fail tallies across the 7 anchors:**
+- `zcr_in_band ∈ [0.9, 1.1]`: 1/7 pass (`harmonic_16` only).
+- `correlation ≥ 0.90`: 1/7 pass (`harmonic_16` only).
+- `offset_in_range < 256`: 7/7 pass.
+- `gain_separator ≤ 80% of peak_err`: 0/7 pass.
+
+74 new `M4_2_GAUSSIAN_*` documentary_snapshot entries in
+`baselines/m4.json` (8 fields × 9 signals + 2 summary entries).
+
+### Phase C zcr_ratio doubling investigation
+
+Three concrete hypotheses tested.
+
+- **Test 1 — sample-rate doubling.** RULED OUT.
+  `raw_pcm_length == oracle_pcm_length == 16000 mono samples`
+  for every signal. Oracle invocation confirms
+  `sample_rate_hz: 32000, channels: 2, frames_rendered: 16000`
+  per the oracle-side report.
+- **Test 2 — waveform shape inspection.** ROOT CAUSE FOUND.
+  Dumped oracle output for `sine_cycle_128` to
+  `build/m4.2-zcr-debug/sine_cycle_128_first200.txt`
+  (gitignored). Findings:
+  - First **568 samples are pure silence** (SPC startup
+    transient — the M2 driver's key-on cycle takes that long
+    to drive the voice's GAIN register up to the configured
+    127 byte).
+  - Once the voice plays, the waveform is **not a sine**.
+    It's an alternating-amplitude plateau pattern: ~10
+    samples flat at +19853, descent through 0 to flat at
+    -22182, **discontinuous jump** to +22669, ~40 samples
+    flat at +22669, descent through 0 to flat at -19341,
+    discontinuous jump back to +19853, repeat.
+  - Each discontinuous jump from negative to positive (or
+    vice versa) crosses zero, adding **2 zero crossings per
+    fundamental cycle beyond a clean sine** → `zcr_ratio ≈ 2`
+    for the low/mid-frequency anchors.
+- **Test 3 — oracle invocation review.** RULED OUT.
+  `cmd_characterize_gaussian` spawns the oracle with
+  `--frames`, `--input-spc`, `--output-pcm`, `--report` —
+  no sample-rate or channel flags that could alter output
+  shape. The oracle's own report confirms 32 kHz stereo
+  s16le at the requested frame count.
+
+**Root cause identified.** The shape divergence is intrinsic
+to the SPC playback path. The atom is a 128-sample cycle
+played at MIDI 60 (`= 261.63 Hz` fundamental); the atom's
+native sample rate for `cycle_len = 128` is
+`128 × 261.63 ≈ 33489 Hz`. The SPC plays at the project's
+32 kHz master rate, so the DSP pitch register fractionally
+steps through input samples per output sample. Combined with
+BRR quantization (15-bit decode range ±16384) and gaussian
+4-tap interpolation, this produces the alternating-amplitude
+shape — the gaussian kernel's center-weight overshoots when
+the fractional accumulator lands near a BRR-decoded sample's
+peak, then averages down when between samples.
+
+**Why M4.2.1 correction was NOT burned.** A "clear-cause fix"
+in the consultant-#16 sense would be an oracle-side or
+methodology-pipeline bug. The discovered cause is a
+methodological mismatch: the characterization compares
+"raw BRR decode tile-repeated at 1:1 sample alignment"
+against "SPC pitch-shifted DSP-gaussian playback". These are
+**different physical processes**; the shape divergence is
+real, not artifact. A cleaner methodology would align the
+project sample rate with each atom's native rate (so pitch
+register = `0x1000`, no fractional stepping), but that's a
+fundamentally different characterization design — far beyond
+M4.2.1 scope. Per consultant M4 plan #16, the M4.2.1 budget
+is reserved for clear-cause fixes; this finding doesn't
+qualify.
+
+### M4.2 phase log
+
+- **Phase A** — fresh release-build characterization run.
+  Captured full schema v4 report at
+  `build/m3/characterize_gaussian.json` (gitignored). 9
+  signals processed in 0.566 s.
+- **Phase B (commit `d8e74cd`)** — `baselines/m4.json` gains
+  74 `M4_2_*` documentary_snapshot entries + summary +
+  Phase C root-cause record.
+- **Phase C** — three hypothesis tests run on
+  `sine_cycle_128`. Test 1 + Test 3 ruled out. Test 2
+  identified intrinsic SPC-playback artifact. Diagnostic
+  sample dump at `build/m4.2-zcr-debug/` (gitignored).
+- **Phase D** — applied the SPEC §10.9 four-criterion
+  validity predicate to all 7 anchors. 0/7 satisfy all four
+  criteria; criterion 4 (`gain_separator_ok`) fails on all
+  9 signals. Decision: outcome 3 — pre-emphasis defers
+  permanently to M5+.
+- **Phase E (this entry)** — STATUS rewrite.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **604 tests
+  workspace-wide** (unchanged from M4.1; M4.2 is data + docs
+  only, no new code).
+
+### Decisions log additions (M4.2)
+
+- M4.2 characterization re-run executed under M4.1's expanded
+  alignment search range. 0/9 signals satisfy the
+  reliable-alignment predicate; 1/7 anchors satisfy 3 of 4
+  criteria (`harmonic_16_cycle_64` — fails only criterion 4).
+- Phase C zcr_ratio investigation: 3 hypotheses tested in 1
+  hour combined. Test 1 (sample-rate doubling) + Test 3
+  (oracle invocation) ruled out. Test 2 (waveform shape)
+  identified the cause as intrinsic SPC playback artifact
+  (BRR quant + non-native-pitch fractional stepping +
+  gaussian) — not a methodology bug.
+- **Decision: outcome 3 per Phase D.** Pre-emphasis preset
+  implementation (M4.5) defers permanently to M5+ per
+  consultant M4 plan #16. M4.5 will be SKIPPED at its time.
+- M4.2.1 correction iteration was **not burned**: the
+  Phase C finding is a methodological-design issue, not a
+  clear-cause bug fixable inside the 2-loop repair budget.
+  Per SPEC §24.1, M4 proceeds to M4.3 (BRR noise-floor) and
+  M4.6 (GUI polish) without expecting characterization-driven
+  decisions.
+- All 11 atom PCM SHA identity tests pass unchanged
+  (SPEC §16.9 atom PCM stability preserved).
+- All M2 / M3 identity / behavior baselines unchanged.
+- M5+ scope: revisit the characterization methodology by
+  aligning project sample rate with each atom's native rate
+  (eliminates pitch-register fractional stepping). Outside
+  M4 scope per SPEC §24.
+
+**Next pass: M4.3 — BRR noise-floor measurement.** Contracted
+implementation pass per SPEC §24.1. Wires the four SPEC §10.10
+noise-floor metric helpers (locked at M4.0, formula-pinned in
+`core/tests/brr_noise_floor_metric.rs`) through the
+`render_to_brr` path. Populates per-fixture documentary
+snapshots. No decision criterion — pure measurement layer.
+M4.4 acts on the data. PM to brief.
+
+**Previous milestone (M4.1) — Alignment search range
+expansion.** First M4 research-spike per SPEC §24.1.
+Mechanically lands the alignment-search fix locked at M4.0
+(SPEC §10.9 amendment): `align_oracle_to_raw` now uses
+per-signal `max_offset = signal.atom.cycle_len_samples` (was
+hard-coded to 32 at M3.5.1). Plus the schema v4 alignment
+fields and the reliable-alignment validity predicate. No
+encoder change; no atom PCM change; no M2/M3 baseline change.
 
 **Outcomes:**
 
@@ -879,15 +1058,27 @@ PM go/defer decision at M3.4 entry brief.
 
 ## Last pass
 
+**Pass M4.2 — Characterization re-run with reliable alignment
+(Phases A–E).** Second M4 research-spike. Detail folded into
+"Current milestone" above. Two commits: 74 `M4_2_*` documentary
+baselines populated from the M4.1-aligned characterization run,
+plus STATUS. Phase C zcr_ratio doubling investigation identified
+the cause as intrinsic SPC playback (BRR + non-native pitch +
+gaussian) — not a fixable methodology bug. M4.2.1 budget NOT
+burned. **Outcome 3:** pre-emphasis defers permanently to M5+;
+M4.5 will be SKIPPED. M4 proceeds to M4.3 BRR noise-floor work.
+
+---
+
 **Pass M4.1 — Alignment search range expansion (Phases A–E).**
-First M4 research-spike. Detail folded into "Current milestone"
-above. Five commits: per-signal `max_offset = cycle_len_samples`
-plumbing, schema v4 alignment fields + reliable-alignment
-validity predicate, CLI wiring for the four top-level alignment
-fields, 11 fixture tests, STATUS rewrite. Workspace test
-count 593 → 604. Informal characterization run captured
-(unchanged `recommended_next = methodology_review` — alignment
-fix is necessary but not sufficient; M4.2 decides next step).
+First M4 research-spike. Five commits: per-signal
+`max_offset = cycle_len_samples` plumbing, schema v4
+alignment fields + reliable-alignment validity predicate,
+CLI wiring for the four top-level alignment fields, 11
+fixture tests, STATUS rewrite. Workspace test count 593 → 604.
+Informal characterization run captured (unchanged
+`recommended_next = methodology_review` — alignment fix is
+necessary but not sufficient; M4.2 confirmed).
 
 ---
 
