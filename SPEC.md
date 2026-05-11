@@ -2086,6 +2086,59 @@ the encoder consumes.
 - `transition`: first step must be `initial_kon`; subsequent steps must be `fade_to_zero_retrigger` in M2.
 - Echo rules unchanged from v1: per-sample `playback.echo=true` requires `master_echo.enabled=true`.
 
+### 16.9.1 Procedure for amending atom PCM stability (forward visibility, locked at M5.0 per consultant M5 plan #11)
+
+Atom PCM stability is the project's strongest regression guard
+since M2.8.1. The 11 atom PCM SHAs in
+`baselines/m3.json::identity_gated` have not shifted across
+M3.0–M4.7; the atom render formula (single-cycle additive
+synth, normalize, round-half-away-from-zero) is the
+identity-pinned surface that pre-emphasis (§10.9), phase
+rotation (§10.7), and the BRR encoder (§10.10) all operate
+as encoder-side transient transformations relative to.
+
+**Reopening §16.9 requires explicit milestone-level
+authorization** and these six steps:
+
+1. **Authorization gate.** A dedicated sub-pass (e.g. "M5.X
+   §16.9 amendment") is briefed with explicit PM approval.
+   The brief documents the measured benefit that motivates
+   the amendment AND explains why the benefit cannot be
+   achieved as an encoder-side transient transformation
+   (pre-emphasis, rotation, etc.).
+
+2. **Old SHA retirement.** All 11 M3 atom PCM identity-gated
+   SHAs are moved from `baselines/m3.json::identity_gated`
+   to a new `retired` array with `retired_at: "M5.X"` and
+   the amendment commit reference.
+
+3. **New SHA pinning.** The post-amendment atom PCM SHAs are
+   pinned in `baselines/m5.json::identity_gated` (M5
+   surface, not M3), each with literal-pin tests per the
+   M2.8.1 pattern (`include_str!` + serde-parse +
+   `assert_eq!`).
+
+4. **Acceptance regression.** `m2-acceptance`,
+   `m3-acceptance`, and `m4-acceptance` must all pass against
+   the post-amendment atoms. Behavioral gates (audibility,
+   silence, source-step ratio, module cap) must hold.
+
+5. **Release-note warning.** `RELEASE_NOTES_v0.5-rc.md` (or
+   wherever the amendment ships) contains a prominent section
+   titled "BREAKING: Render formula amended" explaining the
+   change.
+
+6. **Close-out audit.** A consultant audit pass verifies the
+   amendment integrity before the rc tag is published.
+
+**M5.0 does NOT activate this procedure.** It documents it as
+forward visibility. M5 default position: hold the §16.9 line;
+source-domain preprocessing defers to M6+ unless M5 measured
+data demands it AND PM authorizes the amendment per the steps
+above. Per consultant M5 plan #10, #19: schema and render
+formula stability is the strongest signal the project sends to
+downstream consumers; M5 inherits that posture by default.
+
 ### 16.10 Migration v1 → v2
 
 ```
