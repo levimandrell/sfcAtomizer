@@ -128,6 +128,24 @@ pub struct AtomBrrOutput {
     /// candidate (sqrt of mean squared `rotated_source - decoded`).
     /// Reports-only.
     pub rms_error_post_rotation: f64,
+    // M4.3 BRR encoder noise-floor metrics (SPEC §10.10). All four
+    // computed against the rotated source PCM (the encoder input
+    // per SPEC §10.7), not the pre-rotation original. Reports-only
+    // at M4.3; M4.4 may use them as the encoder-improvement-spike
+    // exit criterion.
+    /// SPEC §10.10: `max_i(|rotated_source[i] - decoded[i]|)`.
+    /// Same shape as `peak_abs_error_post_rotation` but named under
+    /// the §10.10 noise-floor contract.
+    pub peak_abs_raw_vs_source: i32,
+    /// SPEC §10.10: `sqrt(mean_i((rotated_source[i] - decoded[i])²))`.
+    pub rms_raw_vs_source: f64,
+    /// SPEC §10.10: `20 * log10(source_rms / rms_raw_vs_source)`.
+    /// `f64::INFINITY` when the encoder reproduced the source
+    /// exactly; `0.0` when the source is silent.
+    pub snr_db: f64,
+    /// SPEC §10.10: count of decoded samples with widened
+    /// `|x| ≥ 32767` (counts `±32767` and `-32768`).
+    pub clipping_count_raw: u32,
 }
 
 /// Render an atom's PCM cycle per SPEC §16.9 (single-cycle additive
@@ -354,6 +372,18 @@ pub fn render_to_brr(atom: &AtomSlot) -> Result<AtomBrrOutput, AtomRenderError> 
     let loop_window_rms_delta =
         crate::audition::loop_window_rms_delta(&best.decoded, 0, best.decoded.len(), 8);
 
+    // M4.3 SPEC §10.10 noise-floor metrics. Comparison source is the
+    // rotated source PCM per SPEC §10.7 (the encoder INPUT), not
+    // the pre-rotation original. peak_abs_raw_vs_source is the same
+    // value as best.peak_abs_error from the rotation lex objective —
+    // we recompute via the noise-floor helper so the §10.10 contract
+    // path is self-contained.
+    let peak_abs_raw_vs_source =
+        crate::audition::peak_abs_raw_vs_source(&best.rotated_source, &best.decoded);
+    let rms_raw_vs_source = crate::audition::rms_raw_vs_source(&best.rotated_source, &best.decoded);
+    let snr_db = crate::audition::snr_db(&best.rotated_source, &best.decoded);
+    let clipping_count_raw = crate::audition::clipping_count_raw(&best.decoded);
+
     Ok(AtomBrrOutput {
         pcm: source_pcm,
         brr_bytes: best.brr_bytes,
@@ -367,6 +397,10 @@ pub fn render_to_brr(atom: &AtomSlot) -> Result<AtomBrrOutput, AtomRenderError> 
         rotation_offset: best.offset,
         peak_abs_error_post_rotation: best.peak_abs_error,
         rms_error_post_rotation: best.rms_error,
+        peak_abs_raw_vs_source,
+        rms_raw_vs_source,
+        snr_db,
+        clipping_count_raw,
     })
 }
 

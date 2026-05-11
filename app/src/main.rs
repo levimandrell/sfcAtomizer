@@ -2656,6 +2656,10 @@ fn atom_render_report(atom: &AtomSlot, render: &AtomBrrOutput) -> AtomRenderRepo
         rotation_offset: render.rotation_offset,
         peak_abs_error_post_rotation: render.peak_abs_error_post_rotation,
         rms_error_post_rotation: render.rms_error_post_rotation,
+        peak_abs_raw_vs_source: render.peak_abs_raw_vs_source,
+        rms_raw_vs_source: render.rms_raw_vs_source,
+        snr_db: render.snr_db,
+        clipping_count_raw: render.clipping_count_raw,
     }
 }
 

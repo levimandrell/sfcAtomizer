@@ -788,6 +788,24 @@ pub struct AtomRenderReport {
     /// (sqrt of mean squared `rotated_source - decoded`). Reports-only.
     #[serde(default)]
     pub rms_error_post_rotation: f64,
+    /// M4.3 SPEC §10.10: BRR encoder noise-floor metrics. All four
+    /// computed against the rotated source PCM (the encoder INPUT
+    /// per SPEC §10.7). Same `#[serde(default)]` pattern so M3
+    /// reports parse unchanged into the M4 struct.
+    #[serde(default)]
+    pub peak_abs_raw_vs_source: i32,
+    /// SPEC §10.10: `sqrt(mean_i((rotated_source[i] - decoded[i])²))`.
+    #[serde(default)]
+    pub rms_raw_vs_source: f64,
+    /// SPEC §10.10: `20 * log10(source_rms / rms_raw_vs_source)`;
+    /// `+inf` for exact-encode, `0.0` for silent source.
+    #[serde(default)]
+    pub snr_db: f64,
+    /// SPEC §10.10: count of decoded samples at the i16 saturation
+    /// boundary (widened-i32 `|x| ≥ 32767`; counts `±32767` and
+    /// `-32768`).
+    #[serde(default)]
+    pub clipping_count_raw: u32,
 }
 
 impl AtomRenderReport {
@@ -2030,6 +2048,10 @@ mod tests {
             rotation_offset: 16,
             peak_abs_error_post_rotation: 512,
             rms_error_post_rotation: 123.456,
+            peak_abs_raw_vs_source: 512,
+            rms_raw_vs_source: 123.456,
+            snr_db: 42.0,
+            clipping_count_raw: 0,
         };
         round_trip(&r);
     }
@@ -2065,6 +2087,14 @@ mod tests {
             rotation_offset: 0,
             peak_abs_error_post_rotation: 0,
             rms_error_post_rotation: 0.0,
+            peak_abs_raw_vs_source: 0,
+            rms_raw_vs_source: 0.0,
+            // Use a finite SNR value here — `f64::INFINITY` is the
+            // SPEC §10.10 sentinel for exact-encode but serde_json
+            // serializes it as `null` which then deserializes as
+            // `0.0` (or fails strict round-trip).
+            snr_db: 0.0,
+            clipping_count_raw: 0,
         };
         round_trip(&r);
     }
