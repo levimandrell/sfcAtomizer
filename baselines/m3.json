@@ -972,6 +972,790 @@
       "kind": "metric_value",
       "snapshot_at": "M3.3",
       "_note": "Diagnostic windowed loop-click metric post-rotation. Reports-only at M3."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_FREQUENCY_HZ",
+      "value": 500.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Effective fundamental at 32 kHz playback for sine_cycle_64."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_RAW_DECODED_PCM_SHA256",
+      "value": "dab71ae755729417ceea718183e09da061a5a0b621e90a968154c5cbe4647b75",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of one-cycle host-side BRR decode for sine_cycle_64. Shifts at M3.4 predictor optimization if it ships; otherwise stable."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_ORACLE_PCM_SHA256",
+      "value": "c57a925cb49bb02b7cdf29f35bca9b9c66b3c8aee83388fd035c847d8b11ef4d",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of mono oracle render (16000 frames) for sine_cycle_64. Documentary: oracle SHA depends on snes_spc version and the characterization frame count, so this is not a stability gate."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_RAW_RMS",
+      "value": 13774.132277570156,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the tiled host-side BRR decode of sine_cycle_64 over the 16000-frame characterization window."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_ORACLE_RMS",
+      "value": 18677.7100017605,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the aligned mono oracle render of sine_cycle_64."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_GAIN_DELTA_DB",
+      "value": 2.645187574602717,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "20 * log10(oracle_rms / raw_rms) for sine_cycle_64. Negative = S-DSP gaussian attenuates relative to raw decode; positive = gaussian kernel boosts (low-frequency regime)."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_PEAK_ABS_ERROR_ORACLE_VS_RAW",
+      "value": 36237,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between aligned oracle render and tiled host decode of sine_cycle_64."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between BRR-decoded PCM and the rotation-aligned source PCM for sine_cycle_64 (BRR encoder error magnitude)."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_ZCR_RAW",
+      "value": 1000.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of one-cycle host BRR decode for sine_cycle_64."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_ZCR_ORACLE",
+      "value": 1929.5677738162258,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of aligned mono oracle render for sine_cycle_64. Large delta vs ZCR_RAW indicates gaussian smoothing is flattening transients."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in host BRR decode of sine_cycle_64."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_64_CLIPPING_COUNT_ORACLE",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in aligned mono oracle render of sine_cycle_64. Tracks DSP-introduced clipping."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_FREQUENCY_HZ",
+      "value": 250.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Effective fundamental at 32 kHz playback for sine_cycle_128."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_RAW_DECODED_PCM_SHA256",
+      "value": "02223029e259c3011abb9903e06461671db311f5ae2b581906c8de3f6e9afa29",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of one-cycle host-side BRR decode for sine_cycle_128. Shifts at M3.4 predictor optimization if it ships; otherwise stable."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_ORACLE_PCM_SHA256",
+      "value": "291c0975712a10b17883e0ff3d4b3d92597cb40a61f611572a6c89a04ce6ed95",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of mono oracle render (16000 frames) for sine_cycle_128. Documentary: oracle SHA depends on snes_spc version and the characterization frame count, so this is not a stability gate."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_RAW_RMS",
+      "value": 13731.709057244569,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the tiled host-side BRR decode of sine_cycle_128 over the 16000-frame characterization window."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_ORACLE_RMS",
+      "value": 18658.827991518498,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the aligned mono oracle render of sine_cycle_128."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_GAIN_DELTA_DB",
+      "value": 2.663195359141193,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "20 * log10(oracle_rms / raw_rms) for sine_cycle_128. Negative = S-DSP gaussian attenuates relative to raw decode; positive = gaussian kernel boosts (low-frequency regime)."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_PEAK_ABS_ERROR_ORACLE_VS_RAW",
+      "value": 36788,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between aligned oracle render and tiled host decode of sine_cycle_128."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between BRR-decoded PCM and the rotation-aligned source PCM for sine_cycle_128 (BRR encoder error magnitude)."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_ZCR_RAW",
+      "value": 500.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of one-cycle host BRR decode for sine_cycle_128."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_ZCR_ORACLE",
+      "value": 964.6632059540934,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of aligned mono oracle render for sine_cycle_128. Large delta vs ZCR_RAW indicates gaussian smoothing is flattening transients."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in host BRR decode of sine_cycle_128."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_128_CLIPPING_COUNT_ORACLE",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in aligned mono oracle render of sine_cycle_128. Tracks DSP-introduced clipping."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_FREQUENCY_HZ",
+      "value": 125.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Effective fundamental at 32 kHz playback for sine_cycle_256."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_RAW_DECODED_PCM_SHA256",
+      "value": "097e4dde6e6bcec30f5e3445791794c1e8f51833e13675542f7da16bcb3038c2",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of one-cycle host-side BRR decode for sine_cycle_256. Shifts at M3.4 predictor optimization if it ships; otherwise stable."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_ORACLE_PCM_SHA256",
+      "value": "cca6b7c5f5f82a2efeaccd41ac3d6bbc340caf3839789c0adb64a3f3f9cc756c",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of mono oracle render (16000 frames) for sine_cycle_256. Documentary: oracle SHA depends on snes_spc version and the characterization frame count, so this is not a stability gate."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_RAW_RMS",
+      "value": 13807.304610630925,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the tiled host-side BRR decode of sine_cycle_256 over the 16000-frame characterization window."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_ORACLE_RMS",
+      "value": 18781.90887586156,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the aligned mono oracle render of sine_cycle_256."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_GAIN_DELTA_DB",
+      "value": 2.6726164596402406,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "20 * log10(oracle_rms / raw_rms) for sine_cycle_256. Negative = S-DSP gaussian attenuates relative to raw decode; positive = gaussian kernel boosts (low-frequency regime)."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_PEAK_ABS_ERROR_ORACLE_VS_RAW",
+      "value": 39053,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between aligned oracle render and tiled host decode of sine_cycle_256."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18328,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between BRR-decoded PCM and the rotation-aligned source PCM for sine_cycle_256 (BRR encoder error magnitude)."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_ZCR_RAW",
+      "value": 250.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of one-cycle host BRR decode for sine_cycle_256."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_ZCR_ORACLE",
+      "value": 484.9699398797595,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of aligned mono oracle render for sine_cycle_256. Large delta vs ZCR_RAW indicates gaussian smoothing is flattening transients."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in host BRR decode of sine_cycle_256."
+    },
+    {
+      "name": "M3_5_SINE_CYCLE_256_CLIPPING_COUNT_ORACLE",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in aligned mono oracle render of sine_cycle_256. Tracks DSP-introduced clipping."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_FREQUENCY_HZ",
+      "value": 1000.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Effective fundamental at 32 kHz playback for harmonic_2_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_RAW_DECODED_PCM_SHA256",
+      "value": "e160b692327494d4a9d72e79a5e62271c11095eaca7056daa2fed9b60fbdcbd8",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of one-cycle host-side BRR decode for harmonic_2_cycle_64. Shifts at M3.4 predictor optimization if it ships; otherwise stable."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_ORACLE_PCM_SHA256",
+      "value": "c42a31f997e2f8b17f9a17463d3ec7cc541965bce27ee2d97374cb618aed49c3",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of mono oracle render (16000 frames) for harmonic_2_cycle_64. Documentary: oracle SHA depends on snes_spc version and the characterization frame count, so this is not a stability gate."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_RAW_RMS",
+      "value": 13686.55661931627,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the tiled host-side BRR decode of harmonic_2_cycle_64 over the 16000-frame characterization window."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_ORACLE_RMS",
+      "value": 18420.255012056892,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the aligned mono oracle render of harmonic_2_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_GAIN_DELTA_DB",
+      "value": 2.580028799162423,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "20 * log10(oracle_rms / raw_rms) for harmonic_2_cycle_64. Negative = S-DSP gaussian attenuates relative to raw decode; positive = gaussian kernel boosts (low-frequency regime)."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_PEAK_ABS_ERROR_ORACLE_VS_RAW",
+      "value": 39053,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between aligned oracle render and tiled host decode of harmonic_2_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between BRR-decoded PCM and the rotation-aligned source PCM for harmonic_2_cycle_64 (BRR encoder error magnitude)."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_ZCR_RAW",
+      "value": 1500.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of one-cycle host BRR decode for harmonic_2_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_ZCR_ORACLE",
+      "value": 3861.5509795330786,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of aligned mono oracle render for harmonic_2_cycle_64. Large delta vs ZCR_RAW indicates gaussian smoothing is flattening transients."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in host BRR decode of harmonic_2_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_2_CYCLE_64_CLIPPING_COUNT_ORACLE",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in aligned mono oracle render of harmonic_2_cycle_64. Tracks DSP-introduced clipping."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_FREQUENCY_HZ",
+      "value": 2000.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Effective fundamental at 32 kHz playback for harmonic_4_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_RAW_DECODED_PCM_SHA256",
+      "value": "2980988b7f9d98b4374828238b36beb01c014f82b560922fdf198c0599f54de2",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of one-cycle host-side BRR decode for harmonic_4_cycle_64. Shifts at M3.4 predictor optimization if it ships; otherwise stable."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_ORACLE_PCM_SHA256",
+      "value": "b7751f0b853bb20389ce96bf2ce4cf40468623335b62019406d2d6618a37d729",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of mono oracle render (16000 frames) for harmonic_4_cycle_64. Documentary: oracle SHA depends on snes_spc version and the characterization frame count, so this is not a stability gate."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_RAW_RMS",
+      "value": 13633.051602631012,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the tiled host-side BRR decode of harmonic_4_cycle_64 over the 16000-frame characterization window."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_ORACLE_RMS",
+      "value": 17836.478441757397,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the aligned mono oracle render of harmonic_4_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_GAIN_DELTA_DB",
+      "value": 2.3343206937138,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "20 * log10(oracle_rms / raw_rms) for harmonic_4_cycle_64. Negative = S-DSP gaussian attenuates relative to raw decode; positive = gaussian kernel boosts (low-frequency regime)."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_PEAK_ABS_ERROR_ORACLE_VS_RAW",
+      "value": 39053,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between aligned oracle render and tiled host decode of harmonic_4_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between BRR-decoded PCM and the rotation-aligned source PCM for harmonic_4_cycle_64 (BRR encoder error magnitude)."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_ZCR_RAW",
+      "value": 3500.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of one-cycle host BRR decode for harmonic_4_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_ZCR_ORACLE",
+      "value": 7717.376352154067,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of aligned mono oracle render for harmonic_4_cycle_64. Large delta vs ZCR_RAW indicates gaussian smoothing is flattening transients."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in host BRR decode of harmonic_4_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_4_CYCLE_64_CLIPPING_COUNT_ORACLE",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in aligned mono oracle render of harmonic_4_cycle_64. Tracks DSP-introduced clipping."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_FREQUENCY_HZ",
+      "value": 4000.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Effective fundamental at 32 kHz playback for harmonic_8_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_RAW_DECODED_PCM_SHA256",
+      "value": "24a5350015b383abc76e55787174f5f8cf2c7d847c5b0fe68cac428592d7a60c",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of one-cycle host-side BRR decode for harmonic_8_cycle_64. Shifts at M3.4 predictor optimization if it ships; otherwise stable."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_ORACLE_PCM_SHA256",
+      "value": "83d62f9da0a87867ad877c64c21edca79b9128ee906916f73ba4ddfa308a68a9",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of mono oracle render (16000 frames) for harmonic_8_cycle_64. Documentary: oracle SHA depends on snes_spc version and the characterization frame count, so this is not a stability gate."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_RAW_RMS",
+      "value": 13331.677763882533,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the tiled host-side BRR decode of harmonic_8_cycle_64 over the 16000-frame characterization window."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_ORACLE_RMS",
+      "value": 16015.937676369384,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the aligned mono oracle render of harmonic_8_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_GAIN_DELTA_DB",
+      "value": 1.5933512447404818,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "20 * log10(oracle_rms / raw_rms) for harmonic_8_cycle_64. Negative = S-DSP gaussian attenuates relative to raw decode; positive = gaussian kernel boosts (low-frequency regime)."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_PEAK_ABS_ERROR_ORACLE_VS_RAW",
+      "value": 39053,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between aligned oracle render and tiled host decode of harmonic_8_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between BRR-decoded PCM and the rotation-aligned source PCM for harmonic_8_cycle_64 (BRR encoder error magnitude)."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_ZCR_RAW",
+      "value": 7500.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of one-cycle host BRR decode for harmonic_8_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_ZCR_ORACLE",
+      "value": 15436.753579691114,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of aligned mono oracle render for harmonic_8_cycle_64. Large delta vs ZCR_RAW indicates gaussian smoothing is flattening transients."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in host BRR decode of harmonic_8_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_8_CYCLE_64_CLIPPING_COUNT_ORACLE",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in aligned mono oracle render of harmonic_8_cycle_64. Tracks DSP-introduced clipping."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_FREQUENCY_HZ",
+      "value": 8000.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Effective fundamental at 32 kHz playback for harmonic_16_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_RAW_DECODED_PCM_SHA256",
+      "value": "87ffee5e6cd3fedb6474f7d582542341e62a2cdae1aca8c7b7cf46cab95acbf8",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of one-cycle host-side BRR decode for harmonic_16_cycle_64. Shifts at M3.4 predictor optimization if it ships; otherwise stable."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_ORACLE_PCM_SHA256",
+      "value": "c3a9f1bfd952cf6e10d07819dca871d9498f2b75f5b9ed709adb9d0d21d4d380",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of mono oracle render (16000 frames) for harmonic_16_cycle_64. Documentary: oracle SHA depends on snes_spc version and the characterization frame count, so this is not a stability gate."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_RAW_RMS",
+      "value": 10885.269312240282,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the tiled host-side BRR decode of harmonic_16_cycle_64 over the 16000-frame characterization window."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_ORACLE_RMS",
+      "value": 9446.363525709428,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the aligned mono oracle render of harmonic_16_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_GAIN_DELTA_DB",
+      "value": -1.2314904760969532,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "20 * log10(oracle_rms / raw_rms) for harmonic_16_cycle_64. Negative = S-DSP gaussian attenuates relative to raw decode; positive = gaussian kernel boosts (low-frequency regime)."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_PEAK_ABS_ERROR_ORACLE_VS_RAW",
+      "value": 16384,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between aligned oracle render and tiled host decode of harmonic_16_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between BRR-decoded PCM and the rotation-aligned source PCM for harmonic_16_cycle_64 (BRR encoder error magnitude)."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_ZCR_RAW",
+      "value": 15500.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of one-cycle host BRR decode for harmonic_16_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_ZCR_ORACLE",
+      "value": 15459.95366021667,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of aligned mono oracle render for harmonic_16_cycle_64. Large delta vs ZCR_RAW indicates gaussian smoothing is flattening transients."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in host BRR decode of harmonic_16_cycle_64."
+    },
+    {
+      "name": "M3_5_HARMONIC_16_CYCLE_64_CLIPPING_COUNT_ORACLE",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in aligned mono oracle render of harmonic_16_cycle_64. Tracks DSP-introduced clipping."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_FREQUENCY_HZ",
+      "value": 250.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Effective fundamental at 32 kHz playback for all_8_partials_max_amp_harmonics_1_to_8."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_RAW_DECODED_PCM_SHA256",
+      "value": "e24326f26cdeda585352a21572c8033e96db8d21baded3602cd85308de990854",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of one-cycle host-side BRR decode for all_8_partials_max_amp_harmonics_1_to_8. Shifts at M3.4 predictor optimization if it ships; otherwise stable."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_ORACLE_PCM_SHA256",
+      "value": "52947a62e4acae0630b40643956020a27a0d94b9b788a9d711c705f933326191",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of mono oracle render (16000 frames) for all_8_partials_max_amp_harmonics_1_to_8. Documentary: oracle SHA depends on snes_spc version and the characterization frame count, so this is not a stability gate."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_RAW_RMS",
+      "value": 6969.92437526226,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the tiled host-side BRR decode of all_8_partials_max_amp_harmonics_1_to_8 over the 16000-frame characterization window."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_ORACLE_RMS",
+      "value": 9326.41271812453,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the aligned mono oracle render of all_8_partials_max_amp_harmonics_1_to_8."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_GAIN_DELTA_DB",
+      "value": 2.5297312849295106,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "20 * log10(oracle_rms / raw_rms) for all_8_partials_max_amp_harmonics_1_to_8. Negative = S-DSP gaussian attenuates relative to raw decode; positive = gaussian kernel boosts (low-frequency regime)."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_PEAK_ABS_ERROR_ORACLE_VS_RAW",
+      "value": 29349,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between aligned oracle render and tiled host decode of all_8_partials_max_amp_harmonics_1_to_8."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between BRR-decoded PCM and the rotation-aligned source PCM for all_8_partials_max_amp_harmonics_1_to_8 (BRR encoder error magnitude)."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_ZCR_RAW",
+      "value": 4000.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of one-cycle host BRR decode for all_8_partials_max_amp_harmonics_1_to_8."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_ZCR_ORACLE",
+      "value": 3864.037558685446,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of aligned mono oracle render for all_8_partials_max_amp_harmonics_1_to_8. Large delta vs ZCR_RAW indicates gaussian smoothing is flattening transients."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in host BRR decode of all_8_partials_max_amp_harmonics_1_to_8."
+    },
+    {
+      "name": "M3_5_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_CLIPPING_COUNT_ORACLE",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in aligned mono oracle render of all_8_partials_max_amp_harmonics_1_to_8. Tracks DSP-introduced clipping."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_FREQUENCY_HZ",
+      "value": 250.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Effective fundamental at 32 kHz playback for normalize_false_multi_partial_clamp_safety."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_RAW_DECODED_PCM_SHA256",
+      "value": "0f1a464d14ec4c4e6c15773ad2c850f5fd177322c11c7b30f295b9fbf39686aa",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of one-cycle host-side BRR decode for normalize_false_multi_partial_clamp_safety. Shifts at M3.4 predictor optimization if it ships; otherwise stable."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_ORACLE_PCM_SHA256",
+      "value": "e4051b7bbf5de6aa742c58467b2a4234ded44835664b700fe71180dab058fa64",
+      "kind": "sha256",
+      "snapshot_at": "M3.5",
+      "_note": "SHA-256 of mono oracle render (16000 frames) for normalize_false_multi_partial_clamp_safety. Documentary: oracle SHA depends on snes_spc version and the characterization frame count, so this is not a stability gate."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_RAW_RMS",
+      "value": 12542.69380954506,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the tiled host-side BRR decode of normalize_false_multi_partial_clamp_safety over the 16000-frame characterization window."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_ORACLE_RMS",
+      "value": 16634.05211860807,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "RMS of the aligned mono oracle render of normalize_false_multi_partial_clamp_safety."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_GAIN_DELTA_DB",
+      "value": 2.4521447487462167,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "20 * log10(oracle_rms / raw_rms) for normalize_false_multi_partial_clamp_safety. Negative = S-DSP gaussian attenuates relative to raw decode; positive = gaussian kernel boosts (low-frequency regime)."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_PEAK_ABS_ERROR_ORACLE_VS_RAW",
+      "value": 39053,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between aligned oracle render and tiled host decode of normalize_false_multi_partial_clamp_safety."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_PEAK_ABS_RAW_VS_SOURCE",
+      "value": 18431,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Max-abs sample delta between BRR-decoded PCM and the rotation-aligned source PCM for normalize_false_multi_partial_clamp_safety (BRR encoder error magnitude)."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_ZCR_RAW",
+      "value": 3750.0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of one-cycle host BRR decode for normalize_false_multi_partial_clamp_safety."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_ZCR_ORACLE",
+      "value": 5791.048513302035,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Zero-crossing rate (Hz) of aligned mono oracle render for normalize_false_multi_partial_clamp_safety. Large delta vs ZCR_RAW indicates gaussian smoothing is flattening transients."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_CLIPPING_COUNT_RAW",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in host BRR decode of normalize_false_multi_partial_clamp_safety."
+    },
+    {
+      "name": "M3_5_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_CLIPPING_COUNT_ORACLE",
+      "value": 0,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Samples within +-1 LSB of i16 saturation in aligned mono oracle render of normalize_false_multi_partial_clamp_safety. Tracks DSP-introduced clipping."
+    },
+    {
+      "name": "M3_5_RECOMMENDED_NEXT",
+      "value": "pending_preset_eval",
+      "kind": "string_value",
+      "snapshot_at": "M3.5",
+      "_note": "Outcome of the SPEC 10.9 M3.5 decision rule: defer | pending_preset_eval. The latter is the 'go signal' for M3.6 preset design (conditions #2/#3/#4 still require evaluation against a proposed preset)."
+    },
+    {
+      "name": "M3_5_MONOTONICITY_HOLDS_ACROSS_CYCLE_64_HARMONIC_SERIES",
+      "value": true,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Monotonicity check (SPEC 10.9 decision rule condition #1): gain_delta_db non-increasing across harmonic_2 -> 4 -> 8 -> 16. Values: harmonic_2_cycle_64=2.5800, harmonic_4_cycle_64=2.3343, harmonic_8_cycle_64=1.5934, harmonic_16_cycle_64=-1.2315"
+    },
+    {
+      "name": "M3_5_HARMONIC_16_GAUSSIAN_ATTENUATION_DB",
+      "value": -1.2314904760969532,
+      "kind": "metric_value",
+      "snapshot_at": "M3.5",
+      "_note": "Gain delta at harmonic_16_cycle_64 (8 kHz, near-Nyquist). Must be < -0.5 dB for the M3.5 'harmonic_16 responds' check to pass (SPEC 10.9 decision rule condition #2 raw form)."
+    },
+    {
+      "name": "M3_5_DOCUMENTARY_CLASS_NOTE",
+      "value": "documentary_at_m3_5",
+      "kind": "string_value",
+      "snapshot_at": "M3.5",
+      "_note": "All M3_5_* entries are documentary_snapshot at M3.5: raw_decoded_pcm_sha256 will shift if M3.4 predictor optimization ships; gain/rms/peak/zcr/clipping and oracle SHA depend on the BRR encoder, S-DSP gaussian, and snes_spc version. None are identity_gated."
     }
   ],
   "retired": [],
