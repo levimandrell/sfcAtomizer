@@ -1078,6 +1078,68 @@ characterization pipeline at M4.1 / M4.2 once the alignment
 fix and re-run land. The schema bump itself is locked at
 M4.0.
 
+### 10.10 BRR encoder noise floor metrics (M4)
+
+**Definition.** For each atom or test signal, compute four
+metrics on the raw BRR-decoded PCM compared against the
+encoder INPUT (the rotated source PCM per SPEC §10.7;
+NOT the pre-rotation original):
+
+```
+peak_abs_raw_vs_source = max_i(|rotated_source[i] - decoded[i]|)
+                       : i32 in widened arithmetic
+
+rms_raw_vs_source      = sqrt(mean_i((rotated_source[i] - decoded[i])^2))
+                       : f64 from i64 sum-of-squares; sqrt at end
+
+snr_db                 = 20 * log10(source_rms / rms_raw_vs_source)
+                       : f64; if rms_raw_vs_source < epsilon,
+                         snr_db = f64::INFINITY (encoded exactly)
+
+clipping_count_raw     = count_i((decoded[i] as i32).abs() >= 32767)
+                       : u32; widened to i32 so i16::MIN.abs() does
+                         not overflow. Counts samples at the i16
+                         saturation boundary on either polarity:
+                         32767, -32767, and -32768.
+```
+
+**Reporting.** These metrics ship as `#[serde(default)]` fields
+on `AtomBrrOutput` and `AtomRenderReport` at M4.0 (struct
+fields land alongside this contract; the gaussian
+characterization report adds per-measurement copies under the
+same names). Values are populated by the encoder path at M4.3;
+they default to `0` (or `f64::INFINITY` for `snr_db` when
+encoded exactly) prior to wiring.
+
+**Comparison source.** `rotated_source` per SPEC §10.7. The
+M3.3 phase-rotation pass made rotation a transient encoder
+input; the noise-floor metrics compare decoded BRR against the
+post-rotation source so the measurement is faithful to what the
+encoder actually saw. Comparing against the pre-rotation original
+would conflate phase displacement with encoder error.
+
+**Use as a research-spike exit criterion (M4.4).** Per consultant
+M4 plan #17, the M4.4 encoder-improvement spike ships a
+production encoder change ONLY IF at least one representative
+fixture improves `rms_raw_vs_source` OR `peak_abs_raw_vs_source`
+by `≥ 10%` AND:
+
+- no fixture's `loop_click_abs` worsens (M3.3 improvement gate
+  retained),
+- no M2 behavioral gate regresses (audibility, silence,
+  source-step ratio, module cap),
+- encode runtime stays within `2×` the M3.3 phase-rotation
+  baseline.
+
+A negative finding ("BRR encoder near local optimum under
+current constraints") is an acceptable M4.4 outcome and closes
+the sub-pass without a production change.
+
+**Determinism.** Pure integer + `f64` arithmetic. Sum-of-squares
+in `i64` to avoid overflow on i16-range inputs (max
+`(2 × 32767)² × N` for `N` samples). `sqrt` and `log10` are the
+only `f64` ops. Cross-platform deterministic.
+
 ---
 
 ## 11. Voice allocation and SFX
