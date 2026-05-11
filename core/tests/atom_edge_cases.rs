@@ -494,6 +494,62 @@ fn amplitude_zero_atom_phase_rotation_picks_offset_zero() {
     assert_eq!(out.rms_error_post_rotation, 0.0);
 }
 
+/// **M3.5 prelude (consultant M3.3 audit #2 / #20).** The
+/// post-rotation `decoded_brr_pcm_sha256` for the seven zero-seam
+/// non-silent fixtures (the M3.3 fixtures that all dropped to
+/// `loop_click_abs = 0` and have non-zero PCM) MUST be distinct.
+/// `AMPLITUDE_ZERO` and `ALL_PARTIALS_ZERO_NORMALIZE_TRUE` are
+/// excluded — both produce legitimately all-zero PCM and share a
+/// SHA. `HARMONIC_16_CYCLE_64` is also excluded — rotation found
+/// no improvement and its loop_click is 16384, not zero.
+///
+/// If any two SHAs match, the rotation pipeline has collapsed
+/// distinct inputs into a shared output — a "degenerate encoder"
+/// failure mode worth catching before M3.5 characterization
+/// trusts these values.
+#[test]
+fn decoded_brr_pcm_sha_distinct_for_zero_seam_nonsilent_fixtures() {
+    const BASELINES_JSON: &str = include_str!("../../baselines/m3.json");
+    let baselines: serde_json::Value =
+        serde_json::from_str(BASELINES_JSON).expect("baselines/m3.json must parse");
+    let ds = baselines["documentary_snapshot"]
+        .as_array()
+        .expect("documentary_snapshot must be an array");
+
+    // 7 zero-seam fixtures with non-zero PCM. (The 2 all-zero
+    // fixtures share a SHA by design; HARMONIC_16_CYCLE_64
+    // didn't drop to zero so it's outside this gate.)
+    let names: &[&str] = &[
+        "128_SINE",
+        "64_SINE",
+        "TWO_PARTIALS_CANCEL_PARTIALLY",
+        "MAX_AMPLITUDE_NO_NORMALIZE",
+        "ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8",
+        "PHASE_CYCLES_0_9999",
+        "CYCLE_256_CANONICAL_SINE",
+    ];
+
+    let mut seen: Vec<(&str, String)> = Vec::with_capacity(names.len());
+    for name in names {
+        let entry_name = format!("M3_ATOM_{name}_DECODED_BRR_PCM_SHA256_PHASE_ROTATION");
+        let sha = ds
+            .iter()
+            .find(|e| e["name"].as_str() == Some(entry_name.as_str()))
+            .unwrap_or_else(|| panic!("baselines/m3.json missing entry {entry_name}"))["value"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{entry_name} value must be a string"))
+            .to_string();
+        for (prev_name, prev_sha) in &seen {
+            assert_ne!(
+                sha, *prev_sha,
+                "decoded_brr_pcm_sha256 collision between {name} and {prev_name}: \
+                 both {sha} — possible degenerate-encoder collapse"
+            );
+        }
+        seen.push((name, sha));
+    }
+}
+
 /// **M3.3 improvement gate — `M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE`.**
 ///
 /// For every atom fixture (canonical sine_128 / sine_64 + the nine

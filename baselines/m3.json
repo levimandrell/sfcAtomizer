@@ -2,7 +2,7 @@
   "schema_version": 1,
   "report_type": "release_baselines",
   "release": "v0.3-pre",
-  "milestone": "M3.3",
+  "milestone": "M3.5",
   "_doc": "Machine-readable release baselines for M3 BRR encoder quality milestone. M3.3 ships phase rotation (SPEC 10.7): encoder-input rotation per atom, lex objective (loop_click_abs, peak_abs_error, rms_error, rotation_offset), block-aligned candidate offsets. All 11 atom fixtures saw loop_click_abs drop to <= pre-M3 values (improvement-gate satisfied). Atom PCM SHAs stay identity-gated per the SPEC 16.9 amendment; BRR / decoded-BRR / post-rotation metric values land here under documentary_snapshot and will shift again at later encoder-changing sub-passes. Three classifications: identity_gated (any drift = regression), behavior_gated (numeric thresholds + improvement invariants), documentary_snapshot (informational; expected to shift on declared milestones).",
   "inherits_m2": true,
   "identity_gated": [
@@ -44,7 +44,7 @@
       "kind": "sha256",
       "locked_at": "M3.2",
       "test": "core/tests/atom_edge_cases.rs::atom_pcm_sha_matches_locked_baseline_m3_two_partials_cancel_partially",
-      "_note": "Two equal-amplitude partials with phase_cycles 0.0 and 0.5 cancel mathematically (sin(\u00ce\u00b8) + sin(\u00ce\u00b8+\u00cf\u20ac) = 0) but FP sin is not exact \u00e2\u20ac\u201d sum is a ULP-scale noise floor. normalize then divides by tiny max, amplifying noise to \u00c2\u00b11.0; * amplitude * 32767 produces non-trivial PCM. The PCM is deterministic and bounded; no NaN. PM may revisit whether normalize should treat near-zero max as zero at M3+ (SPEC \u00c2\u00a716.9 amendment territory)."
+      "_note": "Two equal-amplitude partials with phase_cycles 0.0 and 0.5 cancel mathematically (sin(\u00ce\u00b8) + sin(\u00ce\u00b8+\u00cf\u20ac) = 0) but FP sin is not exact \u00e2\u20ac\u201d sum is a ULP-scale noise floor. normalize then divides by tiny max, amplifying noise to \u00c2\u00b11.0; * amplitude * 32767 produces non-trivial PCM. The PCM is deterministic and bounded; no NaN. PM may revisit whether normalize should treat near-zero max as zero at M3+ (SPEC \u00c2\u00a716.9 amendment territory). Fixture exists to test cancellation/normalization edge path. Post-M3.3 seam-zero result is mathematically correct under the lex objective but acoustically meaningless \u2014 the underlying signal is FP-noise from non-exact sin(theta)+sin(theta+pi) cancellation, not musical content. Do not treat as a quality demonstration."
     },
     {
       "name": "M3_ATOM_MAX_AMPLITUDE_NO_NORMALIZE_PCM_SHA256",
@@ -229,28 +229,28 @@
       "value": "458c67603fd9d50cc4d3130f879d26b16c2d9bf54ce2f2210683f7d2085282ca",
       "kind": "sha256",
       "snapshot_at": "M3.2",
-      "_note": "Pre-M3 BRR SHA for the FP-noise-amplified cancellation fixture. M3.3 phase rotation may shift this."
+      "_note": "Pre-M3 BRR SHA for the FP-noise-amplified cancellation fixture. M3.3 phase rotation may shift this. Fixture exists to test cancellation/normalization edge path. Post-M3.3 seam-zero result is mathematically correct under the lex objective but acoustically meaningless \u2014 the underlying signal is FP-noise from non-exact sin(theta)+sin(theta+pi) cancellation, not musical content. Do not treat as a quality demonstration."
     },
     {
       "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_DECODED_BRR_PCM_SHA256_PRE_M3",
       "value": "0904195edc8a17425ee3af92d3fcbd666d912441772c1340e424207063182495",
       "kind": "sha256",
       "snapshot_at": "M3.2",
-      "_note": "M3.3 phase rotation will shift this."
+      "_note": "M3.3 phase rotation will shift this. Fixture exists to test cancellation/normalization edge path. Post-M3.3 seam-zero result is mathematically correct under the lex objective but acoustically meaningless \u2014 the underlying signal is FP-noise from non-exact sin(theta)+sin(theta+pi) cancellation, not musical content. Do not treat as a quality demonstration."
     },
     {
       "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_LOOP_CLICK_ABS_PRE_M3",
       "value": 1024,
       "kind": "metric_value",
       "snapshot_at": "M3.2",
-      "_note": "Loop click on the noise-amplified waveform. M3.3 phase rotation must produce <= this value."
+      "_note": "Loop click on the noise-amplified waveform. M3.3 phase rotation must produce <= this value. Fixture exists to test cancellation/normalization edge path. Post-M3.3 seam-zero result is mathematically correct under the lex objective but acoustically meaningless \u2014 the underlying signal is FP-noise from non-exact sin(theta)+sin(theta+pi) cancellation, not musical content. Do not treat as a quality demonstration."
     },
     {
       "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_LOOP_WINDOW_RMS_DELTA_PRE_M3",
       "value": 34467.9069280396,
       "kind": "metric_value",
       "snapshot_at": "M3.2",
-      "_note": "Diagnostic; reports-only."
+      "_note": "Diagnostic; reports-only. Fixture exists to test cancellation/normalization edge path. Post-M3.3 seam-zero result is mathematically correct under the lex objective but acoustically meaningless \u2014 the underlying signal is FP-noise from non-exact sin(theta)+sin(theta+pi) cancellation, not musical content. Do not treat as a quality demonstration."
     },
     {
       "name": "M3_ATOM_MAX_AMPLITUDE_NO_NORMALIZE_BRR_SHA256_PRE_M3",
@@ -621,49 +621,49 @@
       "value": 32,
       "kind": "rotation_offset",
       "snapshot_at": "M3.3",
-      "_note": "Chosen rotation offset for two_partials_cancel_partially after the SPEC 10.7 lex objective. Documentary at M3.3; promoted to identity_gated at the last encoder-changing M3 sub-pass per consultant #19."
+      "_note": "Chosen rotation offset for two_partials_cancel_partially after the SPEC 10.7 lex objective. Documentary at M3.3; promoted to identity_gated at the last encoder-changing M3 sub-pass per consultant #19. Fixture exists to test cancellation/normalization edge path. Post-M3.3 seam-zero result is mathematically correct under the lex objective but acoustically meaningless \u2014 the underlying signal is FP-noise from non-exact sin(theta)+sin(theta+pi) cancellation, not musical content. Do not treat as a quality demonstration."
     },
     {
       "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_LOOP_CLICK_ABS_PHASE_ROTATION",
       "value": 0,
       "kind": "metric_value",
       "snapshot_at": "M3.3",
-      "_note": "Post-rotation loop_click_abs for two_partials_cancel_partially. Must be <= M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_LOOP_CLICK_ABS_PRE_M3 per the lex objective (SPEC 10.7) and M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE."
+      "_note": "Post-rotation loop_click_abs for two_partials_cancel_partially. Must be <= M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_LOOP_CLICK_ABS_PRE_M3 per the lex objective (SPEC 10.7) and M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE. Fixture exists to test cancellation/normalization edge path. Post-M3.3 seam-zero result is mathematically correct under the lex objective but acoustically meaningless \u2014 the underlying signal is FP-noise from non-exact sin(theta)+sin(theta+pi) cancellation, not musical content. Do not treat as a quality demonstration."
     },
     {
       "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_BRR_SHA256_PHASE_ROTATION",
       "value": "c0a92aeca9c893d77458d686b39c09fed1e95b4109995cd940a7467a7fafbe4a",
       "kind": "sha256",
       "snapshot_at": "M3.3",
-      "_note": "Post-rotation BRR SHA for two_partials_cancel_partially. Shifts at later encoder-changing sub-passes (M3.4 predictor, M3.6 pre-emphasis) if they ship."
+      "_note": "Post-rotation BRR SHA for two_partials_cancel_partially. Shifts at later encoder-changing sub-passes (M3.4 predictor, M3.6 pre-emphasis) if they ship. Fixture exists to test cancellation/normalization edge path. Post-M3.3 seam-zero result is mathematically correct under the lex objective but acoustically meaningless \u2014 the underlying signal is FP-noise from non-exact sin(theta)+sin(theta+pi) cancellation, not musical content. Do not treat as a quality demonstration."
     },
     {
       "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_DECODED_BRR_PCM_SHA256_PHASE_ROTATION",
       "value": "4133bd81b38ccc7b0123b3fc4df9845c8555442b6c9cd2901a7c08a1b6b24787",
       "kind": "sha256",
       "snapshot_at": "M3.3",
-      "_note": "Post-rotation decoded-from-BRR PCM SHA. Same shift surface as the BRR SHA."
+      "_note": "Post-rotation decoded-from-BRR PCM SHA. Same shift surface as the BRR SHA. Fixture exists to test cancellation/normalization edge path. Post-M3.3 seam-zero result is mathematically correct under the lex objective but acoustically meaningless \u2014 the underlying signal is FP-noise from non-exact sin(theta)+sin(theta+pi) cancellation, not musical content. Do not treat as a quality demonstration."
     },
     {
       "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_PEAK_ABS_ERROR_PHASE_ROTATION",
       "value": 10239,
       "kind": "metric_value",
       "snapshot_at": "M3.3",
-      "_note": "Secondary lex level for the chosen rotation candidate per SPEC 10.7. Reports-only at M3."
+      "_note": "Secondary lex level for the chosen rotation candidate per SPEC 10.7. Reports-only at M3. Fixture exists to test cancellation/normalization edge path. Post-M3.3 seam-zero result is mathematically correct under the lex objective but acoustically meaningless \u2014 the underlying signal is FP-noise from non-exact sin(theta)+sin(theta+pi) cancellation, not musical content. Do not treat as a quality demonstration."
     },
     {
       "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_RMS_ERROR_PHASE_ROTATION",
       "value": 1532.3267795659644,
       "kind": "metric_value",
       "snapshot_at": "M3.3",
-      "_note": "Tertiary lex level for the chosen rotation candidate. Reports-only at M3."
+      "_note": "Tertiary lex level for the chosen rotation candidate. Reports-only at M3. Fixture exists to test cancellation/normalization edge path. Post-M3.3 seam-zero result is mathematically correct under the lex objective but acoustically meaningless \u2014 the underlying signal is FP-noise from non-exact sin(theta)+sin(theta+pi) cancellation, not musical content. Do not treat as a quality demonstration."
     },
     {
       "name": "M3_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY_LOOP_WINDOW_RMS_DELTA_PHASE_ROTATION",
       "value": 9714.516972037261,
       "kind": "metric_value",
       "snapshot_at": "M3.3",
-      "_note": "Diagnostic windowed loop-click metric post-rotation. Reports-only at M3."
+      "_note": "Diagnostic windowed loop-click metric post-rotation. Reports-only at M3. Fixture exists to test cancellation/normalization edge path. Post-M3.3 seam-zero result is mathematically correct under the lex objective but acoustically meaningless \u2014 the underlying signal is FP-noise from non-exact sin(theta)+sin(theta+pi) cancellation, not musical content. Do not treat as a quality demonstration."
     },
     {
       "name": "M3_ATOM_MAX_AMPLITUDE_NO_NORMALIZE_ROTATION_OFFSET_PHASE_ROTATION",
@@ -960,5 +960,6 @@
       "_note": "Diagnostic windowed loop-click metric post-rotation. Reports-only at M3."
     }
   ],
-  "retired": []
+  "retired": [],
+  "_class_note_for_documentary_snapshot_phase_rotation_entries": "_PHASE_ROTATION entries are documentary at M3.5; promoted to identity_gated only at the last encoder-changing M3 sub-pass (M3.6 if pre-emphasis presets ship, else M3.3 is the last encoder-changing pass and these become identity_gated at M3.7 close)."
 }
