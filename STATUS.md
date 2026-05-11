@@ -2,7 +2,83 @@
 
 ## Current milestone
 
-**M3.8 — M3 release prep + acceptance + tag v0.3-rc1.** Final
+**M3.8.1 — Release-final test-count reconciliation. M3 closed
+at `v0.3-rc1`.** Documentation-only pass. Consultant M3 close-out
+audit flagged a single block-M3-close item: PM's pre-audit
+summary claimed "595 tests workspace-wide" while every release
+artifact (STATUS, `RELEASE_NOTES_v0.3-rc.md`,
+`docs/reproduce-m2.md`) consistently records 579. The 595
+figure was a PM error in the consultant brief, not a real
+claim from any release artifact.
+
+**M3.8.1 audit verification (Phase 1):** ran
+`cargo test --workspace` against `main` at the v0.3-rc1
+commit. Captured output to `build/m3.8.1-test-count.txt`
+(gitignored). Tally across 15 test binaries:
+
+```
+passed=579 failed=0 ignored=4
+```
+
+`579` matches the figure in `STATUS.md`,
+`RELEASE_NOTES_v0.3-rc.md`, and `docs/reproduce-m2.md`
+byte-for-byte. **Phase 2A applies: no patch, no rc2 retag.**
+`v0.3-rc1` stays as the canonical M3 release-candidate tag.
+
+**Consultant M3 close-out audit signed off** on technical
+substance; the 18 Acceptable confirmations are recorded as
+such. Single block finding (test-count reconciliation)
+resolved as a PM-side miscount, not a docs drift.
+
+**M3 is officially closed at `v0.3-rc1`** (annotated tag,
+commit `7a2329f`).
+
+**M4 entry ordering** (per consultant close-out audit #19;
+forward visibility, not a commitment):
+
+1. **Gaussian alignment search expansion.** Resolve the
+   `align_oracle_to_raw` `max_offset = 32` limit so cycle
+   lengths up to 256 align deterministically. Pre-emphasis
+   decisions depend on trustworthy measurement — alignment
+   first.
+2. **Re-run characterization** with reliable alignment.
+   Precondition #0 (`zcr_ratio ∈ [0.9, 1.1]` for
+   monotonicity anchors) becomes evaluable.
+3. **BRR encoder noise floor reduction.**
+   `peak_abs_raw_vs_source ≈ 18431` LSBs is the dominant
+   atom-render artefact per M3.5.1; M4 may investigate
+   per-block filter refinements / predictor optimization
+   (the M3.4-deferred work).
+4. **Conditional pre-emphasis presets.** Only if items 1–3
+   yield a clear frequency-response target the M3.5.1
+   precondition + four-condition rule can clear.
+5. **GUI / schema polish** (`rename_track_id_cascade` etc.,
+   currently unnecessary; revisit if schema grows track-id
+   references).
+6. **`baselines/m4.json`** (inherits M3 by reference;
+   mirrors the M3-inherits-M2 pattern).
+
+PM drafts the M4.0 contracts brief next. Engineer may consult
+before scoping, or proceed directly when briefed.
+
+### Decisions log additions (M3.8.1)
+
+- **M3.8.1 audit** (consultant M3 close-out audit, single
+  block finding): release docs test count "579 tests
+  workspace-wide" verified against `cargo test --workspace`
+  runner output at the `v0.3-rc1` commit (`7a2329f`). PM's
+  pre-audit summary claim of "595 tests" was a PM error in
+  the consultant brief; not present in any release artifact.
+  `v0.3-rc1` stays as the canonical tag; no rc2 required.
+  No code changes; no SPEC changes; no baseline changes.
+- Consultant M3 close-out audit signed off on technical
+  substance; M3 officially closed at `v0.3-rc1`.
+- M4 entry ordering recommendation recorded (alignment first,
+  then characterization re-run, BRR noise, conditional
+  presets, polish, `baselines/m4.json`).
+
+**Previous milestone (M3.8) — M3 release prep + acceptance +
+tag `v0.3-rc1`.** Final
 M3 sub-pass. Mirrors M2.8 in structure but with smaller
 scope — most release-prep patterns (literal SHA pins, STATUS
 split, machine-readable baselines) were established at M2.8
@@ -480,13 +556,22 @@ PM go/defer decision at M3.4 entry brief.
 
 ## Last pass
 
+**Pass M3.8.1 — Release-final test-count reconciliation.**
+Documentation-only verification per consultant M3 close-out
+audit's single block finding. Detail folded into "Current
+milestone" above. `cargo test --workspace` runner reports
+579 passed / 0 failed / 4 ignored across 15 test binaries,
+matching every release artifact. `v0.3-rc1` (`7a2329f`)
+remains the canonical M3 tag; no rc2 retag. M3 officially
+closed.
+
+---
+
 **Pass M3.8 — M3 release prep + acceptance + tag v0.3-rc1
-(Phases 1–6).** Detail folded into the "Current milestone"
-section above. Final M3 sub-pass: `m3-acceptance` 5-stage
+(Phases 1–6).** Final M3 sub-pass: `m3-acceptance` 5-stage
 bundle CLI, updated reproducer doc, release notes with M3.6
 deferral methodology note, baseline classification audit, SPEC
 §24 M4 prelude scope, and the `v0.3-rc1` annotated tag.
-M3 closed.
 
 ---
 
