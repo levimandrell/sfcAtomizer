@@ -1293,6 +1293,121 @@ mod tests {
         assert_eq!(model.project.atom_pool[0].id, "sine_128");
     }
 
+    // ---- M3.7 Layer A: rename_sequence_id_cascade ----
+
+    #[test]
+    fn rename_sequence_id_cascade_updates_tracks_atom_sequence_id() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        // Canonical wires tracks[1] -> AtomSequence { atom_sequence_id:
+        // "atomseq_0001" } against atom_sequences[0].id = "atomseq_0001".
+        let ok = model.rename_sequence_id_cascade(0, "main_riff".to_string());
+        assert!(ok);
+        assert_eq!(model.project.atom_sequences[0].id, "main_riff");
+        match &model.project.tracks[1].kind {
+            TrackKind::AtomSequence { atom_sequence_id } => {
+                assert_eq!(atom_sequence_id, "main_riff");
+            }
+            other => panic!("expected tracks[1] to be AtomSequence, got {other:?}"),
+        }
+        assert!(model.is_valid(), "cascade must keep validation green");
+    }
+
+    #[test]
+    fn rename_sequence_id_cascade_updates_m2_active_sequence_id() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        // Canonical sets m2.active_sequence_id = Some("atomseq_0001").
+        let ok = model.rename_sequence_id_cascade(0, "main_riff".to_string());
+        assert!(ok);
+        assert_eq!(
+            model.project.m2.active_sequence_id,
+            Some("main_riff".to_string())
+        );
+    }
+
+    #[test]
+    fn rename_sequence_id_cascade_rejects_collision_with_other_sequence() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        // Add a second sequence so we have something to collide with.
+        let new_idx = model.add_sequence();
+        let new_id = model.project.atom_sequences[new_idx].id.clone();
+        assert_ne!(new_id, "atomseq_0001");
+        let ok = model.rename_sequence_id_cascade(0, new_id.clone());
+        assert!(!ok, "collision must reject");
+        assert_eq!(
+            model.project.atom_sequences[0].id, "atomseq_0001",
+            "no mutation on reject"
+        );
+        // Tracks reference unchanged.
+        match &model.project.tracks[1].kind {
+            TrackKind::AtomSequence { atom_sequence_id } => {
+                assert_eq!(atom_sequence_id, "atomseq_0001");
+            }
+            _ => panic!("tracks[1] not AtomSequence"),
+        }
+    }
+
+    #[test]
+    fn rename_sequence_id_cascade_rejects_invalid_regex() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        // SPEC §16.6 rule 40 pattern: ^[a-z0-9_]+$. Whitespace +
+        // uppercase both violate.
+        assert!(!model.rename_sequence_id_cascade(0, "BAD ID".to_string()));
+        assert!(!model.rename_sequence_id_cascade(0, "no upper".to_string()));
+        assert!(!model.rename_sequence_id_cascade(0, "UPPER".to_string()));
+        assert!(!model.rename_sequence_id_cascade(0, "".to_string()));
+        assert_eq!(model.project.atom_sequences[0].id, "atomseq_0001");
+    }
+
+    #[test]
+    fn rename_sequence_id_cascade_unchanged_when_idx_out_of_range() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        let ok = model.rename_sequence_id_cascade(99, "anything".to_string());
+        assert!(!ok);
+        assert_eq!(model.project.atom_sequences[0].id, "atomseq_0001");
+    }
+
+    #[test]
+    fn rename_sequence_id_cascade_to_same_id_is_noop_success() {
+        let mut model = V2EditorModel::new(canonical_v2());
+        let ok = model.rename_sequence_id_cascade(0, "atomseq_0001".to_string());
+        assert!(ok, "same-id rename must succeed as no-op");
+        assert_eq!(model.project.atom_sequences[0].id, "atomseq_0001");
+    }
+
+    // ---- M3.7 Layer B: atom preview metric flow ----
+
+    /// The GUI surfaces the M3.1 + M3.3 fields from `AtomBrrOutput`
+    /// (`loop_click_abs`, `rotation_offset`,
+    /// `peak_abs_error_post_rotation`, `rms_error_post_rotation`).
+    /// This test verifies the model-side render path populates them;
+    /// the GUI plumbing reads the same fields.
+    #[test]
+    fn atom_preview_returns_brr_output_with_rotation_offset_populated() {
+        use sfc_atomizer_core::atom::render_to_brr;
+        let model = V2EditorModel::new(canonical_v2());
+        let atom = model
+            .project
+            .atom_pool
+            .first()
+            .expect("canonical_v2 has one atom");
+        let out = render_to_brr(atom).expect("render is infallible at M3");
+        // Block-aligned rotation offsets per SPEC §10.7: 0, 16, 32, ...
+        assert!(
+            (out.rotation_offset as usize) < atom.cycle_len_samples as usize,
+            "rotation_offset must be within one cycle"
+        );
+        assert_eq!(
+            (out.rotation_offset % 16),
+            0,
+            "rotation_offset must be block-aligned per SPEC §10.7"
+        );
+        // Metric fields are populated (i32 / f64 — just assert they
+        // decode without panicking and stay finite).
+        assert!(out.loop_click_abs >= 0);
+        assert!(out.peak_abs_error_post_rotation >= 0);
+        assert!(out.rms_error_post_rotation.is_finite());
+    }
+
     // ---- M2.8 Layer 2E: round-trip parity through nontrivial edits ----
 
     /// Consultant #16: extend round-trip parity beyond
