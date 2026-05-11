@@ -1286,6 +1286,177 @@ mod tests {
         assert_eq!(a.aligned_rms_error, 0.0);
     }
 
+    // ---- M4.1 alignment search range + validity predicate ----
+
+    /// Helper for M4.1 synthesized-signal tests: build a sine
+    /// wave with the requested period at amplitude 1000.
+    fn synth_sine(samples: usize, period: f64) -> Vec<i16> {
+        (0..samples)
+            .map(|i| ((i as f64) * 2.0 * std::f64::consts::PI / period).sin() * 1000.0)
+            .map(|f| f as i16)
+            .collect()
+    }
+
+    #[test]
+    fn m4_1_alignment_zero_offset_for_identical_signals() {
+        let s = synth_sine(512, 64.0);
+        let a = align_oracle_to_raw(&s, &s, 256);
+        assert_eq!(a.oracle_offset, 0);
+    }
+
+    #[test]
+    fn m4_1_alignment_finds_64_sample_shift_when_search_range_is_256() {
+        // Load-bearing M4.1 case: M3.5.1's max_offset = 32 could
+        // not have found a 64-sample shift. M4.1's per-signal
+        // max_offset = cycle_len_samples resolves it.
+        let raw = synth_sine(256, 128.0);
+        let mut shifted_oracle = vec![0i16; 64];
+        shifted_oracle.extend_from_slice(&raw);
+        let a = align_oracle_to_raw(&shifted_oracle, &raw, 256);
+        assert_eq!(
+            a.oracle_offset, 64,
+            "search range 256 must resolve a 64-sample shift; M3.5.1's 32 could not"
+        );
+    }
+
+    #[test]
+    fn m4_1_alignment_finds_128_sample_shift_for_cycle_256_signal() {
+        // Boundary-relevant: cycle 256 with a 128-sample shift
+        // (half-cycle phase inversion). Search range = 256
+        // resolves it.
+        let raw = synth_sine(512, 256.0);
+        let mut oracle = vec![0i16; 128];
+        oracle.extend_from_slice(&raw);
+        let a = align_oracle_to_raw(&oracle, &raw, 256);
+        assert_eq!(a.oracle_offset, 128);
+    }
+
+    #[test]
+    fn m4_1_validity_predicate_all_pass_for_clean_signal() {
+        let mut m = measurement_with_defaults("sine_cycle_128", 0.0);
+        m.zcr_ratio = 1.02;
+        m.normalized_correlation = 0.95;
+        m.alignment_best_offset = 50;
+        m.peak_abs_error_oracle_vs_raw = 1000;
+        m.peak_abs_error_after_gain_normalization = 100;
+        let v = is_alignment_reliable_for_signal(&m, 128);
+        assert!(v.zcr_in_band);
+        assert!(v.correlation_above_threshold);
+        assert!(v.offset_in_range);
+        assert!(v.gain_separator_ok);
+        assert!(v.all_pass);
+    }
+
+    #[test]
+    fn m4_1_validity_predicate_fails_correlation() {
+        let mut m = measurement_with_defaults("sine_cycle_128", 0.0);
+        m.zcr_ratio = 1.02;
+        m.normalized_correlation = 0.5;
+        m.alignment_best_offset = 50;
+        m.peak_abs_error_oracle_vs_raw = 1000;
+        m.peak_abs_error_after_gain_normalization = 100;
+        let v = is_alignment_reliable_for_signal(&m, 128);
+        assert!(v.zcr_in_band);
+        assert!(!v.correlation_above_threshold);
+        assert!(v.offset_in_range);
+        assert!(v.gain_separator_ok);
+        assert!(!v.all_pass);
+    }
+
+    #[test]
+    fn m4_1_validity_predicate_fails_zcr_in_band() {
+        let mut m = measurement_with_defaults("sine_cycle_128", 0.0);
+        m.zcr_ratio = 1.93;
+        m.normalized_correlation = 0.95;
+        m.alignment_best_offset = 50;
+        m.peak_abs_error_oracle_vs_raw = 1000;
+        m.peak_abs_error_after_gain_normalization = 100;
+        let v = is_alignment_reliable_for_signal(&m, 128);
+        assert!(!v.zcr_in_band);
+        assert!(!v.all_pass);
+    }
+
+    #[test]
+    fn m4_1_validity_predicate_fails_boundary_hit() {
+        let mut m = measurement_with_defaults("sine_cycle_128", 0.0);
+        m.zcr_ratio = 1.02;
+        m.normalized_correlation = 0.95;
+        m.alignment_best_offset = 128;
+        m.peak_abs_error_oracle_vs_raw = 1000;
+        m.peak_abs_error_after_gain_normalization = 100;
+        let v = is_alignment_reliable_for_signal(&m, 128);
+        assert!(!v.offset_in_range);
+        assert!(!v.all_pass);
+    }
+
+    #[test]
+    fn m4_1_validity_predicate_fails_gain_separator_when_shape_diverges() {
+        let mut m = measurement_with_defaults("sine_cycle_128", 0.0);
+        m.zcr_ratio = 1.02;
+        m.normalized_correlation = 0.95;
+        m.alignment_best_offset = 50;
+        m.peak_abs_error_oracle_vs_raw = 1000;
+        m.peak_abs_error_after_gain_normalization = 900;
+        let v = is_alignment_reliable_for_signal(&m, 128);
+        assert!(!v.gain_separator_ok);
+        assert!(!v.all_pass);
+    }
+
+    #[test]
+    fn m4_1_validity_predicate_accepts_silent_signal() {
+        let mut m = measurement_with_defaults("sine_cycle_128", 0.0);
+        m.zcr_ratio = 1.0;
+        m.normalized_correlation = 0.99;
+        m.alignment_best_offset = 0;
+        m.peak_abs_error_oracle_vs_raw = 0;
+        m.peak_abs_error_after_gain_normalization = 0;
+        let v = is_alignment_reliable_for_signal(&m, 128);
+        assert!(v.gain_separator_ok);
+        assert!(v.all_pass);
+    }
+
+    #[test]
+    fn m4_1_compute_alignment_valid_for_report_requires_all_anchors() {
+        let anchors: Vec<Measurement> = PRECONDITION_ANCHOR_SIGNALS
+            .iter()
+            .map(|name| {
+                let mut m = measurement_with_defaults(name, 0.0);
+                m.zcr_ratio = 1.0;
+                m.normalized_correlation = 0.95;
+                m.alignment_best_offset = 10;
+                m.peak_abs_error_oracle_vs_raw = 1000;
+                m.peak_abs_error_after_gain_normalization = 100;
+                m
+            })
+            .collect();
+        assert!(compute_alignment_valid_for_report(&anchors, 128));
+
+        let missing_one: Vec<Measurement> = anchors.iter().take(6).cloned().collect();
+        assert!(!compute_alignment_valid_for_report(&missing_one, 128));
+
+        let mut trip_one = anchors.clone();
+        trip_one[0].normalized_correlation = 0.5;
+        assert!(!compute_alignment_valid_for_report(&trip_one, 128));
+    }
+
+    #[test]
+    fn m4_1_compute_alignment_boundary_hit_flags_near_limit_offset() {
+        let mut anchors: Vec<Measurement> = PRECONDITION_ANCHOR_SIGNALS
+            .iter()
+            .map(|name| measurement_with_defaults(name, 0.0))
+            .collect();
+        for m in anchors.iter_mut() {
+            m.alignment_best_offset = 10;
+        }
+        assert!(!compute_alignment_boundary_hit(&anchors, 128));
+
+        anchors[3].alignment_best_offset = 125;
+        assert!(compute_alignment_boundary_hit(&anchors, 128));
+
+        anchors[3].alignment_best_offset = 128;
+        assert!(compute_alignment_boundary_hit(&anchors, 128));
+    }
+
     /// Test helper: build a `Measurement` with sensible defaults
     /// (including a `zcr_ratio = 1.0` that satisfies the M3.5.1
     /// methodology precondition #0).
