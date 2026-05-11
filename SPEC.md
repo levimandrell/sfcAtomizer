@@ -1178,6 +1178,77 @@ in `i64` to avoid overflow on i16-range inputs (max
 `(2 × 32767)² × N` for `N` samples). `sqrt` and `log10` are the
 only `f64` ops. Cross-platform deterministic.
 
+### 10.11 Native-rate characterization (M5)
+
+**Motivation.** M4.2 outcome 3 identified that M3.5 / M4.2's
+characterization compares two physically different processes:
+raw BRR decode (1:1 sample-aligned at 32 kHz) vs SPC playback
+(DSP pitch register fractionally stepping through samples per
+output sample, then 4-tap gaussian interpolated). For atoms at
+MIDI 60 with `cycle_len_samples = 128`, the atom's native rate
+is `128 × 261.63 ≈ 33489 Hz`; SPC plays at the project's 32 kHz
+master rate, producing the fractional-stepping shape divergence
+documented in M4.2 STATUS. M5 redesigns the comparison to
+eliminate the fractional-stepping mismatch.
+
+**Definition (M5).** For each characterization signal, the M5
+harness MUST:
+
+1. Build the characterization SPC such that the DSP pitch
+   register for the test voice equals exactly `0x1000` (i.e.
+   output rate = input rate; no fractional stepping). This is
+   achieved by selecting an SPC playback rate that matches the
+   signal's native cycle rate, OR by choosing test signals
+   whose native cycle rate equals the project rate.
+
+2. Define `raw_comparison_surface` = host BRR decode tiled at
+   the same effective output cadence the SPC produces.
+
+3. Define `oracle_comparison_surface` = `snes_spc` render of
+   the same module.
+
+4. Record the chosen pitch register value AND any per-signal
+   rate assumptions in the characterization report under a
+   new top-level field `harness_meta`:
+
+   ```json
+   "harness_meta": {
+     "pitch_register": 4096,
+     "rate_strategy": "spc_rate_matches_atom_native",
+     "atom_native_rates_hz": {
+       "sine_cycle_64": 32000,
+       "sine_cycle_128": 32000,
+       "sine_cycle_256": 32000
+     }
+   }
+   ```
+
+**M5.1 implementation approach (locked to consultant M5 plan
+#5).** Implement Option α scoped to the characterization
+harness: build each characterization SPC so the atom's native
+cycle rate and the S-DSP pitch register align at `0x1000`. Do
+NOT add a permanent per-atom `native_sample_rate_hz` field to
+the v2 schema in M5; that is a permanent change appropriate
+only after methodology proves out at M6+ (per consultant M5
+plan #5: "schema change is too permanent for a methodology
+experiment").
+
+**M5.2 acceptance.** A characterization run is `reliable` only
+if EITHER the SPEC §10.9 four-criterion predicate passes for
+all 7 monotonicity-anchor signals OR a documented methodology
+explanation exists. Outcomes (locked at M5.0):
+
+- `reliable_preset_eval` — all 4 criteria pass; pre-emphasis
+  preset evaluation (M5.3) is unlocked.
+- `reliable_no_preset_needed` — criteria pass but the measured
+  gaussian curve is too flat to warrant pre-emphasis; M5.3
+  skipped; proceed to M5.4 (BRR noise-floor strategy spike).
+- `methodology_unresolved` — criteria still fail under the
+  redesigned harness; pre-emphasis defers permanently to M6+;
+  proceed to M5.4 without preset.
+
+The recommendation outcome locks the rest of the M5 milestone.
+
 ---
 
 ## 11. Voice allocation and SFX
