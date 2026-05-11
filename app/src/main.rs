@@ -6906,8 +6906,29 @@ fn cmd_characterize_gaussian(
     // and what anomalies (if any) the run observed.
     let methodology_audit = build_methodology_audit_m3_5_1(&measurements);
 
+    // ----- M4.0 schema v4 / M4.1 fields: aggregate
+    // alignment-validity across the run. Per SPEC §10.9 the search
+    // limit is the max cycle_len across the signal set; for
+    // m3_5_canonical = 256.
+    let alignment_search_limit: u32 = signals
+        .iter()
+        .map(|s| s.atom.cycle_len_samples as u32)
+        .max()
+        .unwrap_or(0);
+    let alignment_boundary_hit =
+        sfc_atomizer_core::characterize_gaussian::compute_alignment_boundary_hit(
+            &measurements,
+            alignment_search_limit,
+        );
+    let alignment_valid =
+        sfc_atomizer_core::characterize_gaussian::compute_alignment_valid_for_report(
+            &measurements,
+            alignment_search_limit,
+        );
+    let methodology_precondition_passed = outcome.recommended_next != "methodology_review";
+
     let report = CharacterizationReport {
-        schema_version: 3,
+        schema_version: 4,
         report_type: "gaussian_characterization".to_string(),
         fixture_set: "m3_5_canonical".to_string(),
         sample_rate_hz: 32_000,
@@ -6919,6 +6940,10 @@ fn cmd_characterize_gaussian(
         },
         test_signals: test_signals_summary,
         measurements: measurements.clone(),
+        alignment_search_limit,
+        alignment_boundary_hit,
+        alignment_valid,
+        methodology_precondition_passed,
         subjective_audition: None,
         methodology_audit_m3_5_1: methodology_audit,
         summary,
