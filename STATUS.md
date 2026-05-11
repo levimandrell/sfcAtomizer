@@ -2,12 +2,188 @@
 
 ## Current milestone
 
-**M4.0 — M4 Contracts Freeze.** No implementation beyond the
-SPEC §10.10 noise-floor metric helpers and their fixture-pin
-tests. Same shape as M2.0 / M3.0: lock the contracts that
-M4.1+ sub-passes build against. No encoder change, no atom
-PCM change (SPEC §16.9 reaffirmed at M4 boundary), no M2 / M3
-baseline change.
+**M4.1 — Alignment search range expansion.** First M4
+research-spike per SPEC §24.1. Mechanically lands the
+alignment-search fix locked at M4.0 (SPEC §10.9 amendment):
+`align_oracle_to_raw` now uses per-signal
+`max_offset = signal.atom.cycle_len_samples` (was hard-coded
+to 32 at M3.5.1). Plus the schema v4 alignment fields and
+the reliable-alignment validity predicate. No encoder change;
+no atom PCM change; no M2/M3 baseline change.
+
+**Outcomes:**
+
+- **Per-signal `max_offset` plumbing** (commit `42ed122`).
+  `finalize_measurement` passes
+  `signal.atom.cycle_len_samples` as the alignment search
+  range. For `m3_5_canonical`: 64 / 128 / 256 across the
+  signals; effective max = 256 vs M3.5.1's flat 32.
+- **Schema v4 alignment fields populated** (commits
+  `7a032ee` for the core types + helpers, `6b3bfac` for the
+  CLI wiring). Four top-level fields:
+  `alignment_search_limit`, `alignment_boundary_hit`,
+  `alignment_valid`, `methodology_precondition_passed`.
+  Per-measurement `alignment_validity: AlignmentValidity`
+  surfaces the four-criterion breakdown for debuggability.
+- **Reliable-alignment validity predicate** (commit
+  `7a032ee`). `is_alignment_reliable_for_signal(measurement,
+  search_limit) -> AlignmentValidity`,
+  `compute_alignment_valid_for_report` (AND across the seven
+  anchor signals), `compute_alignment_boundary_hit` (any
+  anchor within 4 samples of the limit). Constants locked
+  at M4.0: `RELIABLE_ALIGNMENT_CORRELATION_THRESHOLD = 0.90`,
+  `RELIABLE_ALIGNMENT_GAIN_SEPARATOR_THRESHOLD = 0.80`,
+  `RELIABLE_ALIGNMENT_BOUNDARY_TOLERANCE = 4`.
+- **11 fixture tests** (commit `7530eda`). Synthesized-signal
+  cases: alignment finds 64-sample shift / 128-sample shift /
+  zero offset; validity predicate fails each of the four
+  criteria independently; silent signal accepts; aggregate
+  predicate requires all anchors. Workspace test count
+  593 → 604.
+
+### M4.1 informal characterization run (Phase 6)
+
+Re-ran `sfcwc characterize-gaussian` against the M4.1
+implementation; **outcome and runtime captured below**.
+Baselines NOT updated — that's M4.2's deliverable. This is
+informational only.
+
+**Runtime:** `0.566 s` wall-clock for the full 9-signal
+characterization (release build). Search-range expansion
+from 32 → 256 (8× more candidates per alignment call) is
+not a bottleneck.
+
+**Top-level outcome:** `recommended_next = "methodology_review"`
+(precondition #0 still fires). `alignment_valid` would be
+`false` for the same reason — `zcr_ratio` remains anomalous
+for most anchor signals.
+
+**Anchor signal cluster shift** (M3.5.1 → M4.1):
+
+| Signal | align_off | corr | zcr_ratio |
+|---|---|---|---|
+| sine_cycle_64 | 13 → **55** | 0.056 → 0.153 | 1.93 → 1.93 |
+| sine_cycle_128 | 11 → **55** | 0.024 → 0.147 | 1.93 → 1.93 |
+| sine_cycle_256 | 32 → **55** | 0.013 → 0.117 | 1.94 → 1.94 |
+| harmonic_2_cycle_64 | 23 → **55** | 0.261 → 0.274 | 2.57 → 2.58 |
+| harmonic_4_cycle_64 | 7 → 7 | 0.492 → 0.492 | 2.20 → 2.20 |
+| harmonic_8_cycle_64 | 7 → 7 | 0.598 → 0.598 | 2.06 → 2.06 |
+| harmonic_16_cycle_64 | 31 → **63** | 0.983 → 0.984 | 1.00 → 1.00 |
+| all_8_partials | 25 → 40 | 0.191 → **0.613** | 0.97 → 0.97 |
+| normalize_false_clamp | 25 → 40 | 0.568 → 0.597 | 1.54 → 1.55 |
+
+**Engineer's interpretation (informal, M4.2 verifies):**
+
+- Several low-frequency signals (`sine_cycle_64/128/256`,
+  `harmonic_2_cycle_64`) now cluster at `align_off = 55`,
+  suggesting the **true gaussian + DSP delay is ~55 samples**
+  — which M3.5.1's `max_offset = 32` could never reach.
+  Worth M4.2 investigating whether 55 is consistent across
+  signals or a coincidence.
+- `harmonic_16_cycle_64` now resolves at `align_off = 63`
+  (cycle_len = 64 → boundary-adjacent within the
+  4-sample tolerance). `alignment_boundary_hit` will fire
+  for this signal. M4.2 may need to expand the search range
+  further for harmonic_16 specifically, or accept that
+  near-Nyquist signals have an intrinsic 1-sample-near-boundary
+  alignment.
+- **Correlations improve modestly but stay well below 0.90
+  for low-frequency sines** (0.117–0.274 vs 0.013–0.261).
+  Mechanical alignment fix is insufficient on its own — the
+  shape divergence between raw BRR decode and oracle render
+  persists. M4.2 will need to investigate whether this is
+  intrinsic gaussian behavior (real shape difference, not
+  alignment artefact) or an additional methodology issue
+  (e.g. the host BRR decoder vs the oracle's BRR decoder
+  diverge on the same BRR bytes due to predictor-state
+  initialization, sample-rate handling, or DSP envelope).
+- **`all_8_partials` correlation jumped 0.191 → 0.613** —
+  significant improvement; alignment was clearly the
+  bottleneck for this signal. Still below 0.90 but on the
+  trajectory.
+- `zcr_ratio` values are essentially unchanged across the
+  board — they measure zero-crossing rate in absolute terms,
+  not phase, so alignment doesn't move them. The
+  ~2× ZCR doubling on low-frequency signals is a separate
+  symptom (possibly oracle sample-rate doubling or DSP
+  envelope adding zero crossings).
+
+**Implication for M4.2:** the alignment-search fix alone
+does NOT clear the M3.5.1 anomaly. M4.2 will need to either
+(a) accept that the remaining anomalies are real DSP
+behavior and proceed under that assumption, or (b) burn the
+single M4.2.1 correction iteration on investigating the
+shape / ZCR-doubling root cause. Per SPEC §24.1, if the
+anomaly persists after the M4.2.1 budget, characterization
+is declared unreliable and pre-emphasis defers to M5+.
+
+### M4.1 phase log
+
+- **Phase A (commit `42ed122`)** — `finalize_measurement`
+  passes per-signal `max_offset = cycle_len_samples` to
+  `align_oracle_to_raw`.
+- **Phase B + C (commit `7a032ee`)** — Schema v4 top-level
+  fields + `AlignmentValidity` per-measurement field +
+  `is_alignment_reliable_for_signal` /
+  `compute_alignment_valid_for_report` /
+  `compute_alignment_boundary_hit` helpers. Constants locked.
+- **CLI wiring (commit `6b3bfac`)** — `cmd_characterize_gaussian`
+  computes `alignment_search_limit` from the signal set,
+  populates the four top-level fields, and emits
+  `schema_version: 4`.
+- **Phase D (commit `7530eda`)** — 11 fixture tests covering
+  alignment search-range expansion and each validity
+  criterion independently.
+- **Phase 6 (informal run, not committed)** — re-ran
+  characterize-gaussian; results captured inline above. No
+  baseline update.
+- **Phase E (this entry)** — STATUS rewrite.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **604 tests
+  workspace-wide** (was 593 at M4.0 close; +11 from Phase D).
+
+### Decisions log additions (M4.1)
+
+- M4.1 research-spike landed mechanically. `align_oracle_to_raw`
+  search range = `max_cycle_len_samples` per signal; was 32
+  flat. For `m3_5_canonical`: per-signal 64/128/256, effective
+  max 256.
+- Schema v4 fields populated: `alignment_search_limit`,
+  `alignment_boundary_hit`, `alignment_valid`,
+  `methodology_precondition_passed`. Plus per-measurement
+  `alignment_validity` struct (4 booleans + `all_pass`)
+  exposed for debuggability.
+- Reliable-alignment validity predicate implemented per
+  SPEC §10.9 4-condition contract. The 80% gain-separator
+  threshold (`RELIABLE_ALIGNMENT_GAIN_SEPARATOR_THRESHOLD`)
+  was an engineer call within the SPEC's "materially lower"
+  prose; M4.2 will exercise it and engineer may revisit.
+- Informal Phase 6 characterization run: per-signal
+  `align_off` clusters shifted (low-frequency anchors
+  converging on ~55; `harmonic_16` at boundary-adjacent 63);
+  correlations improve modestly but stay below 0.90 for
+  canonical sines; `zcr_ratio` essentially unchanged. M4.1
+  fix is necessary but not sufficient.
+- Runtime is fine: 0.566 s for full 9-signal run, well under
+  any concern (consultant stop condition was ~30s).
+- M4.1 does NOT update baselines — M4.2's deliverable.
+
+**Next pass: M4.2 — Characterization re-run with reliable
+alignment + decision.** Per SPEC §24.1: M4.2 validates whether
+M4.1's fix produces reliable measurements (`alignment_valid:
+true` for all anchors), records the new measurements in
+baselines/m4.json::documentary_snapshot, and decides whether
+to proceed to M4.3 (BRR noise-floor) or burn the M4.2.1
+correction iteration on the remaining anomaly. Per the M4.1
+informal observation, M4.2.1 may be needed. PM to brief.
+
+**Previous milestone (M4.0) — M4 Contracts Freeze.** No
+implementation beyond the SPEC §10.10 noise-floor metric
+helpers and their fixture-pin tests. Same shape as M2.0 / M3.0:
+lock the contracts that M4.1+ sub-passes build against. No
+encoder change, no atom PCM change (SPEC §16.9 reaffirmed at
+M4 boundary), no M2 / M3 baseline change.
 
 **Outcomes:**
 
@@ -703,9 +879,20 @@ PM go/defer decision at M3.4 entry brief.
 
 ## Last pass
 
-**Pass M4.0 — M4 Contracts Freeze (Phases A–H).** Detail folded
-into the "Current milestone" section above. Eight commits
-covering: SPEC §10.9 reliable-alignment + search-range
+**Pass M4.1 — Alignment search range expansion (Phases A–E).**
+First M4 research-spike. Detail folded into "Current milestone"
+above. Five commits: per-signal `max_offset = cycle_len_samples`
+plumbing, schema v4 alignment fields + reliable-alignment
+validity predicate, CLI wiring for the four top-level alignment
+fields, 11 fixture tests, STATUS rewrite. Workspace test
+count 593 → 604. Informal characterization run captured
+(unchanged `recommended_next = methodology_review` — alignment
+fix is necessary but not sufficient; M4.2 decides next step).
+
+---
+
+**Pass M4.0 — M4 Contracts Freeze (Phases A–H).** Eight commits
+covering SPEC §10.9 reliable-alignment + search-range
 amendment (schema v3 → v4), SPEC §10.10 BRR noise-floor
 metrics, SPEC §10.9 pre-emphasis ordering, SPEC §24.1
 research-spike exit criteria + §24.2 baseline shift rules,
