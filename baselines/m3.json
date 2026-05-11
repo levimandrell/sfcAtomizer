@@ -719,49 +719,56 @@
       "value": 16,
       "kind": "rotation_offset",
       "snapshot_at": "M3.3",
-      "_note": "Chosen rotation offset for normalize_false_multi_partial_clamp_safety after the SPEC 10.7 lex objective. Documentary at M3.3; promoted to identity_gated at the last encoder-changing M3 sub-pass per consultant #19."
+      "_note": "Chosen rotation offset for normalize_false_multi_partial_clamp_safety after the SPEC 10.7 lex objective. Documentary at M3.3; promoted to identity_gated at the last encoder-changing M3 sub-pass per consultant #19.",
+      "_audition_note": "Stress fixture for clamping/overflow path; M3.5 audition (5 pairs, build/audition/m3.5-prelude/) found loop-click reduction is mathematically real (16384 -> 2048, 87%) but perceptually masked by the clipped waveform. Not evidence of audible quality improvement."
     },
     {
       "name": "M3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_LOOP_CLICK_ABS_PHASE_ROTATION",
       "value": 2048,
       "kind": "metric_value",
       "snapshot_at": "M3.3",
-      "_note": "Post-rotation loop_click_abs for normalize_false_multi_partial_clamp_safety. Must be <= M3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_LOOP_CLICK_ABS_PRE_M3 per the lex objective (SPEC 10.7) and M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE."
+      "_note": "Post-rotation loop_click_abs for normalize_false_multi_partial_clamp_safety. Must be <= M3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_LOOP_CLICK_ABS_PRE_M3 per the lex objective (SPEC 10.7) and M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE.",
+      "_audition_note": "Stress fixture for clamping/overflow path; M3.5 audition (5 pairs, build/audition/m3.5-prelude/) found loop-click reduction is mathematically real (16384 -> 2048, 87%) but perceptually masked by the clipped waveform. Not evidence of audible quality improvement."
     },
     {
       "name": "M3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_BRR_SHA256_PHASE_ROTATION",
       "value": "5d134b4bddb6fdf7f06eb271828bc3a78b98adb358ca5a36751dc297b8624c65",
       "kind": "sha256",
       "snapshot_at": "M3.3",
-      "_note": "Post-rotation BRR SHA for normalize_false_multi_partial_clamp_safety. Shifts at later encoder-changing sub-passes (M3.4 predictor, M3.6 pre-emphasis) if they ship."
+      "_note": "Post-rotation BRR SHA for normalize_false_multi_partial_clamp_safety. Shifts at later encoder-changing sub-passes (M3.4 predictor, M3.6 pre-emphasis) if they ship.",
+      "_audition_note": "Stress fixture for clamping/overflow path; M3.5 audition (5 pairs, build/audition/m3.5-prelude/) found loop-click reduction is mathematically real (16384 -> 2048, 87%) but perceptually masked by the clipped waveform. Not evidence of audible quality improvement."
     },
     {
       "name": "M3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_DECODED_BRR_PCM_SHA256_PHASE_ROTATION",
       "value": "0f1a464d14ec4c4e6c15773ad2c850f5fd177322c11c7b30f295b9fbf39686aa",
       "kind": "sha256",
       "snapshot_at": "M3.3",
-      "_note": "Post-rotation decoded-from-BRR PCM SHA. Same shift surface as the BRR SHA."
+      "_note": "Post-rotation decoded-from-BRR PCM SHA. Same shift surface as the BRR SHA.",
+      "_audition_note": "Stress fixture for clamping/overflow path; M3.5 audition (5 pairs, build/audition/m3.5-prelude/) found loop-click reduction is mathematically real (16384 -> 2048, 87%) but perceptually masked by the clipped waveform. Not evidence of audible quality improvement."
     },
     {
       "name": "M3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_PEAK_ABS_ERROR_PHASE_ROTATION",
       "value": 18431,
       "kind": "metric_value",
       "snapshot_at": "M3.3",
-      "_note": "Secondary lex level for the chosen rotation candidate per SPEC 10.7. Reports-only at M3."
+      "_note": "Secondary lex level for the chosen rotation candidate per SPEC 10.7. Reports-only at M3.",
+      "_audition_note": "Stress fixture for clamping/overflow path; M3.5 audition (5 pairs, build/audition/m3.5-prelude/) found loop-click reduction is mathematically real (16384 -> 2048, 87%) but perceptually masked by the clipped waveform. Not evidence of audible quality improvement."
     },
     {
       "name": "M3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_RMS_ERROR_PHASE_ROTATION",
       "value": 10562.454493245166,
       "kind": "metric_value",
       "snapshot_at": "M3.3",
-      "_note": "Tertiary lex level for the chosen rotation candidate. Reports-only at M3."
+      "_note": "Tertiary lex level for the chosen rotation candidate. Reports-only at M3.",
+      "_audition_note": "Stress fixture for clamping/overflow path; M3.5 audition (5 pairs, build/audition/m3.5-prelude/) found loop-click reduction is mathematically real (16384 -> 2048, 87%) but perceptually masked by the clipped waveform. Not evidence of audible quality improvement."
     },
     {
       "name": "M3_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY_LOOP_WINDOW_RMS_DELTA_PHASE_ROTATION",
       "value": 25742.960824271944,
       "kind": "metric_value",
       "snapshot_at": "M3.3",
-      "_note": "Diagnostic windowed loop-click metric post-rotation. Reports-only at M3."
+      "_note": "Diagnostic windowed loop-click metric post-rotation. Reports-only at M3.",
+      "_audition_note": "Stress fixture for clamping/overflow path; M3.5 audition (5 pairs, build/audition/m3.5-prelude/) found loop-click reduction is mathematically real (16384 -> 2048, 87%) but perceptually masked by the clipped waveform. Not evidence of audible quality improvement."
     },
     {
       "name": "M3_ATOM_HARMONIC_16_CYCLE_64_ROTATION_OFFSET_PHASE_ROTATION",
@@ -817,49 +824,56 @@
       "value": 16,
       "kind": "rotation_offset",
       "snapshot_at": "M3.3",
-      "_note": "Chosen rotation offset for all_8_partials_max_amp_harmonics_1_to_8 after the SPEC 10.7 lex objective. Documentary at M3.3; promoted to identity_gated at the last encoder-changing M3 sub-pass per consultant #19."
+      "_note": "Chosen rotation offset for all_8_partials_max_amp_harmonics_1_to_8 after the SPEC 10.7 lex objective. Documentary at M3.3; promoted to identity_gated at the last encoder-changing M3 sub-pass per consultant #19.",
+      "_audition_note": "Legitimate bright harmonic input; M3.5 audition found phase rotation removes measured seam discontinuity (10240 -> 0, 100%) but the A/B change is perceptually masked by existing dense harmonic content. Not a stress fixture - represents real musical input - but does not produce audible improvement under rotation alone."
     },
     {
       "name": "M3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_LOOP_CLICK_ABS_PHASE_ROTATION",
       "value": 0,
       "kind": "metric_value",
       "snapshot_at": "M3.3",
-      "_note": "Post-rotation loop_click_abs for all_8_partials_max_amp_harmonics_1_to_8. Must be <= M3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_LOOP_CLICK_ABS_PRE_M3 per the lex objective (SPEC 10.7) and M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE."
+      "_note": "Post-rotation loop_click_abs for all_8_partials_max_amp_harmonics_1_to_8. Must be <= M3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_LOOP_CLICK_ABS_PRE_M3 per the lex objective (SPEC 10.7) and M3_PHASE_ROTATION_LOOP_CLICK_IMPROVEMENT_GATE.",
+      "_audition_note": "Legitimate bright harmonic input; M3.5 audition found phase rotation removes measured seam discontinuity (10240 -> 0, 100%) but the A/B change is perceptually masked by existing dense harmonic content. Not a stress fixture - represents real musical input - but does not produce audible improvement under rotation alone."
     },
     {
       "name": "M3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_BRR_SHA256_PHASE_ROTATION",
       "value": "d383f226bdcbc0655798e0a1f8308af22fc37f458a6a640dc6f2f1ef90e0174e",
       "kind": "sha256",
       "snapshot_at": "M3.3",
-      "_note": "Post-rotation BRR SHA for all_8_partials_max_amp_harmonics_1_to_8. Shifts at later encoder-changing sub-passes (M3.4 predictor, M3.6 pre-emphasis) if they ship."
+      "_note": "Post-rotation BRR SHA for all_8_partials_max_amp_harmonics_1_to_8. Shifts at later encoder-changing sub-passes (M3.4 predictor, M3.6 pre-emphasis) if they ship.",
+      "_audition_note": "Legitimate bright harmonic input; M3.5 audition found phase rotation removes measured seam discontinuity (10240 -> 0, 100%) but the A/B change is perceptually masked by existing dense harmonic content. Not a stress fixture - represents real musical input - but does not produce audible improvement under rotation alone."
     },
     {
       "name": "M3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_DECODED_BRR_PCM_SHA256_PHASE_ROTATION",
       "value": "e24326f26cdeda585352a21572c8033e96db8d21baded3602cd85308de990854",
       "kind": "sha256",
       "snapshot_at": "M3.3",
-      "_note": "Post-rotation decoded-from-BRR PCM SHA. Same shift surface as the BRR SHA."
+      "_note": "Post-rotation decoded-from-BRR PCM SHA. Same shift surface as the BRR SHA.",
+      "_audition_note": "Legitimate bright harmonic input; M3.5 audition found phase rotation removes measured seam discontinuity (10240 -> 0, 100%) but the A/B change is perceptually masked by existing dense harmonic content. Not a stress fixture - represents real musical input - but does not produce audible improvement under rotation alone."
     },
     {
       "name": "M3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_PEAK_ABS_ERROR_PHASE_ROTATION",
       "value": 18431,
       "kind": "metric_value",
       "snapshot_at": "M3.3",
-      "_note": "Secondary lex level for the chosen rotation candidate per SPEC 10.7. Reports-only at M3."
+      "_note": "Secondary lex level for the chosen rotation candidate per SPEC 10.7. Reports-only at M3.",
+      "_audition_note": "Legitimate bright harmonic input; M3.5 audition found phase rotation removes measured seam discontinuity (10240 -> 0, 100%) but the A/B change is perceptually masked by existing dense harmonic content. Not a stress fixture - represents real musical input - but does not produce audible improvement under rotation alone."
     },
     {
       "name": "M3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_RMS_ERROR_PHASE_ROTATION",
       "value": 4574.389392312377,
       "kind": "metric_value",
       "snapshot_at": "M3.3",
-      "_note": "Tertiary lex level for the chosen rotation candidate. Reports-only at M3."
+      "_note": "Tertiary lex level for the chosen rotation candidate. Reports-only at M3.",
+      "_audition_note": "Legitimate bright harmonic input; M3.5 audition found phase rotation removes measured seam discontinuity (10240 -> 0, 100%) but the A/B change is perceptually masked by existing dense harmonic content. Not a stress fixture - represents real musical input - but does not produce audible improvement under rotation alone."
     },
     {
       "name": "M3_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8_LOOP_WINDOW_RMS_DELTA_PHASE_ROTATION",
       "value": 26307.036321106185,
       "kind": "metric_value",
       "snapshot_at": "M3.3",
-      "_note": "Diagnostic windowed loop-click metric post-rotation. Reports-only at M3."
+      "_note": "Diagnostic windowed loop-click metric post-rotation. Reports-only at M3.",
+      "_audition_note": "Legitimate bright harmonic input; M3.5 audition found phase rotation removes measured seam discontinuity (10240 -> 0, 100%) but the A/B change is perceptually masked by existing dense harmonic content. Not a stress fixture - represents real musical input - but does not produce audible improvement under rotation alone."
     },
     {
       "name": "M3_ATOM_PHASE_CYCLES_0_9999_ROTATION_OFFSET_PHASE_ROTATION",
