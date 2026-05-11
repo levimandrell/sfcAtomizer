@@ -2,11 +2,144 @@
 
 ## Current milestone
 
-**M4.6 — GUI polish + M4.4 arithmetic wording patch.** Small
-pass; two independent layers. Per consultant M4.4 audit close-out
-(layer 1) plus consultant M3 close-out audit #19 item 5 (layer
-2). No encoder change; no SPEC contract change; no M2 / M3 / M4
-numeric baseline change.
+**M4.7 — M4 release prep + acceptance + tag `v0.4-rc1`.** Final
+M4 sub-pass. Mirrors M3.8 structure with the same baselines-
+inheritance + literal-pin patterns. No encoder change; no SPEC
+contract change; no M2 / M3 / M4 numeric baseline change.
+Release notes are the load-bearing piece — M4.2 outcome 3,
+M4.4 SKIP, and M4.5 permanently skipped are all explicit, not
+obscured.
+
+**Outcomes:**
+
+- **`m4-acceptance` bundle CLI** (Phase 1, commit `e3f0e5e`).
+  Five-stage rollup analog of `m3-acceptance`: M3 regression
+  (subprocess `m3-acceptance`) → alignment validity (M4.1
+  plumbing tests) → BRR noise-floor baseline (M4.3 fixture-pin)
+  → M4.4 spike state (feature-flag preservation + decode +
+  determinism + loop_click invariants) → baselines integrity
+  audit (identity_gated empty at M4 by design). Stage 2
+  reports `warn` for the M4.2-outcome-3 `alignment_valid:
+  false` reality (documented and intentional); stages 1/3/4/5
+  report `ok`. Bundle JSON built via `Map::insert` pattern per
+  the M3.8 Windows-stack-overflow fix. `bundle.status = warn`
+  on both `fixtures/projects/canonical_m2/canonical_m2.sfcproj.json`
+  and `fixtures/projects/atom_edge_cases/harmonic_16_cycle_64.sfcproj.json`.
+- **Reproducer doc updated for M4** (Phase 2, commit
+  `b2e6d82`). Option A continues — `docs/reproduce-m2.md` is
+  the unified guide. New sections: `m4-acceptance` invocation
+  + expected stderr summary + per-stage description; "M4-
+  specific reproduction notes" covering the
+  `alignment_valid: false`, no-production-encoder-change, and
+  M4.5-permanently-skipped realities; "Reproduce the M4.3 BRR
+  noise-floor measurement" with the ignored print-helper
+  invocations. Test count updated 579 → 615.
+- **`RELEASE_NOTES_v0.4-rc.md` shipped** (Phase 3, commit
+  `82d0522`). Highlights covering M4.0–M4.7, locked-baseline
+  summary, the load-bearing "M4 measurement outcomes" section
+  documenting M4.2 outcome 3 + M4.4 SKIP + M4.5 permanent
+  defer per consultant M4.4 audit #11, M5 prelude scope
+  sketch, tagging instructions.
+- **M4 baseline classification audit complete** (Phase 4,
+  commit `9129ce9`). `identity_gated` empty by design (M4
+  was measurement / research, not feature surfaces).
+  `behavior_gated` 6 entries: three M4.0 policy contracts
+  with `test: null` (acceptable per M3.8 pattern —
+  `M4_ALIGNMENT_SEARCH_LIMIT`, `M4_METHODOLOGY_REPAIR_BUDGET`,
+  `M4_PRE_EMPHASIS_PIPELINE_ORDER`); three patched with
+  `test:` fields pointing at the actual tests
+  (`M4_RELIABLE_ALIGNMENT_CRITERIA` →
+  `m4_1_validity_predicate_*`,
+  `M4_BRR_NOISE_FLOOR_METRICS` →
+  `core/tests/brr_noise_floor_metric.rs::*`,
+  `M4_ENCODER_SPIKE_EXIT_CRITERION` →
+  `m4_4_spike_does_not_worsen_loop_click_vs_m3_3_production`).
+  `documentary_snapshot` 167 entries (74 M4.2 + 80 M4.3 + 13
+  M4.4) — no `test:` required per pattern.
+- **M5 prelude scope documented in SPEC §25** (Phase 5,
+  commit `78a952f`). Five forward questions: characterization
+  methodology redesign (project-rate alignment with atom
+  native rate), conditional pre-emphasis (gated on item 1),
+  BRR noise-floor compensation strategies (source-domain
+  attenuation / pre-emphasis / BRR-spec extension /
+  wider-beam follow-up), `rename_track_id_cascade` cross-tree
+  wiring on future schema growth, `baselines/m5.json` with
+  inherits-M4 pattern.
+- **`v0.4-rc1` annotated tag** at the M4.7 close commit
+  (Phase 6, this entry; tagged after STATUS push).
+
+### M4.7 phase log
+
+- **Phase 1 (commit `e3f0e5e`)** — `sfcwc m4-acceptance`
+  subcommand. `cmd_m4_acceptance` + `M4AcceptanceBundleArgs` +
+  `build_m4_acceptance_bundle_json` mirroring the M3.8 split.
+  ~350 lines.
+- **Phase 2 (commit `b2e6d82`)** — `docs/reproduce-m2.md`
+  extended with M4 reproduction section. Test count updated.
+- **Phase 3 (commit `82d0522`)** —
+  `RELEASE_NOTES_v0.4-rc.md` (new file, 264 lines).
+  Mirrors `RELEASE_NOTES_v0.3-rc.md` shape. Explicit
+  outcome documentation.
+- **Phase 4 (commit `9129ce9`)** — `baselines/m4.json`: added
+  `test:` fields to 3 of 6 behavior_gated entries; the
+  remaining 3 stay `test: null` as policy contracts per M3.8
+  pattern. `identity_gated` confirmed empty by design.
+- **Phase 5 (commit `78a952f`)** — `SPEC.md` §25 M5 prelude
+  scope.
+- **Phase 6 (this entry)** — STATUS rewrite + `v0.4-rc1`
+  annotated tag at the M4.7 close commit.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **615 tests
+  workspace-wide** (same as M4.6 close; M4.7 added no new
+  test functions — release prep is implementation +
+  documentation work).
+- **m4-acceptance runtime confirmation (final tag-eve run):**
+
+  ```
+  m4-acceptance: project_a=fixtures/projects/canonical_m2/canonical_m2.sfcproj.json
+    stage_1_m3_regression: ok
+    stage_2_alignment_validity: warn (alignment_valid=false expected; M4.2 outcome 3)
+    stage_3_brr_noise_floor_baseline: ok
+    stage_4_m4_4_spike_state: ok
+    stage_5_baselines_integrity: ok
+    bundle.status: warn
+  ```
+
+  Both the canonical M2 fixture and the M3.3
+  `harmonic_16_cycle_64.sfcproj.json` reproducer fixture
+  return the same `bundle.status = warn` end-to-end — the
+  only non-clean signal is the M4.2-outcome-3
+  `alignment_valid: false`, documented and intentional.
+
+### Decisions log additions (M4.7)
+
+- `m4-acceptance` bundle shipped; 5-stage rollup using
+  `Map::insert` (NOT `serde_json::json!{}` — M3.8 stack-overflow
+  lesson carried forward).
+- Reproducer doc updated for M4 (single-doc Option A
+  continues).
+- `RELEASE_NOTES_v0.4-rc.md` shipped with explicit M4.2
+  outcome 3 + M4.4 SKIP + M4.5 permanently skipped
+  documentation per consultant M4.4 audit #11.
+- Baseline classification audit complete: 0 identity_gated,
+  6 behavior_gated (3 with test: fields added, 3 policy
+  contracts with test: null), 167 documentary_snapshot.
+- M5 prelude scope documented in SPEC §25 (5 forward
+  questions). Includes the wider-beam-follow-up M5 candidate
+  per consultant M4.4 audit #6.
+- `v0.4-rc1` annotated tag at the M4.7 close commit.
+- **Next pass: M5 prelude.** PM may consult before M5 entry
+  (M3-style cadence — consultant planning pass produces M5
+  sub-pass structure), or proceed directly to an M5 entry
+  brief.
+
+**Previous milestone (M4.6) — GUI polish + M4.4 arithmetic
+wording patch.** Small pass; two independent layers. Per
+consultant M4.4 audit close-out (layer 1) plus consultant
+M3 close-out audit #19 item 5 (layer 2). No encoder change;
+no SPEC contract change; no M2 / M3 / M4 numeric baseline
+change.
 
 **Layer 1 — M4.4 arithmetic wording patch** (commit `392dd04`).
 Consultant M4.4 audit #2, #4, #9: the "no filter/shift
@@ -1520,18 +1653,27 @@ PM go/defer decision at M3.4 entry brief.
 
 ## Last pass
 
+**Pass M4.7 — M4 release prep + acceptance + tag `v0.4-rc1`
+(Phases 1–6).** Final M4 sub-pass. Six commits: `m4-acceptance`
+5-stage bundle CLI, reproducer doc update, release notes with
+M4.2 / M4.4 / M4.5 deferral documentation, baseline
+classification audit, SPEC §25 M5 prelude scope, STATUS
+rewrite. Workspace test count unchanged at 615 (release prep
+is implementation + docs). `m4-acceptance` bundle.status =
+`warn` end-to-end on both canonical M2 + M3.3 edge-case
+fixtures — only stage 2's `alignment_valid: false`
+(documented M4.2 outcome 3) is non-clean; stages 1/3/4/5 ok.
+M4 closed; PM consults before M5 entry.
+
+---
+
 **Pass M4.6 — GUI polish + M4.4 arithmetic wording patch
-(Phases 0, A–D).** Small two-layer pass. Phase 0 (commit
-`392dd04`): patched the M4.4 "structural ceiling" wording in
-STATUS + `baselines/m4.json` per consultant M4.4 audit #2 / #4
-/ #9 (narrower current-sample-term claim, amplitude=0.75
-explanation, filter-1/2/3 predictor surface as a follow-up
-direction). Phases A–D (commits `726c036`, `d7ec00b`): defensive
-`rename_track_id_cascade` landing for symmetry with M2.8 atom
-and M3.7 sequence cascades. The v2 schema does not currently
-reference `tracks[].id` cross-tree, so no actual cascade
-work — method + GUI + 5 tests land the pattern for future
-schema growth. Workspace test count 610 → 615.
+(Phases 0, A–D).** Small two-layer pass. Phase 0
+(`392dd04`): patched M4.4 "structural ceiling" wording per
+consultant M4.4 audit #2 / #4 / #9. Phases A–D
+(`726c036`, `d7ec00b`): defensive `rename_track_id_cascade`
+landing for symmetry with M2.8 atom + M3.7 sequence cascades.
+Workspace test count 610 → 615.
 
 ---
 
