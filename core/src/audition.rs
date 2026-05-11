@@ -249,6 +249,121 @@ fn write_pcm16_mono_wav(
     Ok(())
 }
 
+// ============================================================
+// SPEC §10.10 — BRR encoder noise floor metrics (M4.0)
+// ============================================================
+//
+// Pure functions comparing the BRR-decoded PCM against the
+// encoder's input (the rotated source per SPEC §10.7). M4.0
+// fixes the contract + formulas; M4.3 wires them through the
+// `render_to_brr` path and the gaussian characterization
+// report. Tests in `core/tests/brr_noise_floor_metric.rs` pin
+// the formulas on hand-constructed PCM vectors so the metric
+// implementation cannot be retroactively tweaked.
+
+/// SPEC §10.10: `max_i(|rotated_source[i] - decoded[i]|)` in
+/// widened `i32` arithmetic.
+///
+/// Returns `0` for empty inputs. Panics if the two slices
+/// differ in length (caller bug — the encoder pipeline always
+/// pairs same-length buffers).
+pub fn peak_abs_raw_vs_source(rotated_source: &[i16], decoded: &[i16]) -> i32 {
+    assert_eq!(
+        rotated_source.len(),
+        decoded.len(),
+        "peak_abs_raw_vs_source: slice lengths must match"
+    );
+    rotated_source
+        .iter()
+        .zip(decoded.iter())
+        .map(|(s, d)| (*s as i32 - *d as i32).abs())
+        .max()
+        .unwrap_or(0)
+}
+
+/// SPEC §10.10: `sqrt(mean_i((rotated_source[i] - decoded[i])^2))`.
+///
+/// Sum-of-squares accumulates in `i64` (max
+/// `(2 × 32767)² × N ≈ 4.3 × 10⁹ × N`) so a 16k-sample buffer
+/// won't overflow. The single `sqrt` is the only `f64`
+/// operation. Returns `0.0` for empty inputs.
+///
+/// Panics if the two slices differ in length.
+pub fn rms_raw_vs_source(rotated_source: &[i16], decoded: &[i16]) -> f64 {
+    assert_eq!(
+        rotated_source.len(),
+        decoded.len(),
+        "rms_raw_vs_source: slice lengths must match"
+    );
+    let n = rotated_source.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let mut sum_sq: i64 = 0;
+    for (s, d) in rotated_source.iter().zip(decoded.iter()) {
+        let diff = (*s as i32 - *d as i32) as i64;
+        sum_sq += diff * diff;
+    }
+    ((sum_sq as f64) / (n as f64)).sqrt()
+}
+
+/// SPEC §10.10: `20 * log10(source_rms / rms_raw_vs_source)`.
+///
+/// Computes `source_rms` over `rotated_source` and the error
+/// RMS over `rotated_source - decoded`. Returns
+/// `f64::INFINITY` when the error RMS is below `1e-12` (the
+/// encoder reproduced the source exactly). Returns `0.0` when
+/// the source itself is silent (zero source_rms).
+///
+/// Panics if the two slices differ in length.
+pub fn snr_db(rotated_source: &[i16], decoded: &[i16]) -> f64 {
+    assert_eq!(
+        rotated_source.len(),
+        decoded.len(),
+        "snr_db: slice lengths must match"
+    );
+    let n = rotated_source.len();
+    if n == 0 {
+        return 0.0;
+    }
+    // source_rms.
+    let mut src_sq: i64 = 0;
+    for s in rotated_source {
+        let v = *s as i64;
+        src_sq += v * v;
+    }
+    let source_rms = ((src_sq as f64) / (n as f64)).sqrt();
+    if source_rms == 0.0 {
+        return 0.0;
+    }
+    let err_rms = rms_raw_vs_source(rotated_source, decoded);
+    // Guard for f64-floor: exact-match decode produces err_rms == 0.0,
+    // but rounding in intermediate ops could yield a vanishingly
+    // small positive value; 1e-12 is well below any realistic encoder
+    // error and treats either case as "perfect".
+    if err_rms < 1e-12 {
+        return f64::INFINITY;
+    }
+    20.0 * (source_rms / err_rms).log10()
+}
+
+/// SPEC §10.10: count of decoded samples at the i16 saturation
+/// boundary on either polarity.
+///
+/// Implementation uses widened `i32` for the absolute value so
+/// `i16::MIN.abs()` does not overflow in debug builds. The
+/// threshold `>= 32767` counts `32767`, `-32767`, and `-32768`.
+/// `32766` and lower magnitudes do not count.
+pub fn clipping_count_raw(decoded: &[i16]) -> u32 {
+    let mut count: u32 = 0;
+    for s in decoded {
+        if (*s as i32).abs() >= 32767 {
+            count += 1;
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
