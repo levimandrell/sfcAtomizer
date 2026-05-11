@@ -1150,6 +1150,233 @@
       "kind": "metric_value",
       "snapshot_at": "M4.3",
       "_note": "SPEC 10.10 saturation count."
+    },
+    {
+      "name": "M4_4_SPIKE_ATOM_128_SINE",
+      "value": {
+        "m4_3_peak": 9582,
+        "m4_4_peak": 9580,
+        "peak_delta_pct": -0.02087246921310791,
+        "m4_3_rms": 4795.185290345932,
+        "m4_4_rms": 4792.086923056071,
+        "rms_delta_pct": -0.06461413068018265,
+        "m4_3_snr_db": 11.18,
+        "m4_4_snr_db": 11.19,
+        "snr_delta_db": 0.009999999999999787,
+        "meets_10pct_threshold": false
+      },
+      "kind": "spike_delta_record",
+      "snapshot_at": "M4.4",
+      "_note": "M4.4 spike (beam_width=4) measurement vs M4.3 baseline. Negative delta_pct = improvement. meets_10pct_threshold must be true for the fixture to trigger the SPEC \u00a724.1 exit criterion #1."
+    },
+    {
+      "name": "M4_4_SPIKE_ATOM_64_SINE",
+      "value": {
+        "m4_3_peak": 10239,
+        "m4_4_peak": 10380,
+        "peak_delta_pct": 1.377087606211544,
+        "m4_3_rms": 5108.548781821507,
+        "m4_4_rms": 4985.328824097263,
+        "rms_delta_pct": -2.412034473718155,
+        "m4_3_snr_db": 10.63,
+        "m4_4_snr_db": 10.85,
+        "snr_delta_db": 0.21999999999999886,
+        "meets_10pct_threshold": false
+      },
+      "kind": "spike_delta_record",
+      "snapshot_at": "M4.4",
+      "_note": "M4.4 spike (beam_width=4) measurement vs M4.3 baseline. Negative delta_pct = improvement. meets_10pct_threshold must be true for the fixture to trigger the SPEC \u00a724.1 exit criterion #1."
+    },
+    {
+      "name": "M4_4_SPIKE_ATOM_AMPLITUDE_ZERO",
+      "value": {
+        "m4_3_peak": 0,
+        "m4_4_peak": 0,
+        "peak_delta_pct": 0.0,
+        "m4_3_rms": 0.0,
+        "m4_4_rms": 0.0,
+        "rms_delta_pct": 0.0,
+        "m4_3_snr_db": 0.0,
+        "m4_4_snr_db": 0.0,
+        "snr_delta_db": 0.0,
+        "meets_10pct_threshold": false
+      },
+      "kind": "spike_delta_record",
+      "snapshot_at": "M4.4",
+      "_note": "M4.4 spike (beam_width=4) measurement vs M4.3 baseline. Negative delta_pct = improvement. meets_10pct_threshold must be true for the fixture to trigger the SPEC \u00a724.1 exit criterion #1."
+    },
+    {
+      "name": "M4_4_SPIKE_ATOM_ALL_PARTIALS_ZERO_NORMALIZE_TRUE",
+      "value": {
+        "m4_3_peak": 0,
+        "m4_4_peak": 0,
+        "peak_delta_pct": 0.0,
+        "m4_3_rms": 0.0,
+        "m4_4_rms": 0.0,
+        "rms_delta_pct": 0.0,
+        "m4_3_snr_db": 0.0,
+        "m4_4_snr_db": 0.0,
+        "snr_delta_db": 0.0,
+        "meets_10pct_threshold": false
+      },
+      "kind": "spike_delta_record",
+      "snapshot_at": "M4.4",
+      "_note": "M4.4 spike (beam_width=4) measurement vs M4.3 baseline. Negative delta_pct = improvement. meets_10pct_threshold must be true for the fixture to trigger the SPEC \u00a724.1 exit criterion #1."
+    },
+    {
+      "name": "M4_4_SPIKE_ATOM_TWO_PARTIALS_CANCEL_PARTIALLY",
+      "value": {
+        "m4_3_peak": 10239,
+        "m4_4_peak": 10239,
+        "peak_delta_pct": 0.0,
+        "m4_3_rms": 1532.3267795659644,
+        "m4_4_rms": 1532.145921575357,
+        "rms_delta_pct": -0.01180283429221234,
+        "m4_3_snr_db": 13.36,
+        "m4_4_snr_db": 13.36,
+        "snr_delta_db": 0.0,
+        "meets_10pct_threshold": false
+      },
+      "kind": "spike_delta_record",
+      "snapshot_at": "M4.4",
+      "_note": "M4.4 spike (beam_width=4) measurement vs M4.3 baseline. Negative delta_pct = improvement. meets_10pct_threshold must be true for the fixture to trigger the SPEC \u00a724.1 exit criterion #1."
+    },
+    {
+      "name": "M4_4_SPIKE_ATOM_MAX_AMPLITUDE_NO_NORMALIZE",
+      "value": {
+        "m4_3_peak": 18431,
+        "m4_4_peak": 18431,
+        "peak_delta_pct": 0.0,
+        "m4_3_rms": 10576.551517389777,
+        "m4_4_rms": 10558.595953801101,
+        "rms_delta_pct": -0.16976765592408088,
+        "m4_3_snr_db": 6.4,
+        "m4_4_snr_db": 6.41,
+        "snr_delta_db": 0.009999999999999787,
+        "meets_10pct_threshold": false
+      },
+      "kind": "spike_delta_record",
+      "snapshot_at": "M4.4",
+      "_note": "M4.4 spike (beam_width=4) measurement vs M4.3 baseline. Negative delta_pct = improvement. meets_10pct_threshold must be true for the fixture to trigger the SPEC \u00a724.1 exit criterion #1."
+    },
+    {
+      "name": "M4_4_SPIKE_ATOM_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY",
+      "value": {
+        "m4_3_peak": 18431,
+        "m4_4_peak": 18431,
+        "peak_delta_pct": 0.0,
+        "m4_3_rms": 10562.454493245166,
+        "m4_4_rms": 10562.454493245166,
+        "rms_delta_pct": 0.0,
+        "m4_3_snr_db": 6.33,
+        "m4_4_snr_db": 6.33,
+        "snr_delta_db": 0.0,
+        "meets_10pct_threshold": false
+      },
+      "kind": "spike_delta_record",
+      "snapshot_at": "M4.4",
+      "_note": "M4.4 spike (beam_width=4) measurement vs M4.3 baseline. Negative delta_pct = improvement. meets_10pct_threshold must be true for the fixture to trigger the SPEC \u00a724.1 exit criterion #1."
+    },
+    {
+      "name": "M4_4_SPIKE_ATOM_HARMONIC_16_CYCLE_64",
+      "value": {
+        "m4_3_peak": 18431,
+        "m4_4_peak": 18431,
+        "peak_delta_pct": 0.0,
+        "m4_3_rms": 12329.88696217447,
+        "m4_4_rms": 12329.88696217447,
+        "rms_delta_pct": 0.0,
+        "m4_3_snr_db": 5.48,
+        "m4_4_snr_db": 5.48,
+        "snr_delta_db": 0.0,
+        "meets_10pct_threshold": false
+      },
+      "kind": "spike_delta_record",
+      "snapshot_at": "M4.4",
+      "_note": "M4.4 spike (beam_width=4) measurement vs M4.3 baseline. Negative delta_pct = improvement. meets_10pct_threshold must be true for the fixture to trigger the SPEC \u00a724.1 exit criterion #1."
+    },
+    {
+      "name": "M4_4_SPIKE_ATOM_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8",
+      "value": {
+        "m4_3_peak": 18431,
+        "m4_4_peak": 18431,
+        "peak_delta_pct": 0.0,
+        "m4_3_rms": 4574.389392312377,
+        "m4_4_rms": 4574.383027045833,
+        "rms_delta_pct": -0.00013915008098518527,
+        "m4_3_snr_db": 7.41,
+        "m4_4_snr_db": 7.41,
+        "snr_delta_db": 0.0,
+        "meets_10pct_threshold": false
+      },
+      "kind": "spike_delta_record",
+      "snapshot_at": "M4.4",
+      "_note": "M4.4 spike (beam_width=4) measurement vs M4.3 baseline. Negative delta_pct = improvement. meets_10pct_threshold must be true for the fixture to trigger the SPEC \u00a724.1 exit criterion #1."
+    },
+    {
+      "name": "M4_4_SPIKE_ATOM_PHASE_CYCLES_0_9999",
+      "value": {
+        "m4_3_peak": 9581,
+        "m4_4_peak": 9581,
+        "peak_delta_pct": 0.0,
+        "m4_3_rms": 4797.027063550663,
+        "m4_4_rms": 4796.691504633689,
+        "rms_delta_pct": -0.006995143294559124,
+        "m4_3_snr_db": 11.18,
+        "m4_4_snr_db": 11.18,
+        "snr_delta_db": 0.0,
+        "meets_10pct_threshold": false
+      },
+      "kind": "spike_delta_record",
+      "snapshot_at": "M4.4",
+      "_note": "M4.4 spike (beam_width=4) measurement vs M4.3 baseline. Negative delta_pct = improvement. meets_10pct_threshold must be true for the fixture to trigger the SPEC \u00a724.1 exit criterion #1."
+    },
+    {
+      "name": "M4_4_SPIKE_ATOM_CYCLE_256_CANONICAL_SINE",
+      "value": {
+        "m4_3_peak": 9995,
+        "m4_4_peak": 9979,
+        "peak_delta_pct": -0.16008004002001003,
+        "m4_3_rms": 4920.934859416959,
+        "m4_4_rms": 4910.445099797472,
+        "rms_delta_pct": -0.213165992218189,
+        "m4_3_snr_db": 10.96,
+        "m4_4_snr_db": 10.98,
+        "snr_delta_db": 0.019999999999999574,
+        "meets_10pct_threshold": false
+      },
+      "kind": "spike_delta_record",
+      "snapshot_at": "M4.4",
+      "_note": "M4.4 spike (beam_width=4) measurement vs M4.3 baseline. Negative delta_pct = improvement. meets_10pct_threshold must be true for the fixture to trigger the SPEC \u00a724.1 exit criterion #1."
+    },
+    {
+      "name": "M4_4_SPIKE_OUTCOME",
+      "value": {
+        "strategy": "cross_block_beam_search",
+        "beam_width": 4,
+        "decision": "skip_no_production_change",
+        "exit_criterion_1_10pct_improvement": false,
+        "exit_criterion_2_no_loop_click_worsening": true,
+        "exit_criterion_3_no_m2_regression": true,
+        "exit_criterion_4_runtime_le_2x": false,
+        "best_rms_improvement_pct": 2.412034473718155,
+        "best_peak_improvement_pct": 0.16008004002001003,
+        "m3_3_production_runtime_ms_release": 13.709,
+        "m4_4_spike_runtime_ms_release": 105.928,
+        "runtime_ratio": 7.73,
+        "m4_5_status": "permanently_deferred_to_m5_plus_per_m4_2_outcome_3",
+        "next_pass": "m4_6_gui_polish"
+      },
+      "kind": "spike_outcome",
+      "snapshot_at": "M4.4",
+      "_note": "M4.4 outcome: SKIP. Two of four SPEC \u00a724.1 exit criteria failed. Criterion 1 (>= 10% improvement on rms or peak for at least one fixture): FAILS \u2014 best RMS improvement was 2.41% on 64_SINE (with peak +1.4%); best peak improvement was 0.16% on CYCLE_256_CANONICAL_SINE. Criterion 4 (runtime <= 2x M3.3): FAILS at 7.73x. Criteria 2 (no loop_click worsening) and 3 (no M2 regression, trivially via no-swap) pass. Spike implementation stays in core::brr_encoder feature-flagged for M5+ reference. The high-noise cluster's peak=18431 ceiling is arithmetically structural (32767 - 14336 = max i16 source minus max BRR-decoded value at shift=12); no cross-block trajectory search can fix it. Acceptable close per consultant M4 plan #17."
+    },
+    {
+      "name": "M4_4_BRR_NEAR_LOCAL_OPTIMUM_FINDING",
+      "value": "structural_peak_18431_intrinsic_to_4bit_adpcm_shift_12",
+      "kind": "investigation_finding",
+      "snapshot_at": "M4.4",
+      "_note": "The high-noise atom-fixture cluster's peak_abs_raw_vs_source = 18431 is arithmetically structural, not a search-greediness artifact. Max BRR-decoded value at shift = 12 (highest non-degenerate shift; shift 13+ triggers the 'negative -> -2048, positive -> 0' special-case path that's unusable for music) is 7 * 4096 / 2 = 14336. For source samples > 14336 (common in normalize=false / max-amp fixtures), the encoder literally cannot match; min |source - decoded| at the peak sample is source - 14336, which for source = i16::MAX gives 32767 - 14336 = 18431. No cross-block beam search can find trajectories around this. Future encoder improvements would need to either (a) operate on the source PCM before encoding (e.g. attenuation, which \u00a716.9 forbids without amplitude field change; or pre-emphasis, M4.5 permanently deferred), or (b) extend the BRR spec into shift 13+ usage, which would alter the playback contract and require Mesen2 / snes_spc oracle validation."
     }
   ],
   "retired": []
