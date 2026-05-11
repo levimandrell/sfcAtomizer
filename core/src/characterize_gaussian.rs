@@ -718,7 +718,13 @@ pub fn finalize_measurement(
     let raw_repeat = tile_cycle_to_length(&raw.raw_decoded_one_cycle, oracle_mono.len());
     let raw_rms_window = pcm_rms(&raw_repeat);
 
-    let align = align_oracle_to_raw(oracle_mono, &raw_repeat, 32);
+    // M4.1 per SPEC §10.9 / §24 amendment: search range scales with
+    // the signal's cycle length so cycles longer than the old
+    // hard-coded `max_offset = 32` can be resolved. For
+    // m3_5_canonical this yields per-signal max_offset of
+    // 64 / 128 / 256 instead of 32 across the board.
+    let max_offset = signal.atom.cycle_len_samples as usize;
+    let align = align_oracle_to_raw(oracle_mono, &raw_repeat, max_offset);
     let oracle_aligned: Vec<i16> = oracle_mono
         .iter()
         .skip(align.oracle_offset)
