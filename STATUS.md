@@ -2,7 +2,108 @@
 
 ## Current milestone
 
-**M3.5.1 — Gaussian characterization methodology audit.**
+**M3.7 — GUI polish.** Three small, independent additions that
+sit cleanly on top of the M3.5/M3.5.1 methodology audit
+(deliberately not exposing the gaussian characterization
+surface to the GUI per consultant M3.5 audit #16). No encoder
+change, no atom PCM change, no driver change, no SPEC contract
+change, no M2 baseline change. Reports-only / GUI-only.
+
+**Outcomes:**
+
+- **`rename_sequence_id_cascade` lands** (consultant M3.2 audit
+  #13, deferred through M3). `V2EditorModel` gains a cascade
+  method mirroring M2.8's `rename_atom_id_cascade`: rename an
+  `atom_sequences[idx].id` and propagate the change to every
+  `tracks[].kind == AtomSequence { atom_sequence_id }` and to
+  `m2.active_sequence_id` when it pointed at the old id.
+  Rejects (returns `false`, no mutation) on out-of-range
+  `idx`, SPEC §16.6 rule-40 pattern violation
+  (`^[a-z0-9_]+$`, length 1..=64), or collision with another
+  `atom_sequences[]` entry. The GUI sequence-id text field
+  switches from direct mutation to a buffer + cascade call;
+  rejected input visibly reverts on the next frame.
+- **Atom preview surfaces M3.1 / M3.3 metric fields**
+  (consultant M3.5 audit #15). The atom-edit panel grows a
+  "Last preview metrics" readout showing `loop_click_abs`
+  (color-graded green/yellow/orange/red on 0/≤1000/≤5000/>5000),
+  `rotation_offset` ("offset / cycle_len"),
+  `peak_abs_error_post_rotation`, and `rms_error_post_rotation`.
+  Cached on the `SfcwcApp::last_atom_preview` field — only
+  visible when the snapshot's atom_id matches the currently
+  selected atom (switching atoms hides the readout until the
+  user previews the new selection; self-cleaning across
+  project loads since atom ids change).
+- **Deliberately NOT surfaced in GUI:**
+  - `loop_window_rms_delta` (consultant M3.5 audit #6 —
+    diagnostic-only; stays available in the `AtomRenderReport`
+    JSON for CLI consumers).
+  - Gaussian characterization (consultant M3.5 audit #16 —
+    methodology unresolved at M3.5.1; CLI/report-only).
+- **Next pass: M3.8 — acceptance + release** (analog of M2.8).
+  Tags `v0.3-rc1` after the integrity audit. Closes M3.
+
+### M3.7 phase log
+
+- **Phase A (commit `6a1fc56`)** — `V2EditorModel::rename_sequence_id_cascade(idx, new_id) -> bool`
+  added next to `set_sequence_id`. SPEC §16.6 rule 40 pattern
+  inlined (no `is_valid_id` import needed). Walks
+  `project.tracks` and `project.m2.active_sequence_id` for
+  cascade. GUI side: `draw_sequence_edit_panel` id field
+  switches from direct-mutate to buffer+cascade; rejected
+  edits self-revert on the next frame.
+- **Phase B (commit `e8d7300`)** — `SfcwcApp::last_atom_preview:
+  Option<AtomPreviewSnapshot>` field added; `do_preview_atom`
+  populates it from `AtomBrrOutput` on a successful render.
+  `V2ProjectDetailState` gains `last_atom_preview: Option<&'a
+  AtomPreviewSnapshot>`; the reference is plumbed through
+  `draw_atom_pool_editor` and `draw_atom_edit_panel`. Atom-edit
+  panel grows a "Last preview metrics" readout (egui::Grid 2
+  cols, 4 rows). `loop_click_color()` helper maps the metric
+  to the consultant's green/yellow/orange/red bands.
+- **Phase C (commit `56f79cc`)** — six new model-level tests for
+  `rename_sequence_id_cascade` (tracks cascade, m2 cascade,
+  collision-rejects, invalid-regex-rejects, idx-out-of-range,
+  same-id no-op success) and one for the atom preview metric
+  flow (`atom_preview_returns_brr_output_with_rotation_offset_populated`
+  — block-alignment + finite-field invariants on the
+  `AtomBrrOutput` the GUI snapshot reads from). Existing 3
+  round-trip parity tests verified untouched.
+- **Phase D (this entry).**
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets`,
+  `cargo test --workspace` all green. **585 tests
+  workspace-wide** (was 578 at M3.5.1 close; +7 new tests
+  from Phase C; no existing tests broken).
+
+### Decisions log additions (M3.7)
+
+- `rename_sequence_id_cascade` model method + GUI wiring
+  (consultant M3.2 audit #13). The cascade mirrors M2.8's
+  atom rename but adds explicit regex / length validation
+  inline since `is_valid_id` is `pub(crate)` in
+  `core::project` and not visible to the `app` crate.
+- GUI atom preview surfaces the four M3.1 / M3.3 metric fields
+  (consultant M3.5 audit #15 addition).
+- `loop_window_rms_delta` deliberately not surfaced in GUI
+  (consultant M3.5 audit #6 — diagnostic-only).
+- Gaussian characterization deliberately not surfaced in GUI
+  (consultant M3.5 audit #16 — methodology unresolved at
+  M3.5.1; CLI/report-only).
+- No SPEC change; no encoder change; no atom render formula
+  change; no M2 baseline change.
+- **Engineer observation (informational, not blocking).** The
+  M2.8 `rename_atom_id_cascade` GUI wiring also uses
+  direct-mutate of `atom_pool[idx].id` rather than calling
+  the cascade method. The cascade method exists on the model
+  for CLI / test use but isn't invoked from the GUI today.
+  M3.7 wires the *sequence* cascade into the GUI per this
+  brief; the atom-side direct-mutate stays unchanged. PM may
+  want to revisit the atom-side wiring at M3.8 prelude for
+  consistency.
+
+**Previous milestone (M3.5.1) — Gaussian characterization
+methodology audit.**
 Reports-only adjustments to M3.5. No encoder change, no atom
 PCM change, no driver change, no M2 baseline change. Per
 consultant M3.5 audit, the M3.5 absolute `gain_delta_db` curve
@@ -244,10 +345,18 @@ PM go/defer decision at M3.4 entry brief.
 
 ## Last pass
 
+**Pass M3.7 — GUI polish (Phases A–D).** Detail folded into the
+"Current milestone" section above. Three independent additions:
+sequence-id rename cascade with reference updates, atom preview
+metric readout surfacing M3.1 / M3.3 fields, plus tests + STATUS.
+No encoder / SPEC / baseline change.
+
+---
+
 **Pass M3.5.1 — Gaussian characterization methodology audit
-(Phases A–F).** Detail is folded into the "Current milestone"
-section above; the bullets below capture the **decisions log
-additions** specific to this pass.
+(Phases A–F).** Detail folded into prior STATUS entries; the
+bullets below capture the **decisions log additions** specific
+to that pass.
 
 ### Decisions log additions (M3.5.1)
 
