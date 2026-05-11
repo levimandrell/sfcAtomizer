@@ -54,6 +54,568 @@
       "rule": "Native-rate characterization runtime budget (release build, 9-signal canonical set): target < 5 s, warning at > 10 s. Per consultant M5 plan #22. Block release only if CI affected — informational budget at M5.0 / M5.1 development time; m5-acceptance bundle (M5.6) may promote to a hard gate after empirical data settles."
     }
   ],
-  "documentary_snapshot": [],
+  "documentary_snapshot": [
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_BEST_OFFSET_SINE_CYCLE_64",
+      "value": 55,
+      "kind": "alignment_offset",
+      "snapshot_at": "M5.2",
+      "_note": "Alignment offset (samples) at which the cross-correlation between aligned raw BRR decode and aligned mono oracle render is maximal, searched within max_offset = signal.atom.cycle_len_samples (M4.1). Numerically identical to M4.2 since pitch register was already 0x1000 then (verified at M5.1 preflight + the harness_meta block in this report). Documentary; shifts only if alignment algorithm or comparison surface changes."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_NORMALIZED_CORRELATION_SINE_CYCLE_64",
+      "value": 0.1528815578132505,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Pearson correlation between aligned raw BRR decode and aligned mono oracle render. SPEC section 10.9 reliable-alignment threshold = 0.90. Documentary; M5.2 confirms M4.2 values byte-identical under verified harness_meta.pitch_register == 0x1000."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ZCR_RATIO_SINE_CYCLE_64",
+      "value": 1.9346503606146128,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "zcr_oracle / zcr_raw. SPEC section 10.9 reliable-alignment sanity band = [0.9, 1.1]. The ~2x doubling on low/mid signals previously attributed to fractional pitch stepping (M4.2) is retracted at M5.1 (commit 900f6ad); the remaining candidate is gaussian 4-tap kernel non-impulse response at unity pitch (SPEC section 10.11 motivation, M5.1 update)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_SINE_CYCLE_64",
+      "value": 2.656612088418679,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(oracle_rms / raw_rms) over the full window (pre-alignment). Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_ALIGNED_SINE_CYCLE_64",
+      "value": 2.6564080271564974,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(aligned_oracle_rms / aligned_raw_rms) over the alignment window. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_ORACLE_VS_RAW_SINE_CYCLE_64",
+      "value": 39053,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta between aligned oracle and raw, unnormalized. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION_SINE_CYCLE_64",
+      "value": 33080,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta after rescaling oracle to match raw RMS. If close to peak_abs_error_oracle_vs_raw -> shape divergence (not gain divergence). M4.2 / M5.2 finding: close-to-equal across all 9 signals; the residual divergence is waveform-shape between raw decode (1:1 tile) and oracle (DSP playback at unity pitch through 4-tap gaussian)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_VALIDITY_ALL_PASS_SINE_CYCLE_64",
+      "value": false,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "AND of the four SPEC section 10.9 reliable-alignment criteria for this signal. M5.2 finding: 0/9 signals all-pass; criterion 4 (gain_separator_ok) fails universally. Numerically identical to M4.2."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_BEST_OFFSET_SINE_CYCLE_128",
+      "value": 55,
+      "kind": "alignment_offset",
+      "snapshot_at": "M5.2",
+      "_note": "Alignment offset (samples) at which the cross-correlation between aligned raw BRR decode and aligned mono oracle render is maximal, searched within max_offset = signal.atom.cycle_len_samples (M4.1). Numerically identical to M4.2 since pitch register was already 0x1000 then (verified at M5.1 preflight + the harness_meta block in this report). Documentary; shifts only if alignment algorithm or comparison surface changes."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_NORMALIZED_CORRELATION_SINE_CYCLE_128",
+      "value": 0.14731849708870348,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Pearson correlation between aligned raw BRR decode and aligned mono oracle render. SPEC section 10.9 reliable-alignment threshold = 0.90. Documentary; M5.2 confirms M4.2 values byte-identical under verified harness_meta.pitch_register == 0x1000."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ZCR_RATIO_SINE_CYCLE_128",
+      "value": 1.9346503606146128,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "zcr_oracle / zcr_raw. SPEC section 10.9 reliable-alignment sanity band = [0.9, 1.1]. The ~2x doubling on low/mid signals previously attributed to fractional pitch stepping (M4.2) is retracted at M5.1 (commit 900f6ad); the remaining candidate is gaussian 4-tap kernel non-impulse response at unity pitch (SPEC section 10.11 motivation, M5.1 update)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_SINE_CYCLE_128",
+      "value": 2.675163148516911,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(oracle_rms / raw_rms) over the full window (pre-alignment). Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_ALIGNED_SINE_CYCLE_128",
+      "value": 2.675598511621335,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(aligned_oracle_rms / aligned_raw_rms) over the alignment window. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_ORACLE_VS_RAW_SINE_CYCLE_128",
+      "value": 39053,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta between aligned oracle and raw, unnormalized. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION_SINE_CYCLE_128",
+      "value": 33043,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta after rescaling oracle to match raw RMS. If close to peak_abs_error_oracle_vs_raw -> shape divergence (not gain divergence). M4.2 / M5.2 finding: close-to-equal across all 9 signals; the residual divergence is waveform-shape between raw decode (1:1 tile) and oracle (DSP playback at unity pitch through 4-tap gaussian)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_VALIDITY_ALL_PASS_SINE_CYCLE_128",
+      "value": false,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "AND of the four SPEC section 10.9 reliable-alignment criteria for this signal. M5.2 finding: 0/9 signals all-pass; criterion 4 (gain_separator_ok) fails universally. Numerically identical to M4.2."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_BEST_OFFSET_SINE_CYCLE_256",
+      "value": 55,
+      "kind": "alignment_offset",
+      "snapshot_at": "M5.2",
+      "_note": "Alignment offset (samples) at which the cross-correlation between aligned raw BRR decode and aligned mono oracle render is maximal, searched within max_offset = signal.atom.cycle_len_samples (M4.1). Numerically identical to M4.2 since pitch register was already 0x1000 then (verified at M5.1 preflight + the harness_meta block in this report). Documentary; shifts only if alignment algorithm or comparison surface changes."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_NORMALIZED_CORRELATION_SINE_CYCLE_256",
+      "value": 0.11733397985054576,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Pearson correlation between aligned raw BRR decode and aligned mono oracle render. SPEC section 10.9 reliable-alignment threshold = 0.90. Documentary; M5.2 confirms M4.2 values byte-identical under verified harness_meta.pitch_register == 0x1000."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ZCR_RATIO_SINE_CYCLE_256",
+      "value": 1.9426779554719347,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "zcr_oracle / zcr_raw. SPEC section 10.9 reliable-alignment sanity band = [0.9, 1.1]. The ~2x doubling on low/mid signals previously attributed to fractional pitch stepping (M4.2) is retracted at M5.1 (commit 900f6ad); the remaining candidate is gaussian 4-tap kernel non-impulse response at unity pitch (SPEC section 10.11 motivation, M5.1 update)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_SINE_CYCLE_256",
+      "value": 2.678876463283419,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(oracle_rms / raw_rms) over the full window (pre-alignment). Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_ALIGNED_SINE_CYCLE_256",
+      "value": 2.6803423681568646,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(aligned_oracle_rms / aligned_raw_rms) over the alignment window. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_ORACLE_VS_RAW_SINE_CYCLE_256",
+      "value": 39053,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta between aligned oracle and raw, unnormalized. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION_SINE_CYCLE_256",
+      "value": 33034,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta after rescaling oracle to match raw RMS. If close to peak_abs_error_oracle_vs_raw -> shape divergence (not gain divergence). M4.2 / M5.2 finding: close-to-equal across all 9 signals; the residual divergence is waveform-shape between raw decode (1:1 tile) and oracle (DSP playback at unity pitch through 4-tap gaussian)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_VALIDITY_ALL_PASS_SINE_CYCLE_256",
+      "value": false,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "AND of the four SPEC section 10.9 reliable-alignment criteria for this signal. M5.2 finding: 0/9 signals all-pass; criterion 4 (gain_separator_ok) fails universally. Numerically identical to M4.2."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_BEST_OFFSET_HARMONIC_2_CYCLE_64",
+      "value": 55,
+      "kind": "alignment_offset",
+      "snapshot_at": "M5.2",
+      "_note": "Alignment offset (samples) at which the cross-correlation between aligned raw BRR decode and aligned mono oracle render is maximal, searched within max_offset = signal.atom.cycle_len_samples (M4.1). Numerically identical to M4.2 since pitch register was already 0x1000 then (verified at M5.1 preflight + the harness_meta block in this report). Documentary; shifts only if alignment algorithm or comparison surface changes."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_NORMALIZED_CORRELATION_HARMONIC_2_CYCLE_64",
+      "value": 0.2739159548467182,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Pearson correlation between aligned raw BRR decode and aligned mono oracle render. SPEC section 10.9 reliable-alignment threshold = 0.90. Documentary; M5.2 confirms M4.2 values byte-identical under verified harness_meta.pitch_register == 0x1000."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ZCR_RATIO_HARMONIC_2_CYCLE_64",
+      "value": 2.579533814152817,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "zcr_oracle / zcr_raw. SPEC section 10.9 reliable-alignment sanity band = [0.9, 1.1]. The ~2x doubling on low/mid signals previously attributed to fractional pitch stepping (M4.2) is retracted at M5.1 (commit 900f6ad); the remaining candidate is gaussian 4-tap kernel non-impulse response at unity pitch (SPEC section 10.11 motivation, M5.1 update)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_HARMONIC_2_CYCLE_64",
+      "value": 2.5887359153055503,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(oracle_rms / raw_rms) over the full window (pre-alignment). Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_ALIGNED_HARMONIC_2_CYCLE_64",
+      "value": 2.589119834335736,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(aligned_oracle_rms / aligned_raw_rms) over the alignment window. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_ORACLE_VS_RAW_HARMONIC_2_CYCLE_64",
+      "value": 39053,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta between aligned oracle and raw, unnormalized. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION_HARMONIC_2_CYCLE_64",
+      "value": 33210,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta after rescaling oracle to match raw RMS. If close to peak_abs_error_oracle_vs_raw -> shape divergence (not gain divergence). M4.2 / M5.2 finding: close-to-equal across all 9 signals; the residual divergence is waveform-shape between raw decode (1:1 tile) and oracle (DSP playback at unity pitch through 4-tap gaussian)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_VALIDITY_ALL_PASS_HARMONIC_2_CYCLE_64",
+      "value": false,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "AND of the four SPEC section 10.9 reliable-alignment criteria for this signal. M5.2 finding: 0/9 signals all-pass; criterion 4 (gain_separator_ok) fails universally. Numerically identical to M4.2."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_BEST_OFFSET_HARMONIC_4_CYCLE_64",
+      "value": 7,
+      "kind": "alignment_offset",
+      "snapshot_at": "M5.2",
+      "_note": "Alignment offset (samples) at which the cross-correlation between aligned raw BRR decode and aligned mono oracle render is maximal, searched within max_offset = signal.atom.cycle_len_samples (M4.1). Numerically identical to M4.2 since pitch register was already 0x1000 then (verified at M5.1 preflight + the harness_meta block in this report). Documentary; shifts only if alignment algorithm or comparison surface changes."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_NORMALIZED_CORRELATION_HARMONIC_4_CYCLE_64",
+      "value": 0.4918785507426046,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Pearson correlation between aligned raw BRR decode and aligned mono oracle render. SPEC section 10.9 reliable-alignment threshold = 0.90. Documentary; M5.2 confirms M4.2 values byte-identical under verified harness_meta.pitch_register == 0x1000."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ZCR_RATIO_HARMONIC_4_CYCLE_64",
+      "value": 2.204964672044019,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "zcr_oracle / zcr_raw. SPEC section 10.9 reliable-alignment sanity band = [0.9, 1.1]. The ~2x doubling on low/mid signals previously attributed to fractional pitch stepping (M4.2) is retracted at M5.1 (commit 900f6ad); the remaining candidate is gaussian 4-tap kernel non-impulse response at unity pitch (SPEC section 10.11 motivation, M5.1 update)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_HARMONIC_4_CYCLE_64",
+      "value": 2.3343206937138,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(oracle_rms / raw_rms) over the full window (pre-alignment). Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_ALIGNED_HARMONIC_4_CYCLE_64",
+      "value": 2.3348220804657855,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(aligned_oracle_rms / aligned_raw_rms) over the alignment window. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_ORACLE_VS_RAW_HARMONIC_4_CYCLE_64",
+      "value": 39053,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta between aligned oracle and raw, unnormalized. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION_HARMONIC_4_CYCLE_64",
+      "value": 33710,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta after rescaling oracle to match raw RMS. If close to peak_abs_error_oracle_vs_raw -> shape divergence (not gain divergence). M4.2 / M5.2 finding: close-to-equal across all 9 signals; the residual divergence is waveform-shape between raw decode (1:1 tile) and oracle (DSP playback at unity pitch through 4-tap gaussian)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_VALIDITY_ALL_PASS_HARMONIC_4_CYCLE_64",
+      "value": false,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "AND of the four SPEC section 10.9 reliable-alignment criteria for this signal. M5.2 finding: 0/9 signals all-pass; criterion 4 (gain_separator_ok) fails universally. Numerically identical to M4.2."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_BEST_OFFSET_HARMONIC_8_CYCLE_64",
+      "value": 7,
+      "kind": "alignment_offset",
+      "snapshot_at": "M5.2",
+      "_note": "Alignment offset (samples) at which the cross-correlation between aligned raw BRR decode and aligned mono oracle render is maximal, searched within max_offset = signal.atom.cycle_len_samples (M4.1). Numerically identical to M4.2 since pitch register was already 0x1000 then (verified at M5.1 preflight + the harness_meta block in this report). Documentary; shifts only if alignment algorithm or comparison surface changes."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_NORMALIZED_CORRELATION_HARMONIC_8_CYCLE_64",
+      "value": 0.5984194815785431,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Pearson correlation between aligned raw BRR decode and aligned mono oracle render. SPEC section 10.9 reliable-alignment threshold = 0.90. Documentary; M5.2 confirms M4.2 values byte-identical under verified harness_meta.pitch_register == 0x1000."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ZCR_RATIO_HARMONIC_8_CYCLE_64",
+      "value": 2.058233810625482,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "zcr_oracle / zcr_raw. SPEC section 10.9 reliable-alignment sanity band = [0.9, 1.1]. The ~2x doubling on low/mid signals previously attributed to fractional pitch stepping (M4.2) is retracted at M5.1 (commit 900f6ad); the remaining candidate is gaussian 4-tap kernel non-impulse response at unity pitch (SPEC section 10.11 motivation, M5.1 update)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_HARMONIC_8_CYCLE_64",
+      "value": 1.5933512447404818,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(oracle_rms / raw_rms) over the full window (pre-alignment). Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_ALIGNED_HARMONIC_8_CYCLE_64",
+      "value": 1.59362280608614,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(aligned_oracle_rms / aligned_raw_rms) over the alignment window. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_ORACLE_VS_RAW_HARMONIC_8_CYCLE_64",
+      "value": 39053,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta between aligned oracle and raw, unnormalized. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION_HARMONIC_8_CYCLE_64",
+      "value": 35253,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta after rescaling oracle to match raw RMS. If close to peak_abs_error_oracle_vs_raw -> shape divergence (not gain divergence). M4.2 / M5.2 finding: close-to-equal across all 9 signals; the residual divergence is waveform-shape between raw decode (1:1 tile) and oracle (DSP playback at unity pitch through 4-tap gaussian)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_VALIDITY_ALL_PASS_HARMONIC_8_CYCLE_64",
+      "value": false,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "AND of the four SPEC section 10.9 reliable-alignment criteria for this signal. M5.2 finding: 0/9 signals all-pass; criterion 4 (gain_separator_ok) fails universally. Numerically identical to M4.2."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_BEST_OFFSET_HARMONIC_16_CYCLE_64",
+      "value": 63,
+      "kind": "alignment_offset",
+      "snapshot_at": "M5.2",
+      "_note": "Alignment offset (samples) at which the cross-correlation between aligned raw BRR decode and aligned mono oracle render is maximal, searched within max_offset = signal.atom.cycle_len_samples (M4.1). Numerically identical to M4.2 since pitch register was already 0x1000 then (verified at M5.1 preflight + the harness_meta block in this report). Documentary; shifts only if alignment algorithm or comparison surface changes."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_NORMALIZED_CORRELATION_HARMONIC_16_CYCLE_64",
+      "value": 0.983615238226217,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Pearson correlation between aligned raw BRR decode and aligned mono oracle render. SPEC section 10.9 reliable-alignment threshold = 0.90. Documentary; M5.2 confirms M4.2 values byte-identical under verified harness_meta.pitch_register == 0x1000."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ZCR_RATIO_HARMONIC_16_CYCLE_64",
+      "value": 0.9994190836094543,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "zcr_oracle / zcr_raw. SPEC section 10.9 reliable-alignment sanity band = [0.9, 1.1]. The ~2x doubling on low/mid signals previously attributed to fractional pitch stepping (M4.2) is retracted at M5.1 (commit 900f6ad); the remaining candidate is gaussian 4-tap kernel non-impulse response at unity pitch (SPEC section 10.11 motivation, M5.1 update)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_HARMONIC_16_CYCLE_64",
+      "value": -1.2227789935665703,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(oracle_rms / raw_rms) over the full window (pre-alignment). Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_ALIGNED_HARMONIC_16_CYCLE_64",
+      "value": -1.2225064779690133,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(aligned_oracle_rms / aligned_raw_rms) over the alignment window. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_ORACLE_VS_RAW_HARMONIC_16_CYCLE_64",
+      "value": 16384,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta between aligned oracle and raw, unnormalized. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION_HARMONIC_16_CYCLE_64",
+      "value": 16384,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta after rescaling oracle to match raw RMS. If close to peak_abs_error_oracle_vs_raw -> shape divergence (not gain divergence). M4.2 / M5.2 finding: close-to-equal across all 9 signals; the residual divergence is waveform-shape between raw decode (1:1 tile) and oracle (DSP playback at unity pitch through 4-tap gaussian)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_VALIDITY_ALL_PASS_HARMONIC_16_CYCLE_64",
+      "value": false,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "AND of the four SPEC section 10.9 reliable-alignment criteria for this signal. M5.2 finding: 0/9 signals all-pass; criterion 4 (gain_separator_ok) fails universally. Numerically identical to M4.2."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_BEST_OFFSET_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8",
+      "value": 40,
+      "kind": "alignment_offset",
+      "snapshot_at": "M5.2",
+      "_note": "Alignment offset (samples) at which the cross-correlation between aligned raw BRR decode and aligned mono oracle render is maximal, searched within max_offset = signal.atom.cycle_len_samples (M4.1). Numerically identical to M4.2 since pitch register was already 0x1000 then (verified at M5.1 preflight + the harness_meta block in this report). Documentary; shifts only if alignment algorithm or comparison surface changes."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_NORMALIZED_CORRELATION_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8",
+      "value": 0.6130237570827904,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Pearson correlation between aligned raw BRR decode and aligned mono oracle render. SPEC section 10.9 reliable-alignment threshold = 0.90. Documentary; M5.2 confirms M4.2 values byte-identical under verified harness_meta.pitch_register == 0x1000."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ZCR_RATIO_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8",
+      "value": 0.9669172932330826,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "zcr_oracle / zcr_raw. SPEC section 10.9 reliable-alignment sanity band = [0.9, 1.1]. The ~2x doubling on low/mid signals previously attributed to fractional pitch stepping (M4.2) is retracted at M5.1 (commit 900f6ad); the remaining candidate is gaussian 4-tap kernel non-impulse response at unity pitch (SPEC section 10.11 motivation, M5.1 update)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8",
+      "value": 2.5338110830867815,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(oracle_rms / raw_rms) over the full window (pre-alignment). Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_ALIGNED_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8",
+      "value": 2.5520799203971585,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(aligned_oracle_rms / aligned_raw_rms) over the alignment window. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_ORACLE_VS_RAW_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8",
+      "value": 35493,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta between aligned oracle and raw, unnormalized. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8",
+      "value": 30107,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta after rescaling oracle to match raw RMS. If close to peak_abs_error_oracle_vs_raw -> shape divergence (not gain divergence). M4.2 / M5.2 finding: close-to-equal across all 9 signals; the residual divergence is waveform-shape between raw decode (1:1 tile) and oracle (DSP playback at unity pitch through 4-tap gaussian)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_VALIDITY_ALL_PASS_ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8",
+      "value": false,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "AND of the four SPEC section 10.9 reliable-alignment criteria for this signal. M5.2 finding: 0/9 signals all-pass; criterion 4 (gain_separator_ok) fails universally. Numerically identical to M4.2."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_BEST_OFFSET_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY",
+      "value": 40,
+      "kind": "alignment_offset",
+      "snapshot_at": "M5.2",
+      "_note": "Alignment offset (samples) at which the cross-correlation between aligned raw BRR decode and aligned mono oracle render is maximal, searched within max_offset = signal.atom.cycle_len_samples (M4.1). Numerically identical to M4.2 since pitch register was already 0x1000 then (verified at M5.1 preflight + the harness_meta block in this report). Documentary; shifts only if alignment algorithm or comparison surface changes."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_NORMALIZED_CORRELATION_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY",
+      "value": 0.5967217113532597,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Pearson correlation between aligned raw BRR decode and aligned mono oracle render. SPEC section 10.9 reliable-alignment threshold = 0.90. Documentary; M5.2 confirms M4.2 values byte-identical under verified harness_meta.pitch_register == 0x1000."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ZCR_RATIO_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY",
+      "value": 1.5457309941520467,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "zcr_oracle / zcr_raw. SPEC section 10.9 reliable-alignment sanity band = [0.9, 1.1]. The ~2x doubling on low/mid signals previously attributed to fractional pitch stepping (M4.2) is retracted at M5.1 (commit 900f6ad); the remaining candidate is gaussian 4-tap kernel non-impulse response at unity pitch (SPEC section 10.11 motivation, M5.1 update)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY",
+      "value": 2.456224546903489,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(oracle_rms / raw_rms) over the full window (pre-alignment). Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_GAIN_DELTA_DB_ALIGNED_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY",
+      "value": 2.4593938144415635,
+      "kind": "gain_delta_db",
+      "snapshot_at": "M5.2",
+      "_note": "20*log10(aligned_oracle_rms / aligned_raw_rms) over the alignment window. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_ORACLE_VS_RAW_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY",
+      "value": 39053,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta between aligned oracle and raw, unnormalized. Documentary."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_PEAK_ABS_ERROR_AFTER_GAIN_NORMALIZATION_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY",
+      "value": 33463,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "Max-abs delta after rescaling oracle to match raw RMS. If close to peak_abs_error_oracle_vs_raw -> shape divergence (not gain divergence). M4.2 / M5.2 finding: close-to-equal across all 9 signals; the residual divergence is waveform-shape between raw decode (1:1 tile) and oracle (DSP playback at unity pitch through 4-tap gaussian)."
+    },
+    {
+      "name": "M5_2_GAUSSIAN_ALIGNMENT_VALIDITY_ALL_PASS_NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY",
+      "value": false,
+      "kind": "metric_value",
+      "snapshot_at": "M5.2",
+      "_note": "AND of the four SPEC section 10.9 reliable-alignment criteria for this signal. M5.2 finding: 0/9 signals all-pass; criterion 4 (gain_separator_ok) fails universally. Numerically identical to M4.2."
+    },
+    {
+      "name": "M5_2_CHARACTERIZATION_SUMMARY",
+      "value": {
+        "harness_meta": {
+          "pitch_register": 4096,
+          "rate_strategy": "spc_rate_matches_atom_native_at_project_32k",
+          "atom_native_rates_hz": {
+            "all_8_partials_max_amp_harmonics_1_to_8": 32000,
+            "harmonic_16_cycle_64": 32000,
+            "harmonic_2_cycle_64": 32000,
+            "harmonic_4_cycle_64": 32000,
+            "harmonic_8_cycle_64": 32000,
+            "normalize_false_multi_partial_clamp_safety": 32000,
+            "sine_cycle_128": 32000,
+            "sine_cycle_256": 32000,
+            "sine_cycle_64": 32000
+          }
+        },
+        "alignment_search_limit": 256,
+        "alignment_boundary_hit": false,
+        "alignment_valid": false,
+        "methodology_precondition_passed": false,
+        "recommended_next": "methodology_unresolved",
+        "anchor_correlation_summary": {
+          "below_0_90_count": 6,
+          "above_0_90_count": 1
+        },
+        "anchor_zcr_summary": {
+          "in_band_count": 1,
+          "out_of_band_count": 6
+        },
+        "anchor_validity_per_criterion": {
+          "zcr_in_band_pass_count": 1,
+          "correlation_above_threshold_pass_count": 1,
+          "offset_in_range_pass_count": 7,
+          "gain_separator_ok_pass_count": 0,
+          "all_four_pass_count": 0,
+          "total_anchors": 7
+        },
+        "m5_2_decision_outcome": "methodology_unresolved",
+        "m5_3_pre_emphasis_status": "permanently_skipped_defers_to_m6_plus",
+        "phase_e_three_way_disposition": "path_1_inferential_closure_force_filter_0_loop_entry_reduces_three_way_to_two_way",
+        "residual_divergence_hypothesis": "sdsp_gaussian_4tap_kernel_non_impulse_response_at_unity_pitch",
+        "_mechanism_corrected_at": "M5.1 (commit 900f6ad); fractional-stepping diagnosis retracted",
+        "_inferential_closure_source": "M5.1 STATUS Phase E three-way-comparison-deferred section"
+      },
+      "kind": "decision_summary",
+      "snapshot_at": "M5.2",
+      "_note": "M5.2 characterization re-run produced metrics numerically identical to M5.1 Phase E (which was byte-identical to M4.2). The unity-pitch contract (pitch_register == 0x1000) is verified active via the harness_meta block above. SPEC section 10.9 four-criterion reliable-alignment predicate: 0/7 anchor signals satisfy all four (criterion 4 gain_separator_ok fails universally; criteria 1 and 2 pass only for harmonic_16_cycle_64). Decision: methodology_unresolved per SPEC section 10.11. M5.3 pre-emphasis evaluation SKIPPED; defers permanently to M6+ unless a future milestone introduces fundamentally different characterization methodology. Next: M5.4 BRR noise-floor strategy spike."
+    },
+    {
+      "name": "M5_2_RESIDUAL_DIVERGENCE_HYPOTHESIS",
+      "value": "sdsp_gaussian_4tap_kernel_non_impulse_response_at_unity_pitch",
+      "kind": "investigation_result",
+      "snapshot_at": "M5.2",
+      "_note": "M5.2 Phase E adopted Path 1 (inferential closure) per the M5.1 STATUS three-way-comparison-deferred argument: every M3.5 canonical atom sets render.force_filter_0_loop_entry = true (core::characterize_gaussian::atom_base line 69). Filter 0 BRR blocks contain no prior-sample predictor term, so the BRR decoder state is reset at every loop boundary. Within a cycle iteration the decoder state evolves through filters 0-3; at the loop wrap, filter 0 on block 0 zeroes that state again. The PCM output of cycle N+1 is therefore byte-identical to cycle N. Consequence: a three-way comparison of (1) host raw decode tiled (no state-carry) vs (2) host raw decode with predictor-state-carry across loop iterations vs (3) snes_spc oracle render reduces to a two-way comparison, because (1) and (2) produce identical PCM for these atoms. The remaining candidate cause for the (1)/(2)-vs-(3) divergence narrows to the S-DSP gaussian 4-tap kernel non-impulse response at unity pitch -- even at pitch_register = 0x1000 (step = 1.0 exactly), the DSP's gaussian kernel applies non-impulse weights at integer offsets. This hypothesis is locked as the M5.2 investigation outcome; empirical confirmation via implementation of the state-carrying decode helper is deferred to M6+ as ~30-line work whose result is predictable from the algebraic argument. M5.2.1 correction budget NOT burned -- no clear-cause implementation fix exists (the methodology limitation is structural under the current comparison-surface design). Mechanism correction history: M4.2 Phase C originally diagnosed fractional pitch stepping; SPEC section 10.11 motivation (M5.1 commit 900f6ad) retracted that diagnosis after preflight verified pitch_register was already 0x1000 since M2.7 via core::voice_setup."
+    }
+  ],
   "retired": []
 }
