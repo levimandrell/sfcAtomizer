@@ -363,6 +363,123 @@ These ignored tests emit one line per fixture to stderr; the
 `m4_3_atom_fixture_noise_floor_baselines_pinned` hard test
 enforces drift detection automatically.
 
+## Run `m5-acceptance` against the canonical fixture
+
+M5 acceptance extends M4 acceptance with M5-specific quality
+gates: native-rate harness verification (M5.1 pitch register
+contract per SPEC §10.11), characterization documentary
+integrity (M5.2 baselines snapshot inertia check), M5.4
+encoder-spike state (production byte-identity guard +
+feature-flag preservation for both `m4_4_spike_*` and
+`m5_4_*` spike paths), and M5 baselines integrity
+(behavior-gated count audit + identity-gated test-field
+audit, the latter empty by design at M5).
+
+```bash
+cargo run --release --bin sfcwc -- m5-acceptance \
+    --project-a fixtures/projects/canonical_m2/canonical_m2.sfcproj.json \
+    --out build/m5/acceptance/canonical \
+    --frames 16000
+```
+
+Expected stderr summary:
+
+```
+m5-acceptance: project_a=canonical_m2.sfcproj.json
+  stage_1_m4_regression: warn (M4 propagates warn = M4.2 outcome 3)
+  stage_2_native_rate_harness_verification: ok
+  stage_3_characterization_documentary_integrity: ok
+  stage_4_m5_4_spike_state: ok
+  stage_5_baselines_integrity: ok
+  bundle.status: warn
+  -> build/m5/acceptance/canonical/bundle.json
+```
+
+The five stages and what each gates:
+
+- **stage 1** — spawns `sfcwc m4-acceptance` and reads its
+  `bundle.json::bundle.status`. M4's `warn` (M4.2 outcome 3:
+  alignment_valid=false documented + intentional) propagates
+  through unchanged. M5.2 confirmed those M4.2 numbers are
+  byte-identical under the M5.1-verified unity-pitch harness;
+  the methodology gap was not pitch-register-related.
+- **stage 2** — runs the `pitch_register` test filter
+  (`m5_pitch_register_constant_pinned_at_4096` M5.0 fixture
+  pin + `pitch_register_equals_4096_for_native_rate_signals`
+  M5.1 runtime guard). Verifies the M2.7 voice-setup path
+  programs `pitch_register == 0x1000` for every M3.5
+  canonical signal. Stage `fail` here would indicate a
+  critical M2.7 regression.
+- **stage 3** — in-process audit of
+  `baselines/m5.json::documentary_snapshot`. Confirms 74
+  `M5_2_*` entries (8 fields × 9 signals + summary +
+  hypothesis) + 3 `M5_4_*` entries (wider-beam benchmark,
+  alt-shift benchmark, M6+ §16.9 sketch) + three sentinel
+  entries present. Drift on counts → `warn`; sentinel
+  absence → `fail`.
+- **stage 4** — runs the `m4_4_spike_` + `m5_4_` test
+  filters. Confirms both spike entry points
+  (`encode_looped_m4_4_spike`,
+  `encode_looped_m5_4_alt_shift_spike`) are feature-flagged
+  and not wired into production `render_to_brr`. The
+  `m5_4_alt_shift_peak_then_sum_sq_matches_production_path`
+  guard locks production encoder byte-identity vs M3.3.
+- **stage 5** — in-process audit of
+  `baselines/m5.json::identity_gated` (expected empty per
+  consultant M5 plan #10) + `behavior_gated` count audit
+  (expected 6 M5.0 contract entries: pitch register harness
+  constant, methodology repair budget, reliable alignment
+  threshold inheritance, pre-emphasis filter form
+  constraint, atom PCM stability held, runtime budget).
+
+Also runs against the M3.3 committed edge-case fixture:
+
+```bash
+cargo run --release --bin sfcwc -- m5-acceptance \
+    --project-a fixtures/projects/atom_edge_cases/harmonic_16_cycle_64.sfcproj.json \
+    --out build/m5/acceptance/harmonic_16_cycle_64 \
+    --frames 16000
+```
+
+Expected: same shape — `bundle.status=warn` (M4.2 outcome 3
+carry-through); stages 2–5 all `ok`. Stages 2–5 are
+fixture-independent: they exercise the M3.5 canonical signal
+set in stages 2/4 and `baselines/m5.json` in stages 3/5, not
+the `project-a` contents.
+
+## M5-specific reproduction notes
+
+A few M5 outcomes affect what you'll see at v0.5-rc1:
+
+- **`bundle.status=warn` continues at M5.** Same
+  `alignment_valid: false` M4.2 outcome 3 propagates;
+  M5.1's preflight verified pitch register was already
+  `0x1000` since M2.7 (so the M4.2 attribution to
+  "fractional stepping" was wrong — see the M5.1 correction
+  annotations on `RELEASE_NOTES_v0.4-rc.md` and the
+  blockquote correction note in `STATUS.md`'s M4.2 entry).
+- **M5.2 outcome: `methodology_unresolved`.** M5.2
+  characterization re-run produced metrics numerically
+  identical to M4.2. The SPEC §10.9 four-criterion
+  reliable-alignment predicate fails 0/7 on anchors
+  (criterion 4, `gain_separator_ok`, universal fail).
+  **M5.3 pre-emphasis preset evaluation is permanently
+  SKIPPED**; defers to M6+ only if a fundamentally
+  different characterization methodology emerges.
+- **M5.4 no production encoder change.** Both spikes
+  (wider beam widths 8/16 on the high-noise cluster;
+  alt-shift-objective on `HARMONIC_16_CYCLE_64`) stay
+  feature-flagged. Wider beam: max RMS improvement 0.17%,
+  max SNR improvement 0.015 dB (consultant M4.4 #2
+  structural-ceiling claim confirmed empirically).
+  Alt-shift: byte-identical to production (consultant M4.4
+  #7 prediction confirmed).
+- **M5.4 M6+ §16.9 amendment scope sketch is forward
+  visibility only.** Documented at
+  `baselines/m5.json::M5_4_SOURCE_DOMAIN_ATTENUATION_M6_SKETCH`.
+  Activation requires explicit PM authorization per SPEC
+  §16.9.1 procedure; not active at v0.5-rc1.
+
 ## Verify locked baselines
 
 `baselines/m2.json` and `baselines/m3.json` together list every
@@ -415,14 +532,54 @@ fails M3, which fails M4.
   (post-M4.1 alignment fix), 80 M4.3 BRR noise-floor entries
   (44 atom-fixture × 4 metrics + 36 characterization-signal ×
   4 metrics), 13 M4.4 spike attempt records (11 per-fixture
-  deltas + 1 outcome + 1 finding).
+  deltas + 1 outcome + 1 finding). The
+  `M4_2_PHASE_C_ZCR_DOUBLING_ROOT_CAUSE` entry's value + `_note`
+  fields encode the original fractional-stepping diagnosis;
+  M5.1.1 added a sibling `_correction_m5_1` field (annotation
+  style; the historical fields are preserved for v0.4-rc1
+  provenance — the diagnosis was retracted at M5.1).
+
+`baselines/m5.json` inherits M4 (`inherits_m4: true`). The
+`m5-acceptance` bundle's stage 1 (M4 regression) is the
+runtime check; the inheritance chain is now M2 → M3 → M4 → M5.
+
+`baselines/m5.json` M5-era classification:
+
+- `identity_gated` — **empty by design at M5** per consultant
+  M5 plan #10. M5's sub-passes produced methodology outcomes
+  (native-rate harness verification, characterization
+  re-run, BRR noise-floor strategy spike), not new feature
+  surfaces. No accidental identity promotion.
+- `behavior_gated` — 6 M5.0 contract entries:
+  `M5_NATIVE_RATE_CHARACTERIZATION_PITCH_REGISTER` (= 4096),
+  `M5_METHODOLOGY_REPAIR_BUDGET` (1+1 loops),
+  `M5_RELIABLE_ALIGNMENT_THRESHOLD_INHERITED`,
+  `M5_PRE_EMPHASIS_FILTER_FORM_CONSTRAINT`,
+  `M5_ATOM_PCM_STABILITY_HELD`,
+  `M5_RUNTIME_BUDGET` (5 s target / 10 s warning).
+- `documentary_snapshot` — 77 entries: 74 `M5_2_*`
+  (8 fields × 9 signals + `CHARACTERIZATION_SUMMARY` +
+  `RESIDUAL_DIVERGENCE_HYPOTHESIS`) + 3 `M5_4_*`
+  (`WIDER_BEAM_HIGH_NOISE_CLUSTER`,
+  `ALT_SHIFT_OBJECTIVE_HARMONIC_16`,
+  `SOURCE_DOMAIN_ATTENUATION_M6_SKETCH`). The M5.2 entries
+  are numerically identical to M4.2 since the M5.1-verified
+  unity pitch was already in effect at M4.2; the M5.2
+  framing corrects the mechanism attribution.
 
 Tests pin identity-gated and behavior-gated values; documentary
 snapshots are not gated. The canonical SEQ2 bytecode + voice
 setup table hex dumps + per-byte breakdowns live at
 `baselines/m2_canonical_fixtures.md`. Per-test mapping for the
-M3 identity_gated entries lives in each entry's `test:` field
-in `baselines/m3.json`.
+M3 / M5 identity_gated entries lives in each entry's `test:`
+field in `baselines/m3.json` / `baselines/m5.json` (the latter
+empty by design).
+
+Workspace test count at the v0.5-rc1 tag: **620 passing,
+12 ignored, 0 failed** (was 615 / 7 / 0 at v0.4-rc1; +5
+passing from M5.1 Phase D regression guard + M5.4 Phase A/B
+sanity tests; +5 ignored from M5.4 Phase A/B measurement
+tests minus housekeeping).
 
 ## Real-hardware emulation audition (optional)
 
