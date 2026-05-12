@@ -2,7 +2,184 @@
 
 ## Current milestone
 
-**M5.5 — GUI/schema polish.** Small consolidation pass per
+**M5.6 — M5 release prep + acceptance + tag `v0.5-rc1`.**
+Final M5 sub-pass. Mirrors M3.8 / M4.7 structure. Per
+consultant M5 plan #33, M5 ships as `v0.5-rc1` even though
+it is methodology-only — trustworthy negative methodology
+result is project progress.
+
+**Outcome: v0.5-rc1 ready.** All six M5.6 phases landed.
+M5 substantive work (M5.0 contracts + M5.1 native-rate
+harness verification + M5.1.1 historical-artifact corrections
++ M5.2 characterization re-run + decision + M5.4 BRR
+noise-floor strategy spike + M5.5 GUI/schema audit) is
+documented coherently across `RELEASE_NOTES_v0.5-rc.md`,
+`docs/reproduce-m2.md`, `SPEC.md` §26 M6 prelude scope, and
+`baselines/m5.json`. The `m5-acceptance` bundle is the
+release-time integrity contract for that documentation.
+
+### M5.6 phase log
+
+- **Phase 0 chore (commit `3a4d3e9`)** — `chore: apply
+  rustfmt to M5.4 files (line-length re-flow only; no
+  semantic change)`. The M5.4 commits had a latent
+  `cargo fmt --check` exit-code masking bug in the gate
+  shell chain; this chore lands the fmt corrections
+  separately so the M5.6 commit sequence is strict-clean
+  throughout. Going forward the gate chain uses
+  `$PIPESTATUS`-aware checks rather than pipe-tail
+  terminators.
+- **Phase 1 (commit `7259ace`)** — `feat(app): m5-acceptance
+  bundle (5-stage rollup analog of m4-acceptance)`. New
+  `M5Acceptance` clap variant + dispatch arm +
+  `cmd_m5_acceptance` + `build_m5_acceptance_bundle_json`.
+  Uses `serde_json::Map::insert` (M3.8 Windows stack-overflow
+  fix). Stages: M4 regression / native-rate harness
+  verification / characterization documentary integrity /
+  M5.4 spike state / M5 baselines integrity.
+- **Phase 2 (commit `b83da66`)** — `docs(reproducer): M5
+  reproduction guide (Option A extension)`. New "Run
+  m5-acceptance against the canonical fixture" + "M5-specific
+  reproduction notes" sections; "Verify locked baselines"
+  extended with the M5 baseline-classification subsection +
+  test count update (620 / 12 / 0).
+- **Phase 3 (commit `74f997f`)** — `docs:
+  RELEASE_NOTES_v0.5-rc.md with M5.1 retraction + M5.2 /
+  M5.3 / M5.4 outcomes`. M3.8 / M4.7 structure: Highlights,
+  What's locked, Reproduction, M5 measurement outcomes
+  (load-bearing — explicit about the M5.1 retraction
+  lineage), M6 prelude scope, Tagging instructions.
+- **Phase 4** — M5 baseline classification audit (in-process
+  via this STATUS entry; no patches needed). Documented
+  below.
+- **Phase 5 (commit `fe157d3`)** — `docs(spec): §26 M6
+  prelude scope documentation`. §25 preserved as historical
+  record of what M5 was tasked with (items 1-3 resolved at
+  M5.1 / M5.2 / M5.4; items 4-5 bookkeeping done at M5.5 /
+  M5.0). §26 picks up forward visibility for M6+: 4 items
+  covering source-domain-attenuation milestone (item 1),
+  alternative characterization methodology (item 2),
+  `baselines/m6.json` scaffold (item 3), M6 entry
+  conditionality (item 4).
+- **Phase 6 (this entry)** — STATUS rewrite + annotated tag
+  `v0.5-rc1`.
+- **Cargo gates:** all four strict-clean throughout the M5.6
+  commit sequence. Now using `$PIPESTATUS`-aware shell
+  checks per the Phase 0 chore commit-message lesson.
+  **620 tests workspace-wide; 12 ignored; 0 failed**
+  (unchanged from M5.5 close — M5.6 is release-prep
+  documentation + one CLI command + no new tests).
+
+### Phase 4 — M5 baseline classification audit
+
+`baselines/m5.json` audit results (M2.8.1 / M3.8 / M4.7
+pattern):
+
+- **identity_gated: 0 entries** — empty by design per
+  consultant M5 plan #10. No `test:` field gaps possible.
+- **behavior_gated: 6 entries:**
+  - `M5_NATIVE_RATE_CHARACTERIZATION_PITCH_REGISTER`:
+    `test:` field present, points at
+    `core/tests/characterization_pitch_register.rs::m5_pitch_register_constant_pinned_at_4096`.
+    Verified by `grep`: test exists at line 18 of that file.
+  - `M5_METHODOLOGY_REPAIR_BUDGET` (kind
+    `iteration_cap`): no `test:` field — policy contract
+    (1+1 loops); defensible per brief.
+  - `M5_RELIABLE_ALIGNMENT_THRESHOLD_INHERITED` (kind
+    `predicate_reaffirmation`): no `test:` field — reaffirms
+    M4.0 thresholds; defensible.
+  - `M5_PRE_EMPHASIS_FILTER_FORM_CONSTRAINT` (kind
+    `implementation_constraint`): no `test:` field — gated
+    on M5.3 (SKIPPED); defensible.
+  - `M5_ATOM_PCM_STABILITY_HELD` (kind `stability_contract`):
+    no `test:` field — policy contract per SPEC §16.9.1
+    forward visibility; defensible.
+  - `M5_RUNTIME_BUDGET` (kind `performance_budget`): no
+    `test:` field — informational; M5.6 m5-acceptance
+    bundle may promote to hard gate at a future milestone.
+- **documentary_snapshot: 77 entries** — 74 `M5_2_*` + 3
+  `M5_4_*` + 0 other. **Zero entries missing `_note`
+  field.**
+
+**Audit clean.** No patches needed; no `identity_gated`
+test-field gaps; documentary `_note` coverage 77/77. The
+`m5-acceptance` Stage 5 audit reproduces this in the bundle
+JSON at runtime (5 `behavior_gated.total == 6` check is
+loose-coupling; engineer's audit here verifies it matches
+the brief's expected M5.0 contract count exactly).
+
+### `m5-acceptance` exercise results
+
+**Canonical M2 fixture** (`fixtures/projects/canonical_m2/canonical_m2.sfcproj.json`):
+
+```
+m5-acceptance: project_a=canonical_m2.sfcproj.json
+  stage_1_m4_regression: warn (M4 propagates warn = M4.2 outcome 3)
+  stage_2_native_rate_harness_verification: ok
+  stage_3_characterization_documentary_integrity: ok
+  stage_4_m5_4_spike_state: ok
+  stage_5_baselines_integrity: ok
+  bundle.status: warn
+```
+
+**M3.3 edge-case fixture** (`fixtures/projects/atom_edge_cases/harmonic_16_cycle_64.sfcproj.json`):
+identical shape — Stages 2-5 are fixture-independent (they
+exercise M3.5 canonical signals + `baselines/m5.json`, not
+`--project-a`).
+
+**Bundle outputs**:
+- `build/m5/m5-acceptance-canonical/bundle.json`
+- `build/m5/m5-acceptance-harmonic16/bundle.json`
+
+### Decisions log additions (M5.6)
+
+- **`m5-acceptance` bundle shipped**: 5-stage rollup
+  (M4 regression + native-rate harness verification +
+  characterization documentary integrity + M5.4 spike state
+  + M5 baselines integrity). Uses `serde_json::Map::insert`
+  (M3.8 Windows stack-overflow fix carried through).
+- **Reproducer doc updated for M5** (single-doc Option A
+  continues per M3.8 / M4.7).
+- **`RELEASE_NOTES_v0.5-rc.md` shipped** with explicit M5.1
+  retraction lineage + M5.2 methodology_unresolved + M5.3
+  permanently SKIPPED + M5.4 no-production-change outcomes.
+  Honest about each; no obscuring.
+- **Baseline classification audit complete**: 0
+  identity_gated (expected; consultant M5 plan #10) + 6
+  behavior_gated (1 with test field, 5 policy contracts
+  with defensible `test: null` omission) + 77
+  documentary_snapshot (74 M5_2_* + 3 M5_4_*). Audit clean;
+  no patches.
+- **M6 prelude scope documented** in SPEC §26 (new section
+  after §25; §25 preserved as historical record). Four
+  items: source-domain attenuation milestone (PM
+  authorization required), alternative characterization
+  methodology (research direction, no commitment),
+  `baselines/m6.json` scaffold, M6 entry conditionality.
+- **Annotated tag `v0.5-rc1` to be created at the M5.6
+  close commit** (this STATUS commit). Tag message:
+  `v0.5-rc1: M5 release candidate (methodology milestone;
+  no user-facing production change)`. Push to `origin`
+  follows.
+- **M5 substantive work closed** with v0.5-rc1.
+  Production encoder byte-identical to v0.4-rc1
+  (verified by 11 atom PCM SHA identity tests + the
+  M5.4 `m5_4_alt_shift_peak_then_sum_sq_matches_production_path`
+  guard). The M5.2.1 correction-budget slot was never
+  burned (no clear-cause fix surfaced).
+
+**Next pass: M6 prelude (conditional).** Per SPEC §26 item
+4, M6 entry is conditional on PM authorization for either
+the source-domain-attenuation milestone (§16.9 amendment;
+explicit authorization required) OR the alternative
+characterization methodology research direction. If neither
+activates, v0.5-rc1 stays the project's terminal release per
+consultant M5 plan #34. PM consults consultant for the
+M2.8.1 / M3.8.1 / M4.7-pattern close-out integrity audit
+after the v0.5-rc1 tag pushes; if clean → M5 officially
+closed → M6 entry decision goes to user.
+
+**Previous milestone (M5.5) — GUI/schema polish.** Small consolidation pass per
 consultant M5 plan #30 ahead of M5.6 release prep. All four
 audits clean; no code change required. Single STATUS-only
 commit closes the pass — consistent with M4.6's similar
@@ -126,15 +303,6 @@ M3.7's atom preview metrics (`loop_click_abs`,
 - **M5.5 ships as a single STATUS-only commit** —
   consistent with M4.6's similar audit-and-confirm scope
   when all audits land clean.
-
-**Next pass: M5.6 — Acceptance + release prep + tag
-`v0.5-rc1`.** Final M5 sub-pass. Expected scope:
-m5-acceptance bundle CLI, RELEASE_NOTES_v0.5-rc.md
-honest about M5.2 methodology_unresolved + M5.3 permanently
-skipped + M5.4 no-production-change outcomes, baseline
-classification audit, M6 prelude scope sketch (likely a
-SPEC §26 addition or §25 amendment), v0.5-rc1 annotated
-tag. PM to brief.
 
 **Previous milestone (M5.4) — BRR noise-floor strategy spike.** Third M5
 research-spike per consultant M5 plan #29. Mirrors the M4.4
