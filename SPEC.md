@@ -3015,3 +3015,93 @@ deferral findings have a stable forward reference.
    M4 acceptance becomes the M5 stage-1 regression gate the
    same way M3 acceptance is the M4 stage-1 gate.
 
+§25 is preserved as historical record of what M5 was tasked
+with. M5 outcomes are documented at SPEC §10.11 (amended motivation
+post-M5.1 retraction), §16.9.1 (forward-visibility amendment
+procedure), §24.1.1 (M5 repair budget), and in
+`baselines/m5.json` + `STATUS.md` M5 entries +
+`RELEASE_NOTES_v0.5-rc.md`. The M6 forward visibility carries
+forward at §26.
+
+## 26. M6 prelude scope
+
+Forward visibility on questions identified during M5 that may
+be addressed at M6+. Not a commitment; M6 can pick and choose.
+Recorded here so the M5 release notes and the M5.2 / M5.4
+deferral findings have a stable forward reference.
+
+1. **Source-domain attenuation milestone
+   (PM-authorized §16.9 amendment).** Per
+   `baselines/m5.json::M5_4_SOURCE_DOMAIN_ATTENUATION_M6_SKETCH`,
+   the theoretical path to clear the SPEC §24.1 10%
+   encoder-improvement gate within current SPEC bounds
+   requires reducing source PCM peaks below the BRR ADPCM
+   current-sample ceiling of ±14336. Three mechanism
+   candidates documented:
+   1. *Soft-cap at ±14336* — compress source peaks above
+      14336 into ±14336 via soft saturation.
+   2. *Per-atom amplitude scaling* — lower default atom
+      amplitude such that peaks stay below 14336;
+      recoverable in DSP via voice volume (~ -3 to -6 dB).
+   3. *Source-side spectral shaping* — pre-emphasis-style
+      filter applied at the §16.9 render formula (NOT the
+      M3.6 / M4.5 encoder-side pre-emphasis presets, which
+      permanently defer per M5.2 `methodology_unresolved`).
+
+   **Activation requires explicit PM authorization per SPEC
+   §16.9.1 amendment procedure.** M6 milestone would: retire
+   11 M3 atom PCM identity SHAs, pin 11 new M6 atom PCM
+   identity SHAs, re-run M2 / M3 / M4 / M5 acceptance,
+   release-note "BREAKING: render formula amended", consultant
+   close-out audit. Estimated benefit: 18431 → ~0 for the 4
+   high-noise cluster fixtures if peaks compress to ±14336
+   cleanly (~50% SNR improvement on those fixtures); low-
+   noise cluster unchanged. Estimated risks: audibility
+   shift (user audition required per M3.6-deferred lesson,
+   consultant M3.5 audit #11), compatibility breakage for
+   pre-M6 `.sfcproj` fixtures, M2 voice-volume compensation
+   viability against the audibility / silence gates.
+
+2. **Alternative characterization methodology (research
+   direction).** The M5.2 `methodology_unresolved` outcome
+   stems from a structural mismatch between raw BRR decode
+   and SPC playback at the gaussian-kernel level. The
+   `M5_2_RESIDUAL_DIVERGENCE_HYPOTHESIS` baseline entry
+   formalizes the inferential closure: every M3.5 canonical
+   atom sets `force_filter_0_loop_entry: true`, so the BRR
+   decoder state is reset at each loop boundary; the
+   three-way comparison's (1) raw-tile no-state and (2)
+   raw-with-state-carry produce byte-identical PCM; residual
+   (1)/(2)-vs-(3) divergence narrows to S-DSP gaussian
+   4-tap kernel non-impulse response at unity pitch.
+
+   M6+ research direction (no committed milestone):
+   characterization methodology that compares like-to-like
+   at the gaussian interpolation layer. Approaches might
+   include direct DSP-state introspection, gaussian-kernel-
+   aware host simulation that applies the SNES gaussian
+   table to the raw decode before comparison, or methodology
+   that side-steps the comparison surface entirely. **No
+   commitment; research scope only.** If this work proceeds
+   and produces a methodology that clears the SPEC §10.9
+   four-criterion reliable-alignment predicate, the
+   M5.3-skipped pre-emphasis preset evaluation becomes
+   re-evaluable.
+
+3. **`baselines/m6.json`.** Create the file when M6 lands;
+   inherit M5 by reference (mirror the M5-inherits-M4
+   pattern). M5 acceptance becomes the M6 stage-1 regression
+   gate the same way M4 acceptance is the M5 stage-1 gate.
+
+4. **M6 entry conditionality.** Unlike M5 entry (which
+   followed M4 close as a research-spike-heavy milestone),
+   M6 entry is conditional on PM authorization for either
+   item 1 (source-domain attenuation amendment) or item 2
+   (alternative characterization research). If neither
+   activates, M5 stays the project's terminal release until
+   a different productive direction surfaces. Per consultant
+   M5 plan #34, "trustworthy negative methodology result is
+   valuable project progress" — v0.5-rc1 stands as a
+   complete milestone even without an immediate M6
+   successor.
+
