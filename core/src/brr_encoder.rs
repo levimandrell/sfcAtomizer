@@ -303,9 +303,7 @@ fn best_filter_shift(
                     ShiftObjective::PeakThenSumSq => {
                         (trial.peak, trial.sum_sq) < (b.peak, b.sum_sq)
                     }
-                    ShiftObjective::RmsThenPeak => {
-                        (trial.sum_sq, trial.peak) < (b.sum_sq, b.peak)
-                    }
+                    ShiftObjective::RmsThenPeak => (trial.sum_sq, trial.peak) < (b.sum_sq, b.peak),
                 },
             };
             if is_better {

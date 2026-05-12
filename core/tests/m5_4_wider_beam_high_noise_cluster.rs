@@ -26,9 +26,7 @@ use sfc_atomizer_core::atom::{
     render_to_brr, render_to_pcm, rotate_pcm, rotation_candidate_offsets, AtomKind, AtomPartial,
     AtomRenderOptions, AtomSlot,
 };
-use sfc_atomizer_core::audition::{
-    peak_abs_raw_vs_source, rms_raw_vs_source, snr_db,
-};
+use sfc_atomizer_core::audition::{peak_abs_raw_vs_source, rms_raw_vs_source, snr_db};
 use sfc_atomizer_core::brr::{decode_blocks, BrrDecoderState};
 use sfc_atomizer_core::brr_encoder::{
     encode_looped_m4_4_spike, EncodeOptions, M44SpikeConfig, M44Strategy,
@@ -292,8 +290,8 @@ fn m5_4_wider_beam_decode_roundtrip_clean() {
                 force_filter_0_first_block: atom.render.force_filter_0_first_block,
                 loop_entry_block_index: Some(0),
             };
-            let result = encode_looped_m4_4_spike(&source, 0, &opts, cfg)
-                .expect("spike encode infallible");
+            let result =
+                encode_looped_m4_4_spike(&source, 0, &opts, cfg).expect("spike encode infallible");
             let blocks: Vec<[u8; 9]> = result
                 .bytes
                 .chunks_exact(9)
