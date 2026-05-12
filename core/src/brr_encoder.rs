@@ -95,8 +95,13 @@ pub enum EncodeError {
 ///
 /// Sets `end_flag` on the last block, `loop_flag = false`.
 pub fn encode(samples: &[i16], options: &EncodeOptions) -> EncodeResult {
-    encode_internal(samples, /* loop_start = */ None, options)
-        .expect("non-looped encode never fails")
+    encode_internal(
+        samples,
+        /* loop_start = */ None,
+        options,
+        ShiftObjective::PeakThenSumSq,
+    )
+    .expect("non-looped encode never fails")
 }
 
 /// Encode `samples` to BRR with the loop point at
@@ -120,13 +125,19 @@ pub fn encode_looped(
     }
     let mut opts = *options;
     opts.loop_entry_block_index = Some(loop_start_sample / 16);
-    encode_internal(samples, Some(loop_start_sample), &opts)
+    encode_internal(
+        samples,
+        Some(loop_start_sample),
+        &opts,
+        ShiftObjective::PeakThenSumSq,
+    )
 }
 
 fn encode_internal(
     samples: &[i16],
     loop_start: Option<u32>,
     options: &EncodeOptions,
+    objective: ShiftObjective,
 ) -> Result<EncodeResult, EncodeError> {
     if samples.is_empty() {
         return Ok(EncodeResult {
@@ -170,7 +181,14 @@ fn encode_internal(
         let end_flag = is_last_block;
         let loop_flag = is_last_block && loop_start.is_some();
 
-        let trial = best_filter_shift(&source_block, state, force_filter0, end_flag, loop_flag);
+        let trial = best_filter_shift(
+            &source_block,
+            state,
+            force_filter0,
+            end_flag,
+            loop_flag,
+            objective,
+        );
 
         bytes.extend_from_slice(&trial.block);
         block_reports.push(EncodedBlockReport {
@@ -241,29 +259,57 @@ struct BlockTrial {
     last_decoded: i16,
 }
 
+/// Shift-selection objective. Decides how `best_filter_shift`
+/// breaks the tie between the 4 filters × 13 shifts grid of
+/// per-block trials.
+///
+/// Production (M3.3) uses [`ShiftObjective::PeakThenSumSq`]. The
+/// alternative [`ShiftObjective::RmsThenPeak`] is the M5.4
+/// spike's hypothesis per consultant M4.4 audit #7.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShiftObjective {
+    /// Score by peak first, sum-of-squares as tiebreak. Pure RMS
+    /// scoring lets the encoder pick a smaller shift that cleanly
+    /// encodes the bulk of the block but clips at the signal's
+    /// peaks; clipping is what makes BRR samples sound distorted,
+    /// so avoid it even at the cost of slightly higher quantization
+    /// noise on the inner samples. M3.3 production objective.
+    PeakThenSumSq,
+    /// M5.4 spike — score by sum-of-squares first, peak as
+    /// tiebreak. Minimizes block RMS residual at the potential
+    /// cost of clipping at signal peaks. Per consultant M4.4 audit
+    /// #7: predicted to NOT clear the M4.3 high-noise-cluster
+    /// ceiling. Feature-flagged in the spike entry; production code
+    /// MUST pass `PeakThenSumSq`.
+    RmsThenPeak,
+}
+
 fn best_filter_shift(
     source: &[i16; 16],
     state: BrrDecoderState,
     force_filter0: bool,
     end_flag: bool,
     loop_flag: bool,
+    objective: ShiftObjective,
 ) -> BlockTrial {
     let filter_range: &[u8] = if force_filter0 { &[0] } else { &[0, 1, 2, 3] };
     let mut best: Option<BlockTrial> = None;
     for &filter in filter_range {
         for shift in 0u8..=12 {
             let trial = encode_one_filter_shift(source, state, filter, shift, end_flag, loop_flag);
-            // Score by peak first, sum-of-squares as tiebreak. Pure
-            // RMS scoring lets the encoder pick a smaller shift that
-            // cleanly encodes the bulk of the block but clips at the
-            // signal's peaks; clipping is what makes BRR samples sound
-            // distorted, so avoid it even at the cost of slightly
-            // higher quantization noise on the inner samples.
-            let trial_key = (trial.peak, trial.sum_sq);
-            match best {
-                None => best = Some(trial),
-                Some(ref b) if trial_key < (b.peak, b.sum_sq) => best = Some(trial),
-                _ => {}
+            let is_better = match best {
+                None => true,
+                Some(ref b) => match objective {
+                    ShiftObjective::PeakThenSumSq => {
+                        (trial.peak, trial.sum_sq) < (b.peak, b.sum_sq)
+                    }
+                    ShiftObjective::RmsThenPeak => {
+                        (trial.sum_sq, trial.peak) < (b.sum_sq, b.peak)
+                    }
+                },
+            };
+            if is_better {
+                best = Some(trial);
             }
         }
     }
@@ -380,6 +426,45 @@ fn best_nibble_for(target_shifted: i32, shift: u8) -> i8 {
         }
     }
     best_n
+}
+
+// =====================================================================
+// M5.4 — Alternative shift-selection objective spike (consultant
+// M4.4 audit #7 / M5.4 brief Phase B)
+// =====================================================================
+//
+// Feature-flagged greedy encoder variant. Same per-block algorithm as
+// production `encode_looped` but uses `ShiftObjective::RmsThenPeak`
+// for the (filter, shift) selection lex-tiebreak instead of
+// `PeakThenSumSq`. Tests this hypothesis: would minimizing block RMS
+// (at potential cost of peak clipping) improve the M4.3 noise-floor
+// metrics on the high-noise cluster?
+//
+// Consultant M4.4 audit #7 prediction: no. Spike is documentary;
+// production code MUST NOT call this entry.
+
+/// M5.4 spike entry. Same signature as `encode_looped` plus an
+/// explicit [`ShiftObjective`]. Feature-flagged per the M5.4 brief.
+/// Production code path (`encode_looped`) always passes
+/// `PeakThenSumSq` and ignores this entry.
+pub fn encode_looped_m5_4_alt_shift_spike(
+    samples: &[i16],
+    loop_start_sample: u32,
+    options: &EncodeOptions,
+    objective: ShiftObjective,
+) -> Result<EncodeResult, EncodeError> {
+    if !loop_start_sample.is_multiple_of(16) {
+        return Err(EncodeError::LoopStartNotAligned(loop_start_sample));
+    }
+    if (loop_start_sample as usize) >= samples.len() {
+        return Err(EncodeError::LoopStartOutOfRange {
+            start: loop_start_sample,
+            len: samples.len() as u32,
+        });
+    }
+    let mut opts = *options;
+    opts.loop_entry_block_index = Some(loop_start_sample / 16);
+    encode_internal(samples, Some(loop_start_sample), &opts, objective)
 }
 
 // =====================================================================
