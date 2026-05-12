@@ -2,7 +2,207 @@
 
 ## Current milestone
 
-**M5.2 — Characterization re-run + decision.** Second M5
+**M5.4 — BRR noise-floor strategy spike.** Third M5
+research-spike per consultant M5 plan #29. Mirrors the M4.4
+spike pattern with explicit upfront acknowledgment that
+production change is unlikely given the M4.4 arithmetic
+ceiling + M5.2's `methodology_unresolved` outcome. M5.4's
+deliverable is a documentary record consolidating the M4.4
+finding + M5.2 hypothesis + the new Phase A/B empirical
+results into a coherent M6+ research agenda. Scope was
+bounded to ~1 day; no production encoder change.
+
+**Outcome: no production change** (expected per upfront
+reframing). Two empirical confirmations + one forward-
+visibility scope sketch:
+
+- **Phase A confirmed consultant M4.4 audit #2** structural-
+  ceiling claim empirically. 8 (fixture × width) combinations
+  (4 high-noise cluster × beam_width ∈ {8, 16}) all stay at
+  `peak_abs_raw_vs_source = 18431`. Max RMS improvement is
+  **0.17%** on `MAX_AMPLITUDE_NO_NORMALIZE`; max SNR
+  improvement is **0.015 dB**. None come close to the SPEC
+  §24.1 10% exit-criterion threshold.
+- **Phase B confirmed consultant M4.4 audit #7** prediction
+  empirically. Alt-shift-objective (`RmsThenPeak`) is BYTE-
+  IDENTICAL to control (`PeakThenSumSq`, = M3.3 production)
+  on `HARMONIC_16_CYCLE_64`. The 14336 ceiling is the
+  dominant constraint at the per-block grid; the lex
+  tiebreak doesn't unlock a different choice.
+- **Phase C M6+ §16.9 amendment scope sketch** locked in
+  `baselines/m5.json::M5_4_SOURCE_DOMAIN_ATTENUATION_M6_SKETCH`.
+  Three mechanism candidates (soft cap, per-atom amplitude
+  scaling, source-side spectral shaping) + cost table (11
+  atom PCM SHA identity retirements + repins, M2/M3/M4
+  acceptance reruns, release-note warning, consultant
+  close-out audit) + benefit estimate (~50% SNR improvement
+  for high-noise cluster) + three risk dimensions. M5
+  disposition: defer to M6+ for explicit PM authorization
+  per SPEC §16.9.1 procedure.
+
+### M5.4 strategy
+
+Documentary-investigation posture. All spike code stays
+feature-flagged; production `encode_looped` is byte-identical
+to its M3.3 form (verified by the
+`m5_4_alt_shift_peak_then_sum_sq_matches_production_path`
+guard test in Phase B + the 11 atom PCM SHA identity tests
+still passing).
+
+Phase A reused the existing M4.4 spike (`encode_looped_m4_4_spike`
+with `M44Strategy::BeamSearch`) at widths 8 and 16 — no new
+encoder code. Phase B added the alt-shift entry
+`encode_looped_m5_4_alt_shift_spike` via a minimal refactor:
+new `ShiftObjective` enum threaded through `best_filter_shift`
+and `encode_internal`; production callers pass
+`PeakThenSumSq`. Phase C is text in `baselines/m5.json`; no
+code at all.
+
+### Phase A empirical data (wider-beam benchmark)
+
+Ignored test
+`core/tests/m5_4_wider_beam_high_noise_cluster.rs::m5_4_wider_beam_high_noise_cluster`.
+Run via `cargo test --release --test
+m5_4_wider_beam_high_noise_cluster -- --ignored --nocapture`.
+
+| Fixture | Width | peak | peak Δ% | rms Δ% | snr Δ dB | runtime (ms) |
+|---|---|---|---|---|---|---|
+| `MAX_AMPLITUDE_NO_NORMALIZE` | 8  | 18431 | +0.00 | -0.17 | +0.015 | 16.75 |
+| `MAX_AMPLITUDE_NO_NORMALIZE` | 16 | 18431 | +0.00 | -0.17 | +0.015 | 31.03 |
+| `NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY` | 8  | 18431 | +0.00 | +0.00 | +0.000 | 15.96 |
+| `NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY` | 16 | 18431 | +0.00 | +0.00 | +0.000 | 31.45 |
+| `HARMONIC_16_CYCLE_64` | 8  | 18431 | +0.00 | +0.00 | +0.000 | 2.96 |
+| `HARMONIC_16_CYCLE_64` | 16 | 18431 | +0.00 | +0.00 | +0.000 | 5.75 |
+| `ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8` | 8  | 18431 | +0.00 | -0.10 | +0.009 | 15.92 |
+| `ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8` | 16 | 18431 | +0.00 | -0.10 | +0.009 | 31.28 |
+
+Width 8 and width 16 produce **identical metrics** per fixture
+— the beam doesn't find further optima beyond width 4 (or
+width 8) within these signals' (filter, shift) trial spaces.
+Runtime scales roughly linearly with width as expected.
+
+### Phase B empirical data (alt-shift-objective)
+
+Ignored test
+`core/tests/m5_4_alt_shift_objective_spike.rs::m5_4_alt_shift_objective_harmonic_16`.
+Run via `cargo test --release --test
+m5_4_alt_shift_objective_spike -- --ignored --nocapture`.
+
+| Objective | peak | peak Δ% | rms | rms Δ% | snr_db | snr Δ dB | clipping |
+|---|---|---|---|---|---|---|---|
+| `PeakThenSumSq` (control, = M3.3 production) | 18431 | +0.00 | 12329.887 | +0.00 | 5.479 | +0.000 | 0 |
+| `RmsThenPeak`   (M5.4 treatment) | 18431 | +0.00 | 12329.887 | +0.00 | 5.479 | +0.000 | 0 |
+
+Treatment and control are **byte-identical**. The 14336
+per-block ceiling is the dominant constraint; the lex
+tiebreak between `peak` and `sum_sq` doesn't unlock a
+different (filter, shift) choice because the shift that
+minimizes peak also minimizes sum_sq under that ceiling.
+
+### Phase C M6+ §16.9 amendment scope sketch (summary)
+
+Per SPEC §16.9.1 procedure (M5.0 forward-visibility
+documentation; NOT activated at M5.4):
+
+- **Mechanism candidates:**
+  1. *Soft-cap at ±14336* — compress source peaks above 14336
+     into ±14336 via soft saturation.
+  2. *Per-atom amplitude scaling* — lower default atom
+     amplitude such that peaks stay below 14336; recoverable
+     in DSP via voice volume (~ -3 to -6 dB).
+  3. *Source-side spectral shaping* — pre-emphasis-style
+     filter applied at the §16.9 render formula, not at the
+     M3.6/M4.5 encoder-side pre-emphasis (which permanently
+     defers per M5.2).
+- **Cost:** 11 atom PCM SHA identity baselines retired + repinned,
+  M2/M3/M4 acceptance reruns, release-note "BREAKING: render
+  formula amended" warning, consultant close-out audit.
+- **Benefit estimate:** 18431 → ~0 for the 4 high-noise cluster
+  fixtures if peaks compress to ±14336 cleanly. ~50% SNR
+  improvement on those fixtures. Low-noise cluster unchanged.
+- **Risks:** audibility shift (user audition required per M3.6-
+  deferred lesson, consultant M3.5 audit #11), compatibility
+  (any pre-M6 .sfcproj fixtures break), M2 voice-volume
+  compensation viability.
+- **M5 disposition:** defer to M6+ for explicit PM authorization.
+
+Full sketch in `baselines/m5.json::M5_4_SOURCE_DOMAIN_ATTENUATION_M6_SKETCH`.
+
+### M5.4 phase log
+
+- **Phase B feat (commit `d92077b`)** — `feat(core):
+  encode_looped_m5_4_alt_shift_spike`. New `ShiftObjective`
+  enum + `encode_looped_m5_4_alt_shift_spike` entry +
+  minimal refactor of `best_filter_shift` and
+  `encode_internal` to thread the objective parameter.
+  Production callers pass `PeakThenSumSq` (no behavior
+  change).
+- **Phase A test (commit `6fc1b79`)** — `test(core): M5.4
+  wider-beam scientific-closure benchmark on high-noise
+  cluster (ignored)`. 1 ignored measurement +
+  1 non-ignored decode-roundtrip sanity. Stop-condition
+  guards inlined.
+- **Phase B test (commit `83d51b1`)** — `test(core): M5.4
+  alternative-shift-objective documentary single-fixture
+  spike (ignored)`. 1 ignored measurement + 2 non-ignored
+  sanity (decode roundtrip + production byte-identity
+  guard). Stop-condition guards inlined.
+- **Phase C (commit `466c405`)** — `docs(baselines): M5.4
+  documentary entries`. Three `M5_4_*` documentary_snapshot
+  entries appended; 77 total documentary_snapshot rows now
+  (was 74 at M5.2 close).
+- **Phase D (this entry)** — STATUS rewrite.
+- **Cargo gates:** `cargo check`, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` all green. **620 tests
+  workspace-wide** (was 617 at M5.2 close; +3 from Phase A's
+  sanity test, Phase B's two sanity tests). **12 ignored**
+  (was 10 at M5.2 close; +2 from Phase A and Phase B
+  measurement tests). Atom PCM SHA identity tests + M2/M3/M4
+  acceptance + M3.3 phase rotation gate + M4.1 alignment
+  plumbing tests all pass unchanged.
+
+### Decisions log additions (M5.4)
+
+- **Phase A wider-beam scientific-closure benchmark** (widths
+  8/16, 4 high-noise fixtures): all 8 (fixture × width)
+  combinations within ±0.17% of M4.3 baseline; peak
+  unchanged at 18431 universally; consultant M4.4 audit #2
+  structural-ceiling claim **confirmed empirically**.
+- **Phase B alternative-shift-objective documentary spike**
+  (single-fixture, HARMONIC_16_CYCLE_64): RmsThenPeak
+  byte-identical to PeakThenSumSq; consultant M4.4 audit #7
+  prediction **confirmed empirically**.
+- **Phase C M6+ source-domain-attenuation scope sketch:**
+  three mechanism candidates documented in
+  `M5_4_SOURCE_DOMAIN_ATTENUATION_M6_SKETCH`; risks named;
+  M5 disposition is **defer to M6+ for explicit PM
+  authorization** per SPEC §16.9.1.
+- **M5.4 outcome: no production encoder change.** All spike
+  code stays feature-flagged. The
+  `m5_4_alt_shift_peak_then_sum_sq_matches_production_path`
+  guard test confirms the M5.4 refactor preserves production
+  byte-for-byte; the 11 atom PCM SHA identity tests confirm
+  the atom render formula is unchanged.
+- **M6+ agenda explicit:** source-domain attenuation is the
+  only theoretical path to clear the M4.4 10% exit criterion
+  within current SPEC bounds; pursuit requires a §16.9
+  amendment milestone per the §16.9.1 procedure
+  (authorization gate → old-SHA retirement → new-SHA
+  pinning → M2/M3/M4 acceptance regression → release-note
+  warning → close-out audit).
+- M5 trajectory at M5.4 close: **M5.5 GUI/schema polish**
+  next (defensive only per consultant M5 plan #30 — v2
+  schema doesn't reference track IDs cross-tree), then
+  **M5.6 acceptance + release-prep + tag `v0.5-rc1`**.
+
+**Next pass: M5.5 — GUI/schema polish.** Defensive cleanup
+per consultant M5 plan #30. With the M5 substantive work
+closed (M5.1 + M5.2 + M5.4 all shipped), M5.5 narrows to
+non-functional cleanup ahead of M5.6 release prep. PM to
+brief.
+
+**Previous milestone (M5.2) — Characterization re-run + decision.** Second M5
 research-spike per SPEC §24.1.1 (M5 budget: 1+1 loops; M5.2
 is the second of the main loops; M5.2.1 conditional
 correction remains unburned). Given M5.1's empirical finding
@@ -127,15 +327,6 @@ state.
   valuable project progress.
 - All M3.3 phase rotation, M2/M3/M4 acceptance, and 11 atom
   PCM SHA identity tests pass unchanged.
-
-**Next pass: M5.4 — BRR noise-floor strategy spike.**
-Per consultant M5 plan #29. With pre-emphasis off the table,
-the remaining productive substantive work is investigating
-BRR encoder noise-floor compensation strategies (source-domain
-attenuation per SPEC §16.9.1 amendment procedure, OR shift-13–15
-exploration, OR something else outside the current SPEC).
-M5.5 GUI/schema polish + M5.6 acceptance/release follow. PM to
-brief.
 
 **Previous milestone (M5.1) — Native-rate characterization harness
 verification + investigation.** First M5 research-spike per
