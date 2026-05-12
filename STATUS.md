@@ -2,7 +2,141 @@
 
 ## Current milestone
 
-**M5.4 — BRR noise-floor strategy spike.** Third M5
+**M5.5 — GUI/schema polish.** Small consolidation pass per
+consultant M5 plan #30 ahead of M5.6 release prep. All four
+audits clean; no code change required. Single STATUS-only
+commit closes the pass — consistent with M4.6's similar
+audit-and-confirm scope.
+
+**Outcome: clean across all four audits.** The M5 substantive
+work (M5.1 native-rate harness verification, M5.2
+characterization re-run + decision, M5.4 BRR noise-floor
+strategy spike) stayed disciplined about CLI/GUI separation;
+M5.5 confirms no leakage at the boundaries.
+
+### Audit results
+
+**Phase A — v2 schema cross-tree track-id reference audit.**
+`core/src/project_v2.rs` last touched at commit `be29d58`
+(M2.5 / pre-M3); zero edits during M5.0–M5.4. Grep across
+`core/src/` for `track_id` / `tracks[].id` / `active_track_id`
+/ `TrackId` / `tracks_by_id` patterns finds only:
+- intra-`tracks[]` validation (duplicate-id check via HashSet
+  in `project_v2.rs:277-292`);
+- `VoiceSetupError` error-message fields in `voice_setup.rs`
+  (string context for debugging, not schema cross-refs);
+- M1 `ValidationErrorKind` variants in `project.rs`.
+
+**Zero new cross-tree track-id references since M4.6.** The
+`rename_track_id_cascade` method stays at its defensive
+leaf-update scope — no cascade body activation needed.
+The same applies to `rename_atom_id_cascade` (M2.8
+cascade scope) and `rename_sequence_id_cascade` (M3.7
+cascade scope); both established cascades remain at their
+M2.8/M3.7 scopes since no schema growth has activated
+additional cascade pathways.
+
+**Phase B1 — gaussian characterization GUI surfacing audit.**
+Grep `app/src/app_main.rs` + `app/src/v2_editor.rs` (the two
+GUI surfaces) for `gain_delta_db`, `normalized_correlation`,
+`zcr_ratio`, `alignment_best_offset`, `alignment_validity`,
+`harness_meta`, `recommended_next`, `methodology_unresolved`,
+`methodology_review`, `methodology_precondition`:
+
+**0 hits.** All matches landed in `app/src/main.rs` (the CLI
+binary, where `cmd_characterize_gaussian` correctly lives
+per consultant M3.5 audit #16 and M5.2 reaffirmation).
+M5.2's `methodology_unresolved` outcome and the
+`harness_meta` block introduced at M5.1 do not surface in
+the egui shell. Sanity also confirmed for the M4.4/M5.4
+encoder spikes: `encode_looped_m4_4_spike`,
+`encode_looped_m5_4_alt_shift_spike`, `ShiftObjective`,
+`M44Strategy`, `M44SpikeConfig` — 0 hits in
+`app_main.rs` / `v2_editor.rs`; the only mention in `main.rs`
+is a CLI-side `_note` string in `cmd_m4_acceptance` stage 4
+documenting that the spike is feature-flagged.
+
+**Phase B2 — `loop_window_rms_delta` diagnostic-only audit.**
+Grep `app/src/` for `loop_window_rms_delta`:
+- `app/src/main.rs:2674` — CLI pass-through into
+  `AtomRenderReport` for JSON consumers (correct; CLI is the
+  intended surface).
+- `app/src/app_main.rs:2303` — a **comment** explicitly
+  documenting the policy:
+  `// Per consultant M3.5 audit #6: \`loop_window_rms_delta\``
+  `// stays diagnostic-only and is NOT surfaced here.`
+  Self-documenting guard for future GUI edits.
+
+**0 GUI surface hits.** The egui shell continues to show
+M3.7's atom preview metrics (`loop_click_abs`,
+`rotation_offset`, peak/rms post-rotation) and nothing else.
+
+**Phase C — Incidental GUI debt.** None found.
+
+- **C1: atom-preview color thresholds.** The M3.7-locked
+  4-tier loop_click_abs grading (green=0; yellow=1..=1000;
+  orange=1001..=5000; red=>5000) remains informative.
+  M3.3-rotation moved canonical fixtures to 0 (green), but
+  user-authored atoms with non-zero `phase_cycles` or
+  off-grid harmonics still differentiate across the bands.
+  The thresholds are documented at `loop_click_color` in
+  `app_main.rs:2336-2351`; no recalibration warranted.
+- **C2: STATUS active-section skim M4.0-M5.4 for deferred
+  GUI items.** No deferred GUI work found. M4.6 closed the
+  defensive rename-cascade pattern; M5.0-M5.4 added no GUI
+  surface. M5.6 release prep is the next GUI-adjacent work
+  (release-notes audit, m5-acceptance bundle stage strings;
+  not feature work).
+
+### M5.5 phase log
+
+- **Phases A–C** — audits only; no file edits, no code,
+  no test changes. Audit outputs captured in this STATUS
+  entry's "Audit results" subsection.
+- **Phase D (this entry)** — STATUS rewrite.
+- **Cargo gates:** unchanged from M5.4 close. **620 tests
+  workspace-wide; 12 ignored; 0 failed.** No new tests
+  added in M5.5 (audit-only pass); no behavior change.
+
+### Decisions log additions (M5.5)
+
+- **Phase A audit clean:** v2 schema cross-tree track-id
+  reference count remains 0 since M4.6.
+  `rename_track_id_cascade` stays at its defensive
+  leaf-update scope. `rename_atom_id_cascade` (M2.8) and
+  `rename_sequence_id_cascade` (M3.7) similarly unchanged;
+  all three cascades remain at their established scopes —
+  no schema growth has activated additional cascade
+  pathways during M5.0-M5.4.
+- **Phase B1 audit clean:** gaussian characterization data
+  confirmed NOT surfaced in GUI (`app_main.rs` +
+  `v2_editor.rs`). M5.2's `methodology_unresolved` outcome
+  and M5.1's `harness_meta` field both stay
+  CLI/report-only per consultant M3.5 audit #16 and M5.2
+  reaffirmation. M4.4/M5.4 encoder spike entry points
+  similarly absent from GUI.
+- **Phase B2 audit clean:** `loop_window_rms_delta`
+  confirmed diagnostic-only per consultant M3.5 audit #6.
+  The single `app_main.rs` mention is a self-documenting
+  comment guarding against future GUI surfacing.
+- **Phase C: no incidental GUI debt found.** Atom-preview
+  color thresholds remain informative under current data
+  shapes; no deferred GUI items in STATUS active section
+  M4.0-M5.4.
+- **M5.5 ships as a single STATUS-only commit** —
+  consistent with M4.6's similar audit-and-confirm scope
+  when all audits land clean.
+
+**Next pass: M5.6 — Acceptance + release prep + tag
+`v0.5-rc1`.** Final M5 sub-pass. Expected scope:
+m5-acceptance bundle CLI, RELEASE_NOTES_v0.5-rc.md
+honest about M5.2 methodology_unresolved + M5.3 permanently
+skipped + M5.4 no-production-change outcomes, baseline
+classification audit, M6 prelude scope sketch (likely a
+SPEC §26 addition or §25 amendment), v0.5-rc1 annotated
+tag. PM to brief.
+
+**Previous milestone (M5.4) — BRR noise-floor strategy spike.** Third M5
 research-spike per consultant M5 plan #29. Mirrors the M4.4
 spike pattern with explicit upfront acknowledgment that
 production change is unlikely given the M4.4 arithmetic
@@ -195,12 +329,6 @@ Full sketch in `baselines/m5.json::M5_4_SOURCE_DOMAIN_ATTENUATION_M6_SKETCH`.
   next (defensive only per consultant M5 plan #30 — v2
   schema doesn't reference track IDs cross-tree), then
   **M5.6 acceptance + release-prep + tag `v0.5-rc1`**.
-
-**Next pass: M5.5 — GUI/schema polish.** Defensive cleanup
-per consultant M5 plan #30. With the M5 substantive work
-closed (M5.1 + M5.2 + M5.4 all shipped), M5.5 narrows to
-non-functional cleanup ahead of M5.6 release prep. PM to
-brief.
 
 **Previous milestone (M5.2) — Characterization re-run + decision.** Second M5
 research-spike per SPEC §24.1.1 (M5 budget: 1+1 loops; M5.2
