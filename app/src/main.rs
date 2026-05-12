@@ -564,6 +564,20 @@ enum Command {
         #[arg(long)]
         oracle: Option<PathBuf>,
     },
+    /// M5.6: M5 release acceptance bundle. Extends m4-acceptance
+    /// with M5-specific stages: native-rate harness verification,
+    /// characterization documentary integrity, M5.4 spike state,
+    /// M5 baselines integrity.
+    M5Acceptance {
+        #[arg(long)]
+        project_a: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 160_000u32)]
+        frames: u32,
+        #[arg(long)]
+        oracle: Option<PathBuf>,
+    },
     /// M3.5: run the §10.9 Gaussian characterization pass against
     /// the `m3_5_canonical` test signal set. Builds one single-atom
     /// SPC per signal, runs the oracle, and emits a
@@ -874,6 +888,12 @@ fn run(cli: Cli) -> Result<(), CliError> {
             frames,
             oracle,
         } => cmd_m4_acceptance(&project_a, &out, frames, oracle.as_deref()),
+        Command::M5Acceptance {
+            project_a,
+            out,
+            frames,
+            oracle,
+        } => cmd_m5_acceptance(&project_a, &out, frames, oracle.as_deref()),
     }
 }
 
@@ -7715,6 +7735,442 @@ fn build_m4_acceptance_bundle_json(a: M4AcceptanceBundleArgs<'_>) -> serde_json:
         Value::Object(stage_3),
     );
     bundle.insert("stage_4_m4_4_spike_state".into(), Value::Object(stage_4));
+    bundle.insert("stage_5_baselines_integrity".into(), Value::Object(stage_5));
+    bundle.insert("bundle".into(), Value::Object(bundle_inner));
+    Value::Object(bundle)
+}
+
+// =============================================================================
+// M5.6 — m5-acceptance five-stage bundle
+// =============================================================================
+
+/// M5.6 m5-acceptance bundle. Extends m4-acceptance with
+/// M5-specific quality stages per consultant M5 plan #21.
+/// Uses `serde_json::Map::insert` (M3.8 Windows stack-overflow
+/// fix carried forward through M4.7).
+///
+/// Stage rollup:
+/// 1. **M4 regression** — spawns `m4-acceptance` against the same
+///    fixture. Inherits M4.2 outcome 3 warn state (alignment_valid
+///    = false documented + intentional).
+/// 2. **Native-rate harness verification (M5.1 contract)** — runs
+///    the `pitch_register_equals_4096_for_native_rate_signals`
+///    runtime guard + the M5.0 fixture-pin test. Stage status: ok
+///    if pitch_register == 0x1000 for all 9 canonical signals;
+///    fail otherwise (would indicate M2.7 voice-setup regression).
+/// 3. **Characterization documentary integrity (M5.2)** — verifies
+///    `baselines/m5.json::documentary_snapshot` contains the
+///    expected M5.2 entries (74 GAUSSIAN_* + summary + hypothesis).
+///    Drift → warn; structural break (missing array, missing
+///    headline entries) → fail.
+/// 4. **M5.4 spike state** — runs spike-state tests
+///    (`m5_4_alt_shift_`, `m5_4_wider_beam_decode_roundtrip_clean`,
+///    `m4_4_spike_`). The M5.4
+///    `m5_4_alt_shift_peak_then_sum_sq_matches_production_path`
+///    guard locks production byte-identity vs M3.3.
+/// 5. **M5 baselines integrity** — in-process audit of
+///    `baselines/m5.json::identity_gated` (expected empty by design
+///    per consultant M5 plan #10) + audits behavior_gated has the
+///    expected 6 M5.0 contract entries.
+fn cmd_m5_acceptance(
+    project_a: &Path,
+    out_dir: &Path,
+    frames: u32,
+    oracle: Option<&Path>,
+) -> Result<(), CliError> {
+    create_dir(out_dir)?;
+    let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sfcwc"));
+    let workspace_root = std::env::current_dir().map_err(CliError::Cwd)?;
+    let stage_status = |ok: bool, warn: bool| {
+        if ok && !warn {
+            "ok"
+        } else if warn {
+            "warn"
+        } else {
+            "error"
+        }
+    };
+
+    // ---- Stage 1: M4 regression ----
+    let m4_out_dir = out_dir.join("m4_regression");
+    let mut m4_args: Vec<String> = vec![
+        "m4-acceptance".to_string(),
+        "--project-a".to_string(),
+        project_a.display().to_string(),
+        "--out".to_string(),
+        m4_out_dir.display().to_string(),
+        "--frames".to_string(),
+        frames.to_string(),
+    ];
+    if let Some(o) = oracle {
+        m4_args.push("--oracle".to_string());
+        m4_args.push(o.display().to_string());
+    }
+    eprintln!("m5-acceptance: stage 1 — running m4-acceptance subprocess...");
+    let r = std::process::Command::new(&bin)
+        .args(&m4_args)
+        .output()
+        .expect("spawn m4-acceptance");
+    let stage_1_spawn_ok = r.status.success();
+    let m4_bundle_path = m4_out_dir.join("bundle.json");
+    let m4_bundle: Option<serde_json::Value> = std::fs::read(&m4_bundle_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let m4_status = m4_bundle
+        .as_ref()
+        .and_then(|v| v.get("bundle"))
+        .and_then(|v| v.get("status"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("missing")
+        .to_string();
+    // M4 bundle reports "warn" as its M4.2-outcome-3 carry-through;
+    // that's the expected M5.6 state too — propagates as warn, not
+    // error. Stage 1 only flips to error on "missing" or "error".
+    let stage_1_warn = m4_status == "warn";
+    let stage_1_ok = stage_1_spawn_ok && (m4_status == "ok" || m4_status == "warn");
+    if !stage_1_ok {
+        eprintln!(
+            "  stage 1 m4-acceptance: status={m4_status}, spawn_exit={:?}",
+            r.status.code()
+        );
+    }
+
+    // Helper: spawn `cargo test --workspace --quiet -- <filters...>`.
+    let cargo_test = |label: &str, filters: &[&str]| -> bool {
+        eprintln!(
+            "m5-acceptance: stage {label} — cargo test {}",
+            filters.join(" ")
+        );
+        let mut args: Vec<String> = vec![
+            "test".to_string(),
+            "--workspace".to_string(),
+            "--quiet".to_string(),
+            "--".to_string(),
+        ];
+        for f in filters {
+            args.push((*f).to_string());
+        }
+        let r = std::process::Command::new("cargo")
+            .args(&args)
+            .current_dir(&workspace_root)
+            .output();
+        match r {
+            Ok(o) => o.status.success(),
+            Err(e) => {
+                eprintln!("  cargo test spawn failed: {e}");
+                false
+            }
+        }
+    };
+
+    // ---- Stage 2: native-rate harness verification (M5.1) ----
+    // Runs:
+    //   - pitch_register_equals_4096_for_native_rate_signals (M5.1
+    //     runtime regression guard against the 9 canonical signals).
+    //   - m5_pitch_register_constant_pinned_at_4096 (M5.0 fixture
+    //     pin on baselines/m5.json::M5_NATIVE_RATE_CHARACTERIZATION_PITCH_REGISTER).
+    let stage_2_ok = cargo_test(
+        "2 native-rate harness verification (M5.1)",
+        &["pitch_register"],
+    );
+
+    // ---- Stage 3: characterization documentary integrity (M5.2) ----
+    eprintln!("m5-acceptance: stage 3 — characterization documentary integrity");
+    let m5_baselines_path = workspace_root.join("baselines").join("m5.json");
+    let m5_baselines_raw = std::fs::read(&m5_baselines_path).map_err(|source| CliError::Io {
+        path: m5_baselines_path.clone(),
+        source,
+    })?;
+    let m5_baselines_json: serde_json::Value = serde_json::from_slice(&m5_baselines_raw)?;
+    let documentary_entries = m5_baselines_json
+        .get("documentary_snapshot")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let documentary_total = documentary_entries.len();
+    let m5_2_count = documentary_entries
+        .iter()
+        .filter(|e| {
+            e.get("name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|n| n.starts_with("M5_2_"))
+        })
+        .count();
+    let m5_4_count = documentary_entries
+        .iter()
+        .filter(|e| {
+            e.get("name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|n| n.starts_with("M5_4_"))
+        })
+        .count();
+    let has_summary = documentary_entries
+        .iter()
+        .any(|e| e.get("name").and_then(|v| v.as_str()) == Some("M5_2_CHARACTERIZATION_SUMMARY"));
+    let has_hypothesis = documentary_entries.iter().any(|e| {
+        e.get("name").and_then(|v| v.as_str()) == Some("M5_2_RESIDUAL_DIVERGENCE_HYPOTHESIS")
+    });
+    let has_m6_sketch = documentary_entries.iter().any(|e| {
+        e.get("name").and_then(|v| v.as_str()) == Some("M5_4_SOURCE_DOMAIN_ATTENUATION_M6_SKETCH")
+    });
+    // Stage 3 is "ok" if all sentinel entries exist AND counts match
+    // M5.2 close (74 M5_2 + 3 M5_4 = 77 total). Drift on count → warn.
+    // Structural break (any sentinel missing) → fail.
+    let stage_3_structure_ok = has_summary && has_hypothesis && has_m6_sketch;
+    let stage_3_counts_match = m5_2_count == 74 && m5_4_count == 3 && documentary_total == 77;
+    let stage_3_warn = stage_3_structure_ok && !stage_3_counts_match;
+    let stage_3_ok = stage_3_structure_ok;
+    if !stage_3_ok {
+        eprintln!(
+            "  baselines/m5.json::documentary_snapshot structural break: \
+             summary={has_summary} hypothesis={has_hypothesis} \
+             m6_sketch={has_m6_sketch}"
+        );
+    }
+
+    // ---- Stage 4: M5.4 spike state ----
+    // M5.4's m5_4_alt_shift_peak_then_sum_sq_matches_production_path
+    // is the byte-identity guard against any encoder drift. The
+    // m4_4_spike_ + m5_4_ filters cover decode roundtrip + determinism
+    // + the production-byte-identity guard in one pass.
+    let stage_4_ok = cargo_test(
+        "4 M5.4 spike state (m4_4 + m5_4 spike tests)",
+        &["m4_4_spike_", "m5_4_"],
+    );
+
+    // ---- Stage 5: M5 baselines integrity audit ----
+    eprintln!("m5-acceptance: stage 5 — M5 baselines integrity audit");
+    let identity_gated_entries = m5_baselines_json
+        .get("identity_gated")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let identity_total = identity_gated_entries.len();
+    let mut identity_with_test = 0usize;
+    let mut identity_gaps: Vec<String> = Vec::new();
+    for e in &identity_gated_entries {
+        let name = e
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unnamed)");
+        let test_field = e.get("test").and_then(|v| v.as_str());
+        match test_field {
+            Some(t) if !t.is_empty() => identity_with_test += 1,
+            _ => identity_gaps.push(name.to_string()),
+        }
+    }
+    let behavior_gated_entries = m5_baselines_json
+        .get("behavior_gated")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let behavior_total = behavior_gated_entries.len();
+    let stage_5_ok = identity_gaps.is_empty() && behavior_total == 6;
+    if !stage_5_ok {
+        if !identity_gaps.is_empty() {
+            eprintln!(
+                "  baselines integrity: {} identity_gated entries lack test: field — {}",
+                identity_gaps.len(),
+                identity_gaps.join(", ")
+            );
+        }
+        if behavior_total != 6 {
+            eprintln!(
+                "  baselines integrity: behavior_gated count {} != expected 6 from M5.0",
+                behavior_total
+            );
+        }
+    }
+
+    // ---- Bundle rollup ----
+    let bundle_status = stage_1_ok && stage_2_ok && stage_3_ok && stage_4_ok && stage_5_ok;
+    let any_warn = stage_1_warn || stage_3_warn;
+    let bundle_path = out_dir.join("bundle.json");
+    let bundle = build_m5_acceptance_bundle_json(M5AcceptanceBundleArgs {
+        project_a,
+        frames,
+        stage_1_ok,
+        stage_1_warn,
+        stage_2_ok,
+        stage_3_ok,
+        stage_3_warn,
+        stage_4_ok,
+        stage_5_ok,
+        bundle_status,
+        any_warn,
+        m4_bundle_path: &m4_bundle_path,
+        m4_status: &m4_status,
+        documentary_total,
+        m5_2_count,
+        m5_4_count,
+        has_summary,
+        has_hypothesis,
+        has_m6_sketch,
+        identity_total,
+        identity_with_test,
+        identity_gaps: &identity_gaps,
+        behavior_total,
+        stage_status: &stage_status,
+    });
+    write_json(&bundle_path, &bundle)?;
+
+    let bundle_label = if !bundle_status {
+        "error"
+    } else if any_warn {
+        "warn"
+    } else {
+        "ok"
+    };
+    eprintln!("m5-acceptance: project_a={}", project_a.display());
+    eprintln!(
+        "  stage_1_m4_regression: {} (M4 propagates warn = M4.2 outcome 3)",
+        stage_status(stage_1_ok, stage_1_warn)
+    );
+    eprintln!(
+        "  stage_2_native_rate_harness_verification: {}",
+        stage_status(stage_2_ok, false)
+    );
+    eprintln!(
+        "  stage_3_characterization_documentary_integrity: {}",
+        stage_status(stage_3_ok, stage_3_warn)
+    );
+    eprintln!(
+        "  stage_4_m5_4_spike_state: {}",
+        stage_status(stage_4_ok, false)
+    );
+    eprintln!(
+        "  stage_5_baselines_integrity: {}",
+        stage_status(stage_5_ok, false)
+    );
+    eprintln!("  bundle.status: {bundle_label}");
+    eprintln!("  -> {}", bundle_path.display());
+    let _ = oracle; // oracle passed through to m4-acceptance subprocess
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+struct M5AcceptanceBundleArgs<'a> {
+    project_a: &'a Path,
+    frames: u32,
+    stage_1_ok: bool,
+    stage_1_warn: bool,
+    stage_2_ok: bool,
+    stage_3_ok: bool,
+    stage_3_warn: bool,
+    stage_4_ok: bool,
+    stage_5_ok: bool,
+    bundle_status: bool,
+    any_warn: bool,
+    m4_bundle_path: &'a Path,
+    m4_status: &'a str,
+    documentary_total: usize,
+    m5_2_count: usize,
+    m5_4_count: usize,
+    has_summary: bool,
+    has_hypothesis: bool,
+    has_m6_sketch: bool,
+    identity_total: usize,
+    identity_with_test: usize,
+    identity_gaps: &'a [String],
+    behavior_total: usize,
+    stage_status: &'a dyn Fn(bool, bool) -> &'static str,
+}
+
+fn build_m5_acceptance_bundle_json(a: M5AcceptanceBundleArgs<'_>) -> serde_json::Value {
+    use serde_json::Value;
+    let s = a.stage_status;
+
+    let mut stage_1 = serde_json::Map::new();
+    stage_1.insert(
+        "status".into(),
+        Value::from(s(a.stage_1_ok, a.stage_1_warn)),
+    );
+    stage_1.insert(
+        "m4_bundle_path".into(),
+        Value::from(a.m4_bundle_path.display().to_string()),
+    );
+    stage_1.insert("m4_bundle_status".into(), Value::from(a.m4_status));
+    stage_1.insert("_note".into(), Value::from("M4 acceptance bundle status propagates: ok | warn (M4.2 outcome 3: alignment_valid=false expected) | error. warn carries through M5 unchanged — M5.2 confirmed the M4.2 numbers are byte-identical under verified unity pitch."));
+
+    let mut stage_2 = serde_json::Map::new();
+    stage_2.insert("status".into(), Value::from(s(a.stage_2_ok, false)));
+    stage_2.insert("test_filter".into(), Value::from("pitch_register"));
+    stage_2.insert("contract_pitch_register".into(), Value::from(0x1000));
+    stage_2.insert("canonical_signal_count".into(), Value::from(9));
+    stage_2.insert("_note".into(), Value::from("M5.1 native-rate harness contract per SPEC §10.11: pitch_register == 0x1000 for every M3.5 canonical signal. Runtime guard test (pitch_register_equals_4096_for_native_rate_signals) drives each signal through build_voice_setup_table and asserts the encoded bytes. M5.0 fixture-pin test (m5_pitch_register_constant_pinned_at_4096) asserts the baselines/m5.json literal. Stage fails only if the M2.7 voice-setup path silently regressed — a critical event."));
+
+    let mut stage_3 = serde_json::Map::new();
+    stage_3.insert(
+        "status".into(),
+        Value::from(s(a.stage_3_ok, a.stage_3_warn)),
+    );
+    stage_3.insert("documentary_total".into(), Value::from(a.documentary_total));
+    stage_3.insert("m5_2_entry_count".into(), Value::from(a.m5_2_count));
+    stage_3.insert("m5_4_entry_count".into(), Value::from(a.m5_4_count));
+    stage_3.insert(
+        "has_m5_2_characterization_summary".into(),
+        Value::from(a.has_summary),
+    );
+    stage_3.insert(
+        "has_m5_2_residual_divergence_hypothesis".into(),
+        Value::from(a.has_hypothesis),
+    );
+    stage_3.insert(
+        "has_m5_4_source_domain_attenuation_m6_sketch".into(),
+        Value::from(a.has_m6_sketch),
+    );
+    stage_3.insert("_note".into(), Value::from("M5.2 documentary documentary_snapshot integrity check: 74 M5_2_* entries (8 fields × 9 signals + CHARACTERIZATION_SUMMARY + RESIDUAL_DIVERGENCE_HYPOTHESIS) + 3 M5_4_* entries (WIDER_BEAM_HIGH_NOISE_CLUSTER + ALT_SHIFT_OBJECTIVE_HARMONIC_16 + SOURCE_DOMAIN_ATTENUATION_M6_SKETCH). Count drift → warn (documentary entries may shift with future passes). Sentinel-entry absence → fail."));
+
+    let mut stage_4 = serde_json::Map::new();
+    stage_4.insert("status".into(), Value::from(s(a.stage_4_ok, false)));
+    stage_4.insert("test_filter".into(), Value::from("m4_4_spike_ m5_4_"));
+    stage_4.insert("_note".into(), Value::from("M5.4 spike state: encode_looped_m4_4_spike (beam search) and encode_looped_m5_4_alt_shift_spike (alt-shift objective) are feature-flagged and not wired into production render_to_brr. Tests verify decode-roundtrip clean, determinism, loop_click no-worsening, AND production byte-identity via m5_4_alt_shift_peak_then_sum_sq_matches_production_path. If production encoder was modified, this stage flags it."));
+
+    let mut stage_5 = serde_json::Map::new();
+    stage_5.insert("status".into(), Value::from(s(a.stage_5_ok, false)));
+    stage_5.insert("identity_gated_total".into(), Value::from(a.identity_total));
+    stage_5.insert(
+        "identity_gated_with_test_field".into(),
+        Value::from(a.identity_with_test),
+    );
+    let gaps_array: Vec<Value> = a
+        .identity_gaps
+        .iter()
+        .map(|x| Value::from(x.as_str()))
+        .collect();
+    stage_5.insert("identity_gated_gaps".into(), Value::Array(gaps_array));
+    stage_5.insert("behavior_gated_total".into(), Value::from(a.behavior_total));
+    stage_5.insert("behavior_gated_expected".into(), Value::from(6));
+    stage_5.insert("_note".into(), Value::from("M2.8.1 / M3.8 / M4.7 pattern: every identity_gated entry must carry a non-null test: field. M5 identity_gated is empty by design (M5 was methodology research per consultant M5 plan #10; no new identity surfaces); behavior_gated holds 6 M5.0 contract entries (pitch register harness constant, methodology repair budget, reliable alignment threshold inheritance, pre-emphasis filter form constraint, atom PCM stability held, runtime budget)."));
+
+    let mut bundle_inner = serde_json::Map::new();
+    let bundle_status_str = if !a.bundle_status {
+        "error"
+    } else if a.any_warn {
+        "warn"
+    } else {
+        "ok"
+    };
+    bundle_inner.insert("status".into(), Value::from(bundle_status_str));
+
+    let mut bundle = serde_json::Map::new();
+    bundle.insert("schema_version".into(), Value::from(SCHEMA_VERSION));
+    bundle.insert("report_type".into(), Value::from("m5_acceptance_bundle"));
+    bundle.insert(
+        "project_a".into(),
+        Value::from(a.project_a.display().to_string()),
+    );
+    bundle.insert("frames".into(), Value::from(a.frames));
+    bundle.insert("stage_1_m4_regression".into(), Value::Object(stage_1));
+    bundle.insert(
+        "stage_2_native_rate_harness_verification".into(),
+        Value::Object(stage_2),
+    );
+    bundle.insert(
+        "stage_3_characterization_documentary_integrity".into(),
+        Value::Object(stage_3),
+    );
+    bundle.insert("stage_4_m5_4_spike_state".into(), Value::Object(stage_4));
     bundle.insert("stage_5_baselines_integrity".into(), Value::Object(stage_5));
     bundle.insert("bundle".into(), Value::Object(bundle_inner));
     Value::Object(bundle)
