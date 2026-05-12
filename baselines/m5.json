@@ -615,6 +615,185 @@
       "kind": "investigation_result",
       "snapshot_at": "M5.2",
       "_note": "M5.2 Phase E adopted Path 1 (inferential closure) per the M5.1 STATUS three-way-comparison-deferred argument: every M3.5 canonical atom sets render.force_filter_0_loop_entry = true (core::characterize_gaussian::atom_base line 69). Filter 0 BRR blocks contain no prior-sample predictor term, so the BRR decoder state is reset at every loop boundary. Within a cycle iteration the decoder state evolves through filters 0-3; at the loop wrap, filter 0 on block 0 zeroes that state again. The PCM output of cycle N+1 is therefore byte-identical to cycle N. Consequence: a three-way comparison of (1) host raw decode tiled (no state-carry) vs (2) host raw decode with predictor-state-carry across loop iterations vs (3) snes_spc oracle render reduces to a two-way comparison, because (1) and (2) produce identical PCM for these atoms. The remaining candidate cause for the (1)/(2)-vs-(3) divergence narrows to the S-DSP gaussian 4-tap kernel non-impulse response at unity pitch -- even at pitch_register = 0x1000 (step = 1.0 exactly), the DSP's gaussian kernel applies non-impulse weights at integer offsets. This hypothesis is locked as the M5.2 investigation outcome; empirical confirmation via implementation of the state-carrying decode helper is deferred to M6+ as ~30-line work whose result is predictable from the algebraic argument. M5.2.1 correction budget NOT burned -- no clear-cause implementation fix exists (the methodology limitation is structural under the current comparison-surface design). Mechanism correction history: M4.2 Phase C originally diagnosed fractional pitch stepping; SPEC section 10.11 motivation (M5.1 commit 900f6ad) retracted that diagnosis after preflight verified pitch_register was already 0x1000 since M2.7 via core::voice_setup."
+    },
+    {
+      "name": "M5_4_WIDER_BEAM_HIGH_NOISE_CLUSTER",
+      "value": {
+        "beam_width_8": {
+          "MAX_AMPLITUDE_NO_NORMALIZE": {
+            "peak_abs_raw_vs_source": 18431,
+            "rms_raw_vs_source": 10558.596,
+            "snr_db": 6.41,
+            "peak_delta_pct_vs_m4_3": 0.0,
+            "rms_delta_pct_vs_m4_3": -0.17,
+            "snr_delta_db_vs_m4_3": 0.015,
+            "runtime_ms": 16.75
+          },
+          "NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY": {
+            "peak_abs_raw_vs_source": 18431,
+            "rms_raw_vs_source": 10562.454,
+            "snr_db": 6.333,
+            "peak_delta_pct_vs_m4_3": 0.0,
+            "rms_delta_pct_vs_m4_3": 0.0,
+            "snr_delta_db_vs_m4_3": 0.0,
+            "runtime_ms": 15.96
+          },
+          "HARMONIC_16_CYCLE_64": {
+            "peak_abs_raw_vs_source": 18431,
+            "rms_raw_vs_source": 12329.887,
+            "snr_db": 5.479,
+            "peak_delta_pct_vs_m4_3": 0.0,
+            "rms_delta_pct_vs_m4_3": 0.0,
+            "snr_delta_db_vs_m4_3": 0.0,
+            "runtime_ms": 2.96
+          },
+          "ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8": {
+            "peak_abs_raw_vs_source": 18431,
+            "rms_raw_vs_source": 4569.608,
+            "snr_db": 7.414,
+            "peak_delta_pct_vs_m4_3": 0.0,
+            "rms_delta_pct_vs_m4_3": -0.1,
+            "snr_delta_db_vs_m4_3": 0.009,
+            "runtime_ms": 15.92
+          }
+        },
+        "beam_width_16": {
+          "MAX_AMPLITUDE_NO_NORMALIZE": {
+            "peak_abs_raw_vs_source": 18431,
+            "rms_raw_vs_source": 10558.596,
+            "snr_db": 6.41,
+            "peak_delta_pct_vs_m4_3": 0.0,
+            "rms_delta_pct_vs_m4_3": -0.17,
+            "snr_delta_db_vs_m4_3": 0.015,
+            "runtime_ms": 31.03
+          },
+          "NORMALIZE_FALSE_MULTI_PARTIAL_CLAMP_SAFETY": {
+            "peak_abs_raw_vs_source": 18431,
+            "rms_raw_vs_source": 10562.454,
+            "snr_db": 6.333,
+            "peak_delta_pct_vs_m4_3": 0.0,
+            "rms_delta_pct_vs_m4_3": 0.0,
+            "snr_delta_db_vs_m4_3": 0.0,
+            "runtime_ms": 31.45
+          },
+          "HARMONIC_16_CYCLE_64": {
+            "peak_abs_raw_vs_source": 18431,
+            "rms_raw_vs_source": 12329.887,
+            "snr_db": 5.479,
+            "peak_delta_pct_vs_m4_3": 0.0,
+            "rms_delta_pct_vs_m4_3": 0.0,
+            "snr_delta_db_vs_m4_3": 0.0,
+            "runtime_ms": 5.75
+          },
+          "ALL_8_PARTIALS_MAX_AMP_HARMONICS_1_TO_8": {
+            "peak_abs_raw_vs_source": 18431,
+            "rms_raw_vs_source": 4569.608,
+            "snr_db": 7.414,
+            "peak_delta_pct_vs_m4_3": 0.0,
+            "rms_delta_pct_vs_m4_3": -0.1,
+            "snr_delta_db_vs_m4_3": 0.009,
+            "runtime_ms": 31.28
+          }
+        },
+        "summary": {
+          "ceiling_peak_abs": 18431,
+          "max_rms_improvement_pct": 0.17,
+          "max_snr_improvement_db": 0.015,
+          "max_peak_improvement_pct": 0.0,
+          "exit_criterion_threshold_pct": 10.0,
+          "any_combination_clears_exit_criterion": false,
+          "consultant_audit_2_confirmed": true
+        }
+      },
+      "kind": "wider_beam_benchmark",
+      "snapshot_at": "M5.4",
+      "_note": "Ignored benchmark per consultant M4.4 audit #6 — scientific closure, not a release path. Test: core/tests/m5_4_wider_beam_high_noise_cluster.rs::m5_4_wider_beam_high_noise_cluster (#[ignore]; run via `cargo test --release --test m5_4_wider_beam_high_noise_cluster -- --ignored --nocapture`). Empirical result: all 8 (fixture × width) combinations stay at peak_abs_raw_vs_source = 18431; max rms improvement is 0.17% on MAX_AMPLITUDE_NO_NORMALIZE; max snr improvement is 0.015 dB. None come close to the SPEC §24.1 10% exit-criterion threshold. Consultant M4.4 audit #2 structural-ceiling claim confirmed empirically — the i16::MAX − (7 << 12 >> 1) = 18431 ceiling is structural at the current-sample term and wider beam exploration does not unlock predictor paths around it within M5 scope."
+    },
+    {
+      "name": "M5_4_ALT_SHIFT_OBJECTIVE_HARMONIC_16",
+      "value": {
+        "control_PeakThenSumSq": {
+          "peak_abs_raw_vs_source": 18431,
+          "rms_raw_vs_source": 12329.887,
+          "snr_db": 5.479,
+          "clipping_count_raw": 0,
+          "peak_delta_pct_vs_m4_3": 0.0,
+          "rms_delta_pct_vs_m4_3": 0.0,
+          "snr_delta_db_vs_m4_3": 0.0
+        },
+        "treatment_RmsThenPeak": {
+          "peak_abs_raw_vs_source": 18431,
+          "rms_raw_vs_source": 12329.887,
+          "snr_db": 5.479,
+          "clipping_count_raw": 0,
+          "peak_delta_pct_vs_m4_3": 0.0,
+          "rms_delta_pct_vs_m4_3": 0.0,
+          "snr_delta_db_vs_m4_3": 0.0
+        },
+        "delta_treatment_minus_control": {
+          "peak_delta": 0,
+          "rms_delta": 0.0,
+          "snr_delta_db": 0.0,
+          "clipping_delta": 0
+        },
+        "consultant_audit_7_confirmed": true,
+        "falsified_at_m5_scale": false
+      },
+      "kind": "alt_shift_benchmark",
+      "snapshot_at": "M5.4",
+      "_note": "Documentary single-fixture spike per consultant M4.4 audit #7. Test: core/tests/m5_4_alt_shift_objective_spike.rs::m5_4_alt_shift_objective_harmonic_16 (#[ignore]; run via `cargo test --release --test m5_4_alt_shift_objective_spike -- --ignored --nocapture`). Treatment (RmsThenPeak) is BYTE-IDENTICAL to control (PeakThenSumSq) on HARMONIC_16_CYCLE_64 across all three metrics — same peak (18431), same rms (12329.887), same snr_db (5.479), zero clipping. The 14336 ceiling is the dominant constraint at the per-block (filter, shift) grid; the lex tiebreak between peak and sum_sq doesn't unlock a different choice because the shift that minimizes peak also minimizes sum_sq under that ceiling. Consultant M4.4 audit #7 prediction empirically confirmed — alt-shift-objective does not clear the M4.4 exit criterion at M5 scale. M6+ wider investigation (additional fixtures, fundamentally different shift selection) deferred per the M5.4 brief documentary-investigation posture."
+    },
+    {
+      "name": "M5_4_SOURCE_DOMAIN_ATTENUATION_M6_SKETCH",
+      "value": {
+        "hypothesis": "Source-domain attenuation reducing atom PCM peaks to below ±14336 would eliminate the M4.4 18431-peak-error ceiling for high-noise cluster fixtures.",
+        "mechanism_candidates": [
+          {
+            "name": "soft_cap_at_14336",
+            "description": "Pre-encode atom PCM through a soft saturation curve that compresses peaks above 14336 into ±14336. Preserves transient character of low-amplitude signal regions; tapers high-amplitude regions."
+          },
+          {
+            "name": "per_atom_amplitude_scaling",
+            "description": "Default atom amplitude lowered such that peaks stay below 14336. Equivalent to global -3 to -6 dB attenuation, recoverable in DSP via voice volume."
+          },
+          {
+            "name": "spectral_shaping_source_side",
+            "description": "Pre-emphasis-style filter (NOT the M3.6/M4.5 pre-emphasis presets, which are encoder-side transient transformations per SPEC §10.9; this is source-side render-formula change) that redistributes peak energy."
+          }
+        ],
+        "cost": {
+          "breaks_section_16_9_stability": true,
+          "amendment_procedure": "SPEC §16.9.1 (M5.0 forward visibility, NOT activated)",
+          "identity_baselines_retired": 11,
+          "identity_baselines_to_pin": 11,
+          "acceptance_reruns_required": [
+            "M2",
+            "M3",
+            "M4"
+          ],
+          "release_note_warning_required": "BREAKING: render formula amended",
+          "consultant_closeout_audit_required": true
+        },
+        "benefit_estimate": {
+          "peak_abs_change": "18431 → ~0 for the 4 high-noise cluster fixtures if peaks compress to ±14336 cleanly",
+          "snr_db_improvement_estimate": "~50% for high-noise cluster",
+          "low_noise_cluster_impact": "No change — canonical sines at amplitude=0.75 have peaks ~24575 above 14336 but their per-block error is below the ceiling at the current shift selection"
+        },
+        "risk": {
+          "audibility": "Source-domain attenuation may shift atoms' perceptual character. User audition required per the M3.6-deferred lesson (consultant M3.5 audit #11).",
+          "compatibility": "Any project that depends on current atom PCM byte-identity (saved .sfcproj fixtures pre-M6 amendment) breaks. User-facing breaking change.",
+          "m2_acceptance_voice_volume_compensation": "Voice volume compensation must preserve M2 audibility gates. If voice volume can't compensate for -3 to -6 dB attenuation without exceeding the silence ceiling, the amendment is non-viable."
+        },
+        "m5_disposition": "Defer to M6+ for explicit PM authorization. M5.4 documents the sketch; no implementation in M5. Per SPEC §16.9.1 procedure: authorization gate → old-SHA retirement → new-SHA pinning → M2/M3/M4 acceptance regression → release-note warning → close-out audit.",
+        "alternative_paths_outside_section_16_9": [
+          "BRR shift 13-15 extension (outside current SPEC; M6+ or M7+)",
+          "Pre-emphasis preset (M5.2 outcome: methodology_unresolved; deferred to M6+)"
+        ],
+        "consultant_attribution": "M4.4 audit #13; SPEC §16.9.1 (M5.0)"
+      },
+      "kind": "m6_plus_scope_sketch",
+      "snapshot_at": "M5.4",
+      "_note": "Per consultant M4.4 audit #13, productive future work on the BRR noise floor must operate before encoding [source-domain preprocessing requires §16.9 amendment] OR via pre-emphasis [gated on methodology resolution; M5.2 outcome was unresolved, so pre-emphasis permanently defers] OR outside current SPEC [BRR shift 13+ extension]. This entry sketches the §16.9 amendment path as forward-visibility documentation per SPEC §16.9.1 (M5.0; NOT activated). M5 trajectory at M5.4: M5.3 skipped, M5.4 produces no production change, M5.5 GUI/schema polish next, M5.6 acceptance + release-tag v0.5-rc1. The §16.9 amendment activation requires a dedicated M6+ milestone with explicit PM authorization at the brief level."
     }
   ],
   "retired": []
